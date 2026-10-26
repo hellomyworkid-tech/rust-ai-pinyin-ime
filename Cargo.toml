@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ime-lexicon",
+    "crates/ime-core",
+    "crates/ime-ai",
+    "crates/ime-playground",
+    "crates/ime-tsf-win",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Rust AI Pinyin IME Contributors"]
+repository = "https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+memmap2 = "0.9"
+thiserror = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

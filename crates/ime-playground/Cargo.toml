@@ -1,0 +1,12 @@
+[package]
+name = "ime-playground"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ime-lexicon = { path = "../ime-lexicon" }
+ime-core = { path = "../ime-core" }
+ime-ai = { path = "../ime-ai" }
+serde.workspace = true
+serde_json.workspace = true

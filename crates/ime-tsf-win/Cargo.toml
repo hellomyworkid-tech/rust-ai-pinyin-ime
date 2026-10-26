@@ -1,0 +1,28 @@
+[package]
+name = "ime-tsf-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ime_tsf_win"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "ime-desktop-ui"
+path = "src/bin/ime_desktop_ui.rs"
+
+[[bin]]
+name = "ime-global-service"
+path = "src/bin/ime_global_service.rs"
+
+[[bin]]
+name = "ime-installer"
+path = "src/bin/ime_installer.rs"
+
+[dependencies]
+ime-lexicon = { path = "../ime-lexicon" }
+ime-core = { path = "../ime-core" }
+ime-ai = { path = "../ime-ai" }
+serde.workspace = true
+serde_json.workspace = true

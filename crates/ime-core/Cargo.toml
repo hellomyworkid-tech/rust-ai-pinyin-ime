@@ -1,0 +1,10 @@
+[package]
+name = "ime-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ime-lexicon = { path = "../ime-lexicon" }
+serde.workspace = true
+serde_json.workspace = true

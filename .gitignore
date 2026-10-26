@@ -1,0 +1,31 @@
+# Rust 构建产物
+/target/
+**/*.rs.bk
+*.pdb
+
+# 本机专用 Cargo 配置（可能包含个人路径），参考 .cargo/config.toml.example
+/.cargo/config.toml
+
+# 预编译程序与发布产物（通过 GitHub Releases 分发）
+/dist/
+/release/
+/*.exe
+/*.dll
+/*.zip
+
+# 体积较大的词库：原始词表由 scripts/sync_open_lexicons.ps1 下载，二进制词库由 lexicon-builder 生成
+/data/raw/
+/data/compiled/
+
+# 运行时个人数据（个人词频记忆、配置、API Key 等均保存在 %LOCALAPPDATA%\RustAiPinyinIME，不应出现在仓库中）
+user_dict*.json
+ime_config*.json
+*.log
+
+# 编辑器 / 系统文件
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store

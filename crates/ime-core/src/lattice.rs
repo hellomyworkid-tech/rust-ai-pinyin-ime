@@ -1,0 +1,397 @@
+//! `lattice`: 中英统一音形晶格图（Unified Bilingual Lattice / DAG）
+//!
+//! 将中文多字词、单字、简拼、词典规范大小写英文词、以及大写/音系违规触发的原样英文片段
+//! 统一建模在同一张有向无环图（DAG）中，实现零 Shift 键的丝滑中英混输。
+
+use crate::pinyin::{extract_syllable_spans, FuzzyPinyinConfig, PhonotacticDetector, ShuangpinScheme, SyllableSpan};
+use ime_lexicon::{CompiledLexicon, DomainTag};
+use serde::{Deserialize, Serialize};
+
+/// 晶格图中边的类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EdgeKind {
+    /// 多音节中文词条（如 `bu'zai'yi'le` -> `"不在意了"`）
+    ChineseWord,
+    /// 单音节汉字（如 `wo` -> `"我"`）
+    ChineseChar,
+    /// 首字母简拼词条（如 `jsj` -> `"计算机"`, `bg` -> `"变更"`）
+    AbbrevPinyin,
+    /// 命中英文词库的规范大小写单词（如 `rust` -> `"Rust"`, `api` -> `"API"`, `github` -> `"GitHub"`）
+    EnglishWord,
+    /// 英文前缀自动补全（如 `typesc` -> `"TypeScript"`）
+    EnglishPrefixCompletion,
+    /// 大写字母引导或音系学违规触发的原样英文片段
+    EnglishRaw,
+}
+
+/// 晶格图中的有向边 `(start -> end)`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatticeEdge {
+    pub start: usize,
+    pub end: usize,
+    /// 候选上屏词文本
+    pub text: String,
+    /// 对应的拼音或英文键说明（用于 UI 预编辑展示与调试）
+    pub code_key: String,
+    /// 边的类型
+    pub kind: EdgeKind,
+    /// 词条静态基础负对数代价（越小越优先）
+    pub base_cost: f32,
+    /// 垂直领域标签
+    pub domain: DomainTag,
+    /// 覆盖的中文音节数量（英文词视为 1 个完整语义单元）
+    pub syllable_count: usize,
+    /// 是否由模糊音或拼写纠错产生
+    #[serde(default)]
+    pub is_fuzzy: bool,
+}
+
+/// 针对输入字符串构建的中英统一有向无环图
+#[derive(Debug, Clone)]
+pub struct BilingualLattice {
+    pub input: String,
+    /// `edges_from[i]` 存储所有从字符下标 `i` 出发的候选边
+    pub edges_from: Vec<Vec<LatticeEdge>>,
+}
+
+impl BilingualLattice {
+    /// 构建中英统一晶格图
+    pub fn build(
+        input: &str,
+        lexicon: &CompiledLexicon,
+        fuzzy: &FuzzyPinyinConfig,
+        shuangpin: ShuangpinScheme,
+    ) -> Self {
+        let n = input.len();
+        let mut edges_from: Vec<Vec<LatticeEdge>> = vec![Vec::new(); n + 1];
+        if n == 0 {
+            return Self {
+                input: String::new(),
+                edges_from,
+            };
+        }
+
+        // 1. 提取所有合法的全拼/模糊音/双拼/单字母简拼音节步
+        let spans = extract_syllable_spans(input, fuzzy, shuangpin);
+        let mut spans_at: Vec<Vec<&SyllableSpan>> = vec![Vec::new(); n + 1];
+        for sp in &spans {
+            if !sp.is_abbrev {
+                spans_at[sp.start].push(sp);
+            }
+        }
+
+        // 2. 基于 Trie 节点增量游走的零拷贝 DFS：枚举从位置 i 出发的 1~6 个连续中文音节路径，无前缀时立即剪枝
+        for start_pos in 0..n {
+            if spans_at[start_pos].is_empty() {
+                continue;
+            }
+            collect_chinese_edges(
+                start_pos,
+                start_pos,
+                0,
+                0,
+                0.0,
+                input,
+                &spans_at,
+                lexicon,
+                &mut edges_from[start_pos],
+            );
+        }
+
+        // 3. 扫描首字母简拼前缀树 (`abbrev_trie`)，支持如 `jsj` -> `计算机`, `bg` -> `报告/变更`
+        for start_pos in 0..n {
+            let suffix = &input[start_pos..];
+            if !suffix.as_bytes()[0].is_ascii_lowercase() {
+                continue;
+            }
+            for (matched_len, entry_ids) in lexicon.abbrev_trie.common_prefix_search(suffix) {
+                let end_pos = start_pos + matched_len;
+                // 简拼只在长度 >= 2 时启用
+                if matched_len < 2 {
+                    continue;
+                }
+                // 如果该段本身已是单个完整合法音节（例如 `de`, `le`, `shi`），跳过 2 字母简拼干扰
+                let span_str = &input[start_pos..end_pos];
+                let is_single_full_syl = crate::pinyin::is_valid_syllable(span_str);
+                let is_whole_input = start_pos == 0 && end_pos == n;
+
+                // 关键规则：只有当用户整串输入本身就是简拼（如单独打 `rgzn` / `jsj`）时才给予低惩罚；
+                // 若在长句中间（如 `...xiankayijiamddecpushang`），严禁 4 字母简拼 `mdde`（没到点儿）抢夺 `amd + de`！
+                if !is_whole_input && n > 6 {
+                    continue;
+                }
+
+                let abbrev_penalty = if is_single_full_syl {
+                    4.2
+                } else if is_whole_input {
+                    1.6 + (matched_len as f32) * 0.25
+                } else {
+                    6.8 + (matched_len as f32) * 1.8
+                };
+
+                for &id in entry_ids.iter().take(6) {
+                    let entry = &lexicon.entries[id as usize];
+                    edges_from[start_pos].push(LatticeEdge {
+                        start: start_pos,
+                        end: end_pos,
+                        text: entry.text.clone(),
+                        code_key: entry.syllable_key.clone(),
+                        kind: EdgeKind::AbbrevPinyin,
+                        base_cost: entry.cost + abbrev_penalty,
+                        domain: entry.domain,
+                        syllable_count: entry.pinyin_syllables.len(),
+                        is_fuzzy: false,
+                    });
+                }
+            }
+        }
+
+        // 4. 扫描英文与程序员规范词库 (`english_trie`)，实现无空格中英混输
+        let detector = PhonotacticDetector::global();
+        let lower_input = input.to_ascii_lowercase();
+
+        for start_pos in 0..n {
+            let lower_suffix = &lower_input[start_pos..];
+            let orig_suffix = &input[start_pos..];
+            if !orig_suffix.as_bytes()[0].is_ascii_alphabetic() {
+                continue;
+            }
+
+            let starts_with_upper = orig_suffix.as_bytes()[0].is_ascii_uppercase();
+
+            // 4.1 精确前缀匹配词典中的英文词（如 `rust`, `api`, `github`, `open`, `source`, `bug`）
+            for (matched_len, entry_ids) in lexicon.english_trie.common_prefix_search(lower_suffix) {
+                let end_pos = start_pos + matched_len;
+                let raw_slice = &input[start_pos..end_pos];
+                let cluster_score = detector.english_cluster_score(raw_slice);
+
+                // 如果该英文词包含非拼音辅音簇（如 `rust` 含 `st`、`python` 含 `th`、`github` 含 `th/hb`）
+                // 或以大写字母引导，则给予强力的音系学英文奖励，使其在长句混输中击败碎片化拼音
+                let phonotactic_bonus = (cluster_score * 0.85).min(3.2)
+                    + if starts_with_upper { 2.5 } else { 0.0 };
+
+                // 短英文词（2~3字母如 `ai`, `ui`, `ok`, `api`, `bug`, `app`）在长句中间若完全符合合法拼音，需略微克制，交由 Bigram 或场景提权决胜
+                let short_overlap_penalty = if matched_len <= 2 && !starts_with_upper && n > 2 {
+                    2.6
+                } else if matched_len == 3 && cluster_score == 0.0 && !starts_with_upper && n > 3 {
+                    0.85
+                } else {
+                    0.0
+                };
+
+                for &id in entry_ids.iter().take(4) {
+                    let entry = &lexicon.entries[id as usize];
+                    edges_from[start_pos].push(LatticeEdge {
+                        start: start_pos,
+                        end: end_pos,
+                        text: entry.text.clone(),
+                        code_key: entry.flat_key.clone(),
+                        kind: EdgeKind::EnglishWord,
+                        base_cost: (entry.cost - phonotactic_bonus + short_overlap_penalty).max(0.2),
+                        domain: entry.domain,
+                        syllable_count: 1,
+                        is_fuzzy: false,
+                    });
+                }
+            }
+
+            // 4.2 句尾长英文前缀自动补全（如输入 `typesc` 自动补全 `TypeScript`）
+            if start_pos == 0 && n >= 4 {
+                let prefix_ids = lexicon.english_trie.prefix_lookup(lower_suffix);
+                for &id in prefix_ids.iter().take(3) {
+                    let entry = &lexicon.entries[id as usize];
+                    if entry.flat_key.len() > n {
+                        edges_from[0].push(LatticeEdge {
+                            start: 0,
+                            end: n,
+                            text: entry.text.clone(),
+                            code_key: entry.flat_key.clone(),
+                            kind: EdgeKind::EnglishPrefixCompletion,
+                            base_cost: entry.cost + 1.5,
+                            domain: entry.domain,
+                            syllable_count: 1,
+                            is_fuzzy: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 5. 大写字母引导的驼峰/原样英文 Token 或未知字符兜底边
+        for start_pos in 0..n {
+            let bytes = input.as_bytes();
+            if bytes[start_pos] == b'\'' {
+                // 显式分词符单步跳过
+                edges_from[start_pos].push(LatticeEdge {
+                    start: start_pos,
+                    end: start_pos + 1,
+                    text: String::new(),
+                    code_key: "'".to_string(),
+                    kind: EdgeKind::EnglishRaw,
+                    base_cost: 0.0,
+                    domain: DomainTag::General,
+                    syllable_count: 0,
+                    is_fuzzy: false,
+                });
+                continue;
+            }
+
+            if bytes[start_pos].is_ascii_uppercase() {
+                let mut end_pos = start_pos + 1;
+                while end_pos < n && bytes[end_pos].is_ascii_alphanumeric() {
+                    end_pos += 1;
+                }
+                let raw_token = &input[start_pos..end_pos];
+                edges_from[start_pos].push(LatticeEdge {
+                    start: start_pos,
+                    end: end_pos,
+                    text: raw_token.to_string(),
+                    code_key: raw_token.to_string(),
+                    kind: EdgeKind::EnglishRaw,
+                    base_cost: 4.5,
+                    domain: DomainTag::Tech,
+                    syllable_count: 1,
+                    is_fuzzy: false,
+                });
+            }
+
+            // 保证图在任意位置至少有一条单字符推进边（防止死路）
+            if edges_from[start_pos].is_empty() {
+                let ch = input[start_pos..].chars().next().unwrap();
+                let end_pos = start_pos + ch.len_utf8();
+                edges_from[start_pos].push(LatticeEdge {
+                    start: start_pos,
+                    end: end_pos,
+                    text: ch.to_string(),
+                    code_key: ch.to_string(),
+                    kind: EdgeKind::EnglishRaw,
+                    base_cost: 14.0,
+                    domain: DomainTag::General,
+                    syllable_count: 1,
+                    is_fuzzy: false,
+                });
+            }
+        }
+
+        Self {
+            input: input.to_string(),
+            edges_from,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_chinese_edges<'a>(
+    origin_start: usize,
+    curr_pos: usize,
+    curr_trie_node: u32,
+    depth: usize,
+    accum_fuzzy: f32,
+    input: &str,
+    spans_at: &[Vec<&'a SyllableSpan>],
+    lexicon: &CompiledLexicon,
+    out_edges: &mut Vec<LatticeEdge>,
+) {
+    if depth >= 6 || curr_pos >= input.len() {
+        return;
+    }
+
+    // 跳过可选的显式分隔符 `'`
+    let effective_pos = if input.as_bytes()[curr_pos] == b'\'' && depth > 0 {
+        curr_pos + 1
+    } else {
+        curr_pos
+    };
+    if effective_pos >= input.len() {
+        return;
+    }
+
+    // 若不是首个音节，先在 Trie 中走一步分隔符 `'`；若当前节点没有后续音节分支，直接返回
+    let base_node = if depth == 0 {
+        curr_trie_node
+    } else {
+        match lexicon.syllable_trie.advance_node(curr_trie_node, "'") {
+            Some(node) => node,
+            None => return,
+        }
+    };
+
+    let syl_count = depth + 1;
+    let n = input.len();
+    let is_short_single_input = n <= 4;
+    // 长句 (>12 字母) 中单个词最多允许 1 处模糊音/纠错；短词最多允许 2 处
+    let max_fuzzy_for_input = if n > 12 { 1.7 } else { 3.3 };
+
+    for &sp in &spans_at[effective_pos] {
+        let new_fuzzy = accum_fuzzy + sp.fuzzy_penalty;
+        if new_fuzzy > max_fuzzy_for_input {
+            continue;
+        }
+
+        // 在 Trie 上直接推进一个音节，若词库中根本不存在以该音节序列为前缀的词条，立即剪枝！
+        let Some(next_node) = lexicon.syllable_trie.advance_node(base_node, &sp.syllable) else {
+            continue;
+        };
+
+        let hit_ids = &lexicon.syllable_trie.nodes[next_node as usize].exact_entries;
+        if !hit_ids.is_empty() {
+            let take_limit = if syl_count == 1 {
+                if new_fuzzy > 0.0 {
+                    // 长句中绝不用模糊音单字去拼凑碎片；短输入时最多保留前 3 个高频模糊单字
+                    if n > 6 { 0 } else { 3 }
+                } else if n > 6 {
+                    // 长句中每个单音节保留前 4 个最高频单字供整句 Beam Search（逐音节选词时会从 Trie 补齐全部同音字）
+                    4
+                } else {
+                    24
+                }
+            } else if new_fuzzy > 0.0 {
+                if n > 8 { 2 } else { 4 }
+            } else if n > 8 {
+                6
+            } else {
+                12
+            };
+            // 多音节词条的纠错惩罚略打折（完整词比碎片更可信）；
+            // 单音节短输入则适当提高模糊音门槛，让 `si` 的精确字「死/四/思」排在模糊音「是/时」前面
+            let effective_fuzzy = if syl_count >= 2 {
+                new_fuzzy * 0.75
+            } else if is_short_single_input {
+                new_fuzzy * 1.45
+            } else {
+                new_fuzzy
+            };
+
+            for &id in hit_ids.iter().take(take_limit) {
+                let entry = &lexicon.entries[id as usize];
+                out_edges.push(LatticeEdge {
+                    start: origin_start,
+                    end: sp.end,
+                    text: entry.text.clone(),
+                    code_key: entry.syllable_key.clone(),
+                    kind: if syl_count >= 2 {
+                        EdgeKind::ChineseWord
+                    } else {
+                        EdgeKind::ChineseChar
+                    },
+                    base_cost: entry.cost + effective_fuzzy,
+                    domain: entry.domain,
+                    syllable_count: syl_count,
+                    is_fuzzy: new_fuzzy > 0.0,
+                });
+            }
+        }
+
+        collect_chinese_edges(
+            origin_start,
+            sp.end,
+            next_node,
+            syl_count,
+            new_fuzzy,
+            input,
+            spans_at,
+            lexicon,
+            out_edges,
+        );
+    }
+}

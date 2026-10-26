@@ -1,0 +1,15 @@
+[package]
+name = "ime-lexicon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lexicon-builder"
+path = "src/bin/lexicon_builder.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+memmap2.workspace = true
+thiserror.workspace = true

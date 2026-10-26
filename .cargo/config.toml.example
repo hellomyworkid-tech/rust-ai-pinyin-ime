@@ -1,0 +1,7 @@
+# 可选：复制为 .cargo/config.toml 后按需修改。
+#
+# 使用 x86_64-pc-windows-gnu (MinGW) 工具链时，如果仓库路径中包含中文等非 ASCII 字符，
+# ld 的响应文件可能因 UTF-8 / GBK 编码不一致而链接失败。此时可把构建目录指向一个纯英文路径：
+#
+# [build]
+# target-dir = "C:/rust-build/rust-ai-pinyin-ime"

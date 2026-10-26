@@ -1,0 +1,647 @@
+# Rime dictionary - rime_ice.base (雾凇拼音核心精校词库与8105单字种子集)
+# encoding: utf-8
+---
+name: rime_ice.base
+version: "2026.10"
+sort: by_weight
+use_preset_vocabulary: false
+...
+# === 高频核心单字 (8105 规范汉字常用字频) ===
+的	de	850000
+一	yi	520000
+是	shi	490000
+不	bu	450000
+了	le	430000
+在	zai	410000
+人	ren	390000
+有	you	380000
+我	wo	375000
+他	ta	340000
+这	zhe	330000
+个	ge	310000
+们	men	290000
+中	zhong	280000
+来	lai	270000
+上	shang	265000
+大	da	260000
+为	wei	250000
+和	he	245000
+国	guo	240000
+地	di	230000
+到	dao	225000
+以	yi	220000
+说	shuo	215000
+时	shi	210000
+要	yao	205000
+就	jiu	200000
+出	chu	195000
+会	hui	190000
+可	ke	185000
+也	ye	180000
+你	ni	178000
+对	dui	170000
+生	sheng	165000
+能	neng	160000
+而	er	155000
+子	zi	150000
+那	na	148000
+得	de	145000
+于	yu	140000
+着	zhe	138000
+下	xia	135000
+自	zi	130000
+之	zhi	128000
+年	nian	125000
+过	guo	122000
+发	fa	120000
+后	hou	118000
+作	zuo	115000
+里	li	112000
+用	yong	110000
+道	dao	105000
+行	xing	102000
+行	hang	65000
+所	suo	100000
+然	ran	98000
+家	jia	96000
+种	zhong	94000
+事	shi	92000
+成	cheng	90000
+方	fang	88000
+多	duo	86000
+经	jing	85000
+么	me	84000
+去	qu	83000
+法	fa	82000
+学	xue	81000
+如	ru	80000
+都	dou	79000
+同	tong	78000
+现	xian	77000
+当	dang	76000
+没	mei	75000
+动	dong	74000
+面	mian	73000
+起	qi	72000
+看	kan	71000
+定	ding	70000
+天	tian	69000
+分	fen	68000
+还	hai	67000
+进	jin	66000
+好	hao	65000
+小	xiao	64000
+部	bu	63000
+其	qi	62000
+些	xie	61000
+主	zhu	60000
+样	yang	59000
+理	li	58000
+心	xin	57000
+她	ta	56000
+本	ben	55000
+前	qian	54000
+开	kai	53000
+但	dan	52000
+因	yin	51000
+只	zhi	50000
+从	cong	49000
+想	xiang	48500
+实	shi	48000
+日	ri	47000
+军	jun	46000
+者	zhe	45000
+意	yi	44500
+无	wu	44000
+力	li	43000
+它	ta	42000
+与	yu	41000
+长	chang	40500
+长	zhang	35000
+把	ba	40000
+机	ji	39500
+十	shi	39000
+民	min	38500
+第	di	38000
+公	gong	37500
+此	ci	37000
+已	yi	36500
+工	gong	36000
+使	shi	35500
+情	qing	35000
+明	ming	34500
+性	xing	34000
+知	zhi	33500
+全	quan	33000
+三	san	32500
+又	you	32000
+关	guan	31500
+点	dian	310000
+正	zheng	30500
+业	ye	30000
+外	wai	29500
+将	jiang	29000
+两	liang	28500
+高	gao	28000
+间	jian	27500
+由	you	27000
+问	wen	26500
+很	hen	26000
+最	zui	25500
+重	zhong	25000
+重	chong	18000
+并	bing	24500
+物	wu	24000
+手	shou	23500
+应	ying	23000
+战	zhan	22500
+向	xiang	22000
+头	tou	21500
+文	wen	21000
+体	ti	20500
+政	zheng	20000
+美	mei	19500
+相	xiang	19000
+见	jian	18500
+被	bei	18000
+利	li	17500
+什	shen	17000
+二	er	16500
+等	deng	16000
+产	chan	15500
+或	huo	15000
+新	xin	14800
+己	ji	14500
+制	zhi	14200
+身	shen	14000
+果	guo	13800
+加	jia	13500
+西	xi	13200
+斯	si	13000
+月	yue	12800
+话	hua	12600
+合	he	12400
+回	hui	12200
+特	te	12000
+代	dai	11800
+内	nei	11600
+信	xin	11400
+表	biao	11200
+化	hua	11000
+老	lao	10800
+给	gei	10600
+世	shi	10400
+位	wei	10200
+次	ci	10000
+度	du	9800
+门	men	9600
+任	ren	9400
+常	chang	9200
+先	xian	9000
+海	hai	8800
+通	tong	8600
+教	jiao	8400
+儿	er	8200
+原	yuan	8000
+东	dong	7800
+声	sheng	7600
+提	ti	7400
+立	li	7200
+比	bi	7000
+员	yuan	6800
+解	jie	6600
+水	shui	6400
+名	ming	6200
+真	zhen	6000
+论	lun	5800
+处	chu	5600
+走	zou	5400
+义	yi	5200
+各	ge	5000
+入	ru	4900
+几	ji	4800
+口	kou	4700
+认	ren	4600
+条	tiao	4500
+平	ping	4400
+系	xi	4300
+气	qi	4200
+题	ti	4100
+活	huo	4000
+尔	er	3900
+更	geng	3800
+别	bie	3700
+打	da	3600
+女	nv	3500
+变	bian	3400
+四	si	3300
+神	shen	3200
+总	zong	3100
+何	he	3000
+电	dian	2900
+数	shu	2850
+安	an	2800
+少	shao	2750
+报	bao	2700
+才	cai	2650
+结	jie	2600
+反	fan	2550
+受	shou	2500
+目	mu	2450
+太	tai	2400
+量	liang	2350
+再	zai	2300
+感	gan	2250
+建	jian	2200
+务	wu	2150
+做	zuo	165000
+接	jie	2050
+必	bi	2000
+场	chang	19500
+件	jian	19000
+计	ji	18500
+管	guan	18000
+期	qi	17500
+市	shi	17000
+直	zhi	16500
+德	de	16000
+资	zi	15500
+命	ming	15000
+山	shan	14500
+指	zhi	14000
+克	ke	13500
+许	xu	13000
+统	tong	12500
+区	qu	12000
+保	bao	11500
+至	zhi	11000
+队	dui	10500
+形	xing	10000
+社	she	9500
+便	bian	9000
+空	kong	8500
+决	jue	8000
+治	zhi	7500
+展	zhan	7000
+马	ma	6500
+科	ke	6000
+司	si	5800
+五	wu	5600
+基	ji	5500
+眼	yan	5400
+书	shu	5300
+非	fei	5200
+则	ze	5100
+听	ting	5000
+白	bai	4900
+却	que	4800
+界	jie	4700
+达	da	4600
+光	guang	4500
+放	fang	4400
+强	qiang	4300
+即	ji	4200
+像	xiang	4100
+难	nan	4000
+且	qie	3900
+权	quan	3800
+思	si	3700
+王	wang	3600
+象	xiang	3500
+完	wan	3400
+设	she	3300
+式	shi	3200
+色	se	3100
+路	lu	3000
+记	ji	2950
+南	nan	2900
+品	pin	2850
+住	zhu	2800
+求	qiu	2750
+据	ju	2700
+程	cheng	2650
+北	bei	2600
+边	bian	2550
+死	si	2500
+张	zhang	2450
+该	gai	2400
+交	jiao	2350
+规	gui	2300
+万	wan	2250
+取	qu	2200
+拉	la	2150
+格	ge	2100
+望	wang	2050
+觉	jue	2000
+术	shu	1950
+领	ling	1900
+共	gong	1850
+确	que	1800
+传	chuan	1750
+师	shi	1700
+观	guan	1650
+清	qing	1600
+今	jin	1550
+切	qie	1500
+院	yuan	1450
+让	rang	1400
+识	shi	1350
+候	hou	1300
+带	dai	1250
+导	dao	1200
+争	zheng	1150
+运	yun	1100
+笑	xiao	1050
+飞	fei	1000
+风	feng	980
+步	bu	960
+改	gai	940
+收	shou	920
+根	gen	900
+干	gan	880
+造	zao	860
+言	yan	840
+联	lian	820
+持	chi	800
+组	zu	780
+每	mei	760
+济	ji	740
+车	che	720
+亲	qin	700
+极	ji	680
+林	lin	660
+服	fu	640
+快	kuai	620
+办	ban	600
+议	yi	590
+往	wang	580
+元	yuan	570
+英	ying	560
+士	shi	550
+证	zheng	540
+近	jin	530
+失	shi	520
+转	zhuan	510
+夫	fu	500
+令	ling	490
+准	zhun	480
+布	bu	470
+始	shi	460
+怎	zen	450
+呢	ne	440
+存	cun	430
+未	wei	420
+远	yuan	410
+叫	jiao	400
+台	tai	390
+单	dan	380
+影	ying	370
+具	ju	360
+罗	luo	350
+字	zi	340
+爱	ai	330
+击	ji	320
+流	liu	310
+备	bei	300
+兵	bing	290
+连	lian	280
+调	diao	275
+调	tiao	260
+深	shen	270
+商	shang	265
+算	suan	260
+质	zhi	255
+团	tuan	250
+集	ji	245
+百	bai	240
+待	dai	235
+核	he	230
+写	xie	88000
+读	du	42000
+码	ma	38000
+代	dai	45000
+编	bian	36000
+译	yi	28000
+语	yu	45000
+音	yin	42000
+拼	pin	35000
+输	shu	38000
+选	xuan	36000
+词	ci	39000
+库	ku	34000
+模	mo	38000
+型	xing	37000
+智	zhi	36000
+混	hun	25000
+引	yin	29000
+擎	qing	26000
+树	shu	27000
+图	tu	31000
+修	xiu	28000
+复	fu	29000
+下	xia	135000
+载	zai	29000
+项	xiang	35000
+开	kai	53000
+源	yuan	38000
+接	jie	36000
+数	shu	42000
+据	ju	40000
+返	fan	26000
+调	diao	32000
+用	yong	110000
+测	ce	28000
+试	shi	34000
+优	you	36000
+化	hua	42000
+性	xing	48000
+能	neng	160000
+级	ji	32000
+奇	qi	26000
+偶	ou	15000
+乐	le	36000
+乐	yue	22000
+
+# === 雾凇 + 白霜精校核心词库 (含多音字矫正、切分消歧、高频短语) ===
+我们	wo men	280000
+你们	ni men	150000
+他们	ta men	240000
+什么	shen me	260000
+怎么	zen me	180000
+因为	yin wei	190000
+所以	suo yi	175000
+但是	dan shi	210000
+如果	ru guo	185000
+可以	ke yi	290000
+已经	yi jing	205000
+现在	xian zai	220000
+知道	zhi dao	195000
+觉得	jue de	180000
+没有	mei you	270000
+一个	yi ge	310000
+这个	zhe ge	265000
+那个	na ge	175000
+需要	xu yao	190000
+非常	fei chang	165000
+工作	gong zuo	185000
+问题	wen ti	210000
+时候	shi hou	175000
+时间	shi jian	195000
+事件	shi jian	115000
+实践	shi jian	108000
+世间	shi jian	62000
+技术	ji shu	185000
+基数	ji shu	68000
+级数	ji shu	64000
+奇数	ji shu	62000
+记述	ji shu	42000
+计数	ji shu	48000
+不在意	bu zai yi	85000
+不在意了	bu zai yi le	78000
+不再一乐	bu zai yi le	32000
+不再	bu zai	120000
+一乐	yi le	45000
+在意	zai yi	92000
+方案	fang an	135000
+反感	fan gan	82000
+西安	xi an	115000
+先	xian	95000
+喜欢	xi huan	165000
+今天	jin tian	185000
+明天	ming tian	140000
+昨天	zuo tian	125000
+过去	guo qu	135000
+算了	suan le	95000
+棘手	ji shou	68000
+报告	bao gao	125000
+变更	bian geng	78000
+饼干	bing gan	52000
+长大	zhang da	88000
+长短	chang duan	64000
+银行	yin hang	115000
+行业	hang ye	130000
+行走	xing zou	72000
+重要	zhong yao	175000
+重新	chong xin	110000
+音乐	yin yue	120000
+快乐	kuai le	135000
+你好	ni hao	160000
+北京	bei jing	155000
+中国	zhong guo	240000
+世界	shi jie	160000
+朋友	peng you	150000
+学习	xue xi	145000
+研究	yan jiu	140000
+设计	she ji	150000
+实现	shi xian	165000
+支持	zhi chi	170000
+系统	xi tong	185000
+开发	kai fa	175000
+项目	xiang mu	168000
+代码	dai ma	160000
+编程	bian cheng	125000
+接口	jie kou	130000
+数据	shu ju	180000
+模型	mo xing	155000
+算法	suan fa	148000
+架构	jia gou	125000
+性能	xing neng	138000
+星能	xing neng	18000
+优化	you hua	145000
+测试	ce shi	135000
+部署	bu shu	98000
+修复	xiu fu	96000
+调用	diao yong	115000
+返回	fan hui	110000
+组件	zu jian	105000
+模块	mo kuai	102000
+函数	han shu	112000
+变量	bian liang	88000
+类型	lei xing	115000
+结构	jie gou	125000
+结构体	jie gou ti	75000
+编译器	bian yi qi	82000
+输入法	shu ru fa	115000
+拼音	pin yin	110000
+拼音输入法	pin yin shu ru fa	92000
+词库	ci ku	95000
+字库	zi ku	85000
+选词	xuan ci	78000
+混输	hun shu	72000
+中英文	zhong ying wen	88000
+中英文混输	zhong ying wen hun shu	82000
+理解	li jie	145000
+上下文	shang xia wen	92000
+语境	yu jing	84000
+候选	hou xuan	76000
+候选词	hou xuan ci	82000
+智能	zhi neng	140000
+人工智能	ren gong zhi neng	135000
+大模型	da mo xing	128000
+大语言模型	da yu yan mo xing	110000
+计算机	ji suan ji	135000
+微积分	wei ji fen	68000
+傅里叶	fu li ye	58000
+傅里叶级数	fu li ye ji shu	62000
+泰勒级数	tai le ji shu	54000
+无穷级数	wu qiong ji shu	52000
+收敛	shou lian	56000
+展开	zhan kai	95000
+方程	fang cheng	78000
+矩阵	ju zhen	76000
+向量	xiang liang	82000
+概率	gai lv	88000
+动态规划	dong tai gui hua	78000
+前缀树	qian zhui shu	68000
+双数组	shuang shu zu	58000
+有向无环图	you xiang wu huan tu	64000
+束搜索	shu sou suo	56000
+晶格图	jing ge tu	52000
+内存安全	nei cun an quan	74000
+零拷贝	ling kao bei	66000
+低延迟	di yan chi	72000
+开源	kai yuan	115000
+开源项目	kai yuan xiang mu	92000
+下载	xia zai	145000
+更新	geng xin	135000
+版本	ban ben	125000
+文档	wen dang	118000
+配置	pei zhi	122000
+服务	fu wu	155000
+服务器	fu wu qi	115000
+客户端	ke hu duan	105000
+浏览器	liu lan qi	102000
+编辑器	bian ji qi	94000
+终端	zhong duan	92000
+网络	wang luo	150000
+安全	an quan	145000
+隐私	yin si	95000
+本地	ben di	110000
+端侧	duan ce	78000
+云端	yun duan	88000
+推理	tui li	92000
+训练	xun lian	98000
+权重	quan zhong	86000
+词频	ci pin	74000
+多音字	duo yin zi	68000
+简拼	jian pin	64000
+双拼	shuang pin	68000
+全拼	quan pin	66000
+模糊音	mo hu yin	62000
+打他	da ta	18000
+阿批	a pi	5000
+马印	ma in	4000
+你测	ni ce	6000
+不给	bu gei	38000
+使用	shi yong	220000
+我使用	wo shi yong	195000
+我是用	wo shi yong	175000
+以及	yi ji	215000
+显卡	xian ka	165000
+运行	yun xing	175000
+运行在	yun xing zai	168000
+程序	cheng xu	180000
+做程序	zuo cheng xu	135000
+写程序	xie cheng xu	145000
+没到点儿	mei dao dian er	1200
+
