@@ -65,19 +65,162 @@ static STATUS_COLLAPSED: AtomicBool = AtomicBool::new(false);
 // ---------------------------------------------------------------------------
 const STATUS_VIS_TIMER_ID: usize = 0x5EED;
 static TIP_ACTIVE_BY_PID: Mutex<Option<std::collections::HashMap<u32, bool>>> = Mutex::new(None);
+static TIP_LAST_ACTIVATE_MS_BY_PID: Mutex<Option<std::collections::HashMap<u32, u64>>> =
+    Mutex::new(None);
 static LAST_TIP_EVENT_ACTIVE: AtomicBool = AtomicBool::new(true);
+static LAST_DEACTIVATED_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// 管理员权限目标进程（如 Taskmgr.exe）因 UIPI 阻止跨进程 SendInput 时，转交进程内 TSF DLL 轮询上屏的队列
+static PENDING_ELEVATED_COMMITS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// 检查指定 PID 的进程是否以管理员高完整性级别（Elevated / High Integrity）运行
+unsafe fn is_process_elevated(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const TOKEN_QUERY: u32 = 0x0008;
+    const TOKEN_ELEVATION: u32 = 20;
+    let h_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if h_proc == 0 {
+        return false;
+    }
+    let mut h_tok: isize = 0;
+    let mut elevated = false;
+    if OpenProcessToken(h_proc, TOKEN_QUERY, &mut h_tok) != 0 && h_tok != 0 {
+        let mut val: u32 = 0;
+        let mut ret_len: u32 = 0;
+        if GetTokenInformation(h_tok, TOKEN_ELEVATION, &mut val as *mut u32 as *mut u8, 4, &mut ret_len) != 0 {
+            elevated = val != 0;
+        }
+        CloseHandle(h_tok);
+    }
+    CloseHandle(h_proc);
+    elevated
+}
+
+/// 检查指定 PID 的进程是否仍在运行
+unsafe fn is_process_still_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if h == 0 {
+        return false;
+    }
+    let mut exit_code: u32 = 0;
+    let ok = GetExitCodeProcess(h, &mut exit_code) != 0 && exit_code == STILL_ACTIVE;
+    CloseHandle(h);
+    ok
+}
+
+/// 读取 `HKCU\Software\Microsoft\CTF\Assemblies\0x00000804\{34745C63-B2F0-4784-8B67-5E12C8701A31}` 的 `Default` 值，
+/// 判断当前系统中文输入法默认激活项是否为本输入法 `{8E7A9C12-4F5B-4D8A-9E2C-1B3D5F7A9E01}`
+unsafe fn is_our_tip_default_in_ctf_registry() -> Option<bool> {
+    const HKEY_CURRENT_USER: isize = -2147483647isize; // 0x80000001
+    const KEY_READ: u32 = 0x20019;
+    let sub = to_wide(
+        "Software\\Microsoft\\CTF\\Assemblies\\0x00000804\\{34745C63-B2F0-4784-8B67-5E12C8701A31}",
+    );
+    let mut hk: isize = 0;
+    if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_READ, &mut hk) != 0 || hk == 0 {
+        return None;
+    }
+    let val_name = to_wide("Default");
+    let mut buf = [0u16; 64];
+    let mut cb: u32 = (buf.len() * 2) as u32;
+    let mut reg_type: u32 = 0;
+    let rc = RegQueryValueExW(
+        hk,
+        val_name.as_ptr(),
+        std::ptr::null_mut(),
+        &mut reg_type,
+        buf.as_mut_ptr() as *mut u8,
+        &mut cb,
+    );
+    RegCloseKey(hk);
+    if rc != 0 || cb < 4 {
+        return None;
+    }
+    let len = (cb as usize / 2).min(buf.len());
+    let s = String::from_utf16_lossy(&buf[..len])
+        .trim_end_matches('\0')
+        .trim()
+        .to_ascii_uppercase();
+    if s.is_empty() {
+        return None;
+    }
+    Some(s == "{8E7A9C12-4F5B-4D8A-9E2C-1B3D5F7A9E01}")
+}
 
 fn note_tip_state(pid: u32, active: bool) {
-    LAST_TIP_EVENT_ACTIVE.store(active, Ordering::Relaxed);
-    if pid == 0 {
-        return;
-    }
-    if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
-        let map = g.get_or_insert_with(std::collections::HashMap::new);
-        if map.len() > 512 {
-            map.clear();
+    let now = mono_ms();
+    if active {
+        LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
+        LAST_DEACTIVATED_PID.store(0, Ordering::Relaxed);
+        if pid == 0 {
+            return;
         }
-        map.insert(pid, active);
+        if let Ok(mut g) = TIP_LAST_ACTIVATE_MS_BY_PID.lock() {
+            let m = g.get_or_insert_with(std::collections::HashMap::new);
+            if m.len() > 512 {
+                m.clear();
+            }
+            m.insert(pid, now);
+        }
+        if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
+            let map = g.get_or_insert_with(std::collections::HashMap::new);
+            if map.len() > 512 {
+                map.clear();
+            }
+            // 一旦确认本输入法处于激活状态，清理其他进程可能残留的 false 记录（避免切回 Edge 等窗口时误隐藏状态栏）
+            map.retain(|_, &mut v| v);
+            map.insert(pid, true);
+        }
+    } else {
+        if pid != 0 {
+            // 防抖：过滤旧版 DLL 在 Activate 探测接口瞬间释放临时 COM 对象产生的假 deactivate
+            let recent_act = TIP_LAST_ACTIVATE_MS_BY_PID
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|m| m.get(&pid).copied()))
+                .unwrap_or(0);
+            if recent_act != 0 && now.saturating_sub(recent_act) <= 250 {
+                return;
+            }
+        }
+        let fg = unsafe { GetForegroundWindow() };
+        let mut fg_pid: u32 = 0;
+        let fg_visible = if fg != 0 {
+            unsafe {
+                GetWindowThreadProcessId(fg, &mut fg_pid);
+                IsWindowVisible(fg) != 0
+            }
+        } else {
+            false
+        };
+        // 若发起 deactivate 的并非当前可见前台窗口（例如后台进程退出、正在关闭的窗口或弹窗销毁），
+        // 仅移除该进程的进程内 TSF 标记，绝不将全局输入法状态置为停用
+        if pid != 0 && (!fg_visible || fg_pid == 0 || pid != fg_pid) {
+            if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
+                if let Some(map) = g.as_mut() {
+                    map.remove(&pid);
+                }
+            }
+            return;
+        }
+        LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
+        LAST_DEACTIVATED_PID.store(pid, Ordering::Relaxed);
+        if pid != 0 {
+            if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
+                let map = g.get_or_insert_with(std::collections::HashMap::new);
+                if map.len() > 512 {
+                    map.clear();
+                }
+                map.insert(pid, false);
+            }
+        }
     }
 }
 
@@ -86,20 +229,47 @@ unsafe fn status_bar_should_show() -> bool {
     if !TSF_MODE_ACTIVE.load(Ordering::Relaxed) {
         return true; // 全局钩子模式下输入法对所有窗口生效
     }
+    // 若最近一次触发 deactivate 的进程已经退出（说明是关闭软件而非切换输入法），自动恢复激活状态
+    if !LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed) {
+        let deact_pid = LAST_DEACTIVATED_PID.load(Ordering::Relaxed);
+        if deact_pid != 0 && !is_process_still_alive(deact_pid) {
+            LAST_DEACTIVATED_PID.store(0, Ordering::Relaxed);
+            LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
+            if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
+                if let Some(map) = g.as_mut() {
+                    map.remove(&deact_pid);
+                }
+            }
+        }
+    }
     let fg = GetForegroundWindow();
     if fg == 0 {
         return LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed);
     }
     let mut pid: u32 = 0;
-    GetWindowThreadProcessId(fg, &mut pid);
+    let fg_tid = GetWindowThreadProcessId(fg, &mut pid);
     if pid == std::process::id() {
         return true; // 本输入法自己的设置窗口
     }
-    TIP_ACTIVE_BY_PID
+    // 若当前前台线程的键盘布局语言已切换为非中文（如 0x0409 英文键盘），立即隐藏状态栏
+    if fg_tid != 0 {
+        let hkl = GetKeyboardLayout(fg_tid);
+        let lang_id = (hkl as usize) & 0xFFFF;
+        if lang_id != 0 && lang_id != 0x0804 {
+            return false;
+        }
+    }
+    if let Some(active) = TIP_ACTIVE_BY_PID
         .lock()
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(&pid).copied()))
-        .unwrap_or_else(|| LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed))
+    {
+        return active;
+    }
+    if let Some(false) = is_our_tip_default_in_ctf_registry() {
+        return false;
+    }
+    LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed)
 }
 
 unsafe fn update_status_bar_visibility(hwnd_status: isize) {
@@ -409,12 +579,42 @@ extern "system" {
     fn SetCapture(h_wnd: isize) -> isize;
     fn ReleaseCapture() -> i32;
     fn KillTimer(h_wnd: isize, id_event: usize) -> i32;
+    fn GetKeyboardLayout(id_thread: u32) -> isize;
 }
 
 #[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryW(lp_lib_file_name: *const u16) -> isize;
     fn GetProcAddress(h_module: isize, lp_proc_name: *const u8) -> *const usize;
+    fn GetExitCodeProcess(h_process: isize, lp_exit_code: *mut u32) -> i32;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegOpenKeyExW(
+        h_key: isize,
+        lp_sub_key: *const u16,
+        ul_options: u32,
+        sam_desired: u32,
+        phk_result: *mut isize,
+    ) -> i32;
+    fn RegQueryValueExW(
+        h_key: isize,
+        lp_value_name: *const u16,
+        lp_reserved: *mut u32,
+        lp_type: *mut u32,
+        lp_data: *mut u8,
+        lpcb_data: *mut u32,
+    ) -> i32;
+    fn RegCloseKey(h_key: isize) -> i32;
+    fn OpenProcessToken(process_handle: isize, desired_access: u32, token_handle: *mut isize) -> i32;
+    fn GetTokenInformation(
+        token_handle: isize,
+        token_information_class: u32,
+        token_information: *mut u8,
+        token_information_length: u32,
+        return_length: *mut u32,
+    ) -> i32;
 }
 
 #[link(name = "gdi32")]
@@ -907,11 +1107,18 @@ unsafe fn send_unicode_text(text: &str) {
             _pad_union: 0,
         });
     }
-    SendInput(
+    let sent = SendInput(
         inputs.len() as u32,
         inputs.as_ptr(),
         std::mem::size_of::<INPUT>() as i32,
     );
+    // 若当前前台窗口为管理员高权限窗口（如 Taskmgr.exe），跨进程 SendInput 会被 Windows UIPI 拦截并返回 0，
+    // 此时将待上屏文本压入高权限回传队列，由目标进程内的 ime_tsf_win.dll 以自身高权限执行上屏！
+    if sent == 0 {
+        if let Ok(mut q) = PENDING_ELEVATED_COMMITS.lock() {
+            q.push(text.to_string());
+        }
+    }
 }
 
 /// 获取当前焦点窗口的可执行文件名（如 `notepad.exe`, `Code.exe`, `WeChat.exe`）
@@ -1186,14 +1393,21 @@ unsafe fn compute_cand_layout(
 
     // 第 2 行：整句预览
     let label_w = m.width(f.small_b, "整句");
-    let mut sx = 8 + 8 + label_w + 10;
+    let mut sx = 8 + 12 + label_w + 10;
     for (part, pinned) in &vm.full_sentence_parts {
         if part.is_empty() {
             continue;
         }
         sx += m.width(f.num, part) + if *pinned { 10 } else { 0 };
     }
-    let row2_need = sx + 8 + 8;
+    let hint_w = if vm.full_sentence_selected {
+        m.width(f.small, "空格上屏") + 18
+    } else if vm.active_syllable_index.is_some() {
+        m.width(f.small, "↑ 整句") + 18
+    } else {
+        0
+    };
+    let row2_need = sx + hint_w + 8 + 8;
 
     // 第 3 行：横排候选
     let arrows_w = 2 * C_ARROW_W + 6;
@@ -1238,7 +1452,7 @@ unsafe fn compute_cand_layout(
         spots.push(mk(
             8,
             C_ROW2_T,
-            (row2_need - 8).min(w - 8),
+            w - 8,
             C_ROW2_B,
             CandHitZone::CommitFullSentenceBtn,
         ));
@@ -1441,6 +1655,15 @@ unsafe fn sync_ui_windows() {
 
 /// 处理来自 `ime_tsf_win.dll` (Windows TSF 原生 COM 客户端) 的 IPC 请求
 unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
+    if req.op == "poll_commit" {
+        let mut resp = TsfIpcResponse::default();
+        if let Ok(mut q) = PENDING_ELEVATED_COMMITS.lock() {
+            if !q.is_empty() {
+                resp.commit_text = q.drain(..).collect::<String>();
+            }
+        }
+        return (resp, false);
+    }
     // 除 deactivate 外，任何来自 DLL 的请求都说明本输入法正在该进程中使用
     note_tip_state(req.pid, req.op != "deactivate");
     // 放行由 SendInput(KEYEVENTF_UNICODE) 注入的 VK_PACKET (0xE7) 事件（兼容已加载旧版 DLL 的进程）
@@ -1613,8 +1836,10 @@ unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
                 _ => {}
             }
 
-            // 将待上屏文本排入主线程队列，等 TCP 响应返回后再通过 SendInput(KEYEVENTF_UNICODE) 注入目标窗口
-            if !resp.commit_text.is_empty() {
+            // 对常规权限窗口：将待上屏文本排入主线程队列，等 TCP 响应返回后再通过 SendInput(KEYEVENTF_UNICODE) 注入目标窗口；
+            // 对管理员高权限窗口（如 Taskmgr.exe）：跨进程 SendInput 会被 Windows UIPI 拦截（返回 0 导致无法落字），
+            // 因此直接通过 resp.commit_text 返回给目标进程内的 ime_tsf_win.dll，由其在高权限进程内部完成上屏！
+            if !resp.commit_text.is_empty() && !is_process_elevated(req.pid) {
                 let txt = std::mem::take(&mut resp.commit_text);
                 st.pending_tsf_commits.push(txt);
                 need_ui_sync = true;
@@ -1723,6 +1948,11 @@ unsafe extern "system" fn low_level_keyboard_proc(
             }
         }
     }
+    if !status_bar_should_show() {
+        return CallNextHookEx(0, n_code, w_param, l_param);
+    }
+    // TSF 模式下常规桌面程序由进程内 TSF 接管（且避免捕获 ESET ekbdflt.sys 等安全驱动在进程外混淆的按键码），
+    // 仅对不加载未签名 TSF DLL 的系统壳层搜索宿主保留低级键盘钩子兜底
     if TSF_MODE_ACTIVE.load(Ordering::Relaxed) && !is_shell_appcontainer_host(&fg_exe) {
         return CallNextHookEx(0, n_code, w_param, l_param);
     }
@@ -2210,16 +2440,35 @@ unsafe extern "system" fn wnd_proc_cand(
                             }
                         }
 
-                        // 第 2 行：整句预览（点击整句上屏），手动锁定的词以绿色标出
+                        // 第 2 行：整句预览（点击整句上屏，或按 ↑ 键选中后按空格上屏），手动锁定的词以绿色标出
                         if let Some(rc) = find(CandHitZone::CommitFullSentenceBtn) {
-                            if hover == CandHitZone::CommitFullSentenceBtn {
-                                s_round(hdc, rc.left, rc.top, rc.right, rc.bottom, 6, UI_HOVER, UI_HOVER);
+                            if vm.full_sentence_selected {
+                                s_round(hdc, rc.left, rc.top + 1, rc.right, rc.bottom - 1, 6, UI_SELECTED, UI_SELECTED);
+                                let mid = (rc.top + rc.bottom) / 2;
+                                s_round(hdc, rc.left + 3, mid - 7, rc.left + 6, mid + 7, 3, UI_ACCENT, UI_ACCENT);
+                            } else if hover == CandHitZone::CommitFullSentenceBtn {
+                                s_round(hdc, rc.left, rc.top + 1, rc.right, rc.bottom - 1, 6, UI_HOVER, UI_HOVER);
                             }
                             SelectObject(hdc, f.small_b);
                             let label_w = measure_text_width(hdc, "整句");
-                            s_text(hdc, f.small_b, UI_ACCENT, rc.left + 8, rc.top, rc.left + 8 + label_w + 2, rc.bottom, "整句", T_LINE);
-                            let mut cur_x = rc.left + 8 + label_w + 10;
-                            let max_x = rc.right - 4;
+                            let label_left = rc.left + 12;
+                            s_text(hdc, f.small_b, UI_ACCENT, label_left, rc.top, label_left + label_w + 2, rc.bottom, "整句", T_LINE);
+                            let hint_text = if vm.full_sentence_selected {
+                                Some(("空格上屏", UI_ACCENT))
+                            } else if vm.active_syllable_index.is_some() {
+                                Some(("↑ 整句", UI_MUTED))
+                            } else {
+                                None
+                            };
+                            let right_reserved = if let Some((ht, _)) = hint_text {
+                                SelectObject(hdc, f.small);
+                                measure_text_width(hdc, ht) + 14
+                            } else {
+                                4
+                            };
+                            let mut cur_x = label_left + label_w + 10;
+                            let max_x = rc.right - right_reserved;
+                            let unpinned_fg = if vm.full_sentence_selected { UI_TEXT } else { UI_TEXT2 };
                             for (part, pinned) in &vm.full_sentence_parts {
                                 if part.is_empty() || cur_x >= max_x {
                                     continue;
@@ -2233,9 +2482,14 @@ unsafe extern "system" fn wnd_proc_cand(
                                     cur_x = r;
                                 } else {
                                     let r = (cur_x + w + 2).min(max_x);
-                                    s_text(hdc, f.num, UI_TEXT2, cur_x, rc.top, r, rc.bottom, part, T_LINE);
+                                    s_text(hdc, f.num, unpinned_fg, cur_x, rc.top, r, rc.bottom, part, T_LINE);
                                     cur_x += w;
                                 }
+                            }
+                            if let Some((ht, hcolor)) = hint_text {
+                                SelectObject(hdc, f.small);
+                                let hw = measure_text_width(hdc, ht);
+                                s_text(hdc, f.small, hcolor, rc.right - hw - 8, rc.top, rc.right - 6, rc.bottom, ht, T_LINE);
                             }
                         }
 
@@ -2246,7 +2500,7 @@ unsafe extern "system" fn wnd_proc_cand(
                             let Some(rc) = find(CandHitZone::CandidateRow(idx)) else {
                                 continue;
                             };
-                            let is_sel = idx == vm.selected_candidate_index;
+                            let is_sel = !vm.full_sentence_selected && idx == vm.selected_candidate_index;
                             let is_hover = hover == CandHitZone::CandidateRow(idx);
                             let (t, b) = (rc.top + 3, rc.bottom - 3);
                             if is_sel {

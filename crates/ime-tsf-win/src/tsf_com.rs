@@ -137,6 +137,20 @@ pub const IID_ITF_INSERT_AT_SELECTION: GUID = GUID {
     data4: [0x9C, 0xEF, 0xFA, 0xDE, 0x14, 0x46, 0xAC, 0x6C],
 };
 
+pub const IID_ITF_SOURCE: GUID = GUID {
+    data1: 0x4EA4_8A35,
+    data2: 0x60AE,
+    data3: 0x446F,
+    data4: [0x8F, 0xD6, 0xE6, 0xA8, 0xD8, 0x24, 0x59, 0xF7],
+};
+
+pub const IID_ITF_THREAD_FOCUS_SINK: GUID = GUID {
+    data1: 0xC0F1_DB0C,
+    data2: 0x3A20,
+    data3: 0x405C,
+    data4: [0xA3, 0x03, 0x96, 0xB6, 0x01, 0x0A, 0x88, 0x5F],
+};
+
 pub const CLSID_TF_INPUT_PROCESSOR_PROFILES: GUID = GUID {
     data1: 0x33C5_3A50,
     data2: 0xF456,
@@ -261,6 +275,18 @@ pub struct ITfKeystrokeMgr {
 }
 
 #[repr(C)]
+pub struct ITfSourceVtbl {
+    pub base: IUnknownVtbl,
+    pub advise_sink: unsafe extern "system" fn(*mut ITfSource, *const GUID, *mut c_void, *mut u32) -> HRESULT,
+    pub unadvise_sink: unsafe extern "system" fn(*mut ITfSource, u32) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct ITfSource {
+    pub lp_vtbl: *const ITfSourceVtbl,
+}
+
+#[repr(C)]
 pub struct ITfContextVtbl {
     pub base: IUnknownVtbl,
     pub request_edit_session: unsafe extern "system" fn(*mut ITfContext, u32, *mut c_void, u32, *mut HRESULT) -> HRESULT,
@@ -374,17 +400,21 @@ pub struct ITfCategoryMgr {
     pub lp_vtbl: *const ITfCategoryMgrVtbl,
 }
 
+#[allow(dead_code)]
 const TF_ES_ASYNCDONTCARE: u32 = 0x0;
 const TF_ES_SYNC: u32 = 0x1;
 const TF_ES_READ: u32 = 0x2;
+#[allow(dead_code)]
 const TF_ES_READWRITE: u32 = 0x6;
 const TF_DEFAULT_SELECTION: u32 = 0xFFFF_FFFF;
 const TF_ANCHOR_END: u32 = 1;
 const TF_AE_NONE: u32 = 0;
 
 static DLL_REF_COUNT: AtomicI32 = AtomicI32::new(0);
+static ACTIVE_TIP_COUNT: AtomicI32 = AtomicI32::new(0);
 static LAST_CARET_RECT: Mutex<(i32, i32)> = Mutex::new((0, 0));
 static LOCAL_SHIFT_TAP_ARMED: AtomicBool = AtomicBool::new(false);
+static COMMIT_POLLER_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -409,6 +439,9 @@ extern "system" {
     fn GetModuleHandleExW(dw_flags: u32, lp_module_name: *const u16, ph_module: *mut isize) -> i32;
     fn OpenMutexW(dw_desired_access: u32, b_inherit_handle: i32, lp_name: *const u16) -> isize;
     fn CloseHandle(h_object: isize) -> i32;
+    fn LoadLibraryW(lp_lib_file_name: *const u16) -> isize;
+    fn GetProcAddress(h_module: isize, lp_proc_name: *const u8) -> *const c_void;
+    fn FreeLibrary(h_lib_module: isize) -> i32;
 }
 
 #[cfg(target_os = "windows")]
@@ -416,6 +449,8 @@ extern "system" {
 extern "system" {
     fn GetKeyState(n_virt_key: i32) -> i16;
     fn SendInput(c_inputs: u32, p_inputs: *const INPUT, cb_size: i32) -> u32;
+    fn GetForegroundWindow() -> isize;
+    fn GetWindowThreadProcessId(h_wnd: isize, lpdw_process_id: *mut u32) -> u32;
 }
 
 #[cfg(target_os = "windows")]
@@ -707,22 +742,38 @@ struct ITfKeyEventSinkVtbl {
 }
 
 #[repr(C)]
+struct ITfThreadFocusSinkVtbl {
+    base: IUnknownVtbl,
+    on_set_thread_focus: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+    on_kill_thread_focus: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+}
+
+#[repr(C)]
 pub struct TsfTextServiceCom {
     tip_vtbl: *const ITfTextInputProcessorExVtbl,
     sink_vtbl: *const ITfKeyEventSinkVtbl,
+    focus_sink_vtbl: *const ITfThreadFocusSinkVtbl,
     ref_count: AtomicU32,
     thread_mgr: Mutex<*mut c_void>,
     client_id: AtomicU32,
+    activated: AtomicBool,
+    focus_cookie: AtomicU32,
 }
 
 unsafe impl Send for TsfTextServiceCom {}
 unsafe impl Sync for TsfTextServiceCom {}
 
 const SINK_OFFSET: usize = std::mem::size_of::<*const ITfTextInputProcessorExVtbl>();
+const FOCUS_SINK_OFFSET: usize = SINK_OFFSET + std::mem::size_of::<*const ITfKeyEventSinkVtbl>();
 
 #[inline]
 unsafe fn from_sink_ptr(p: *mut c_void) -> *mut TsfTextServiceCom {
     (p as *mut u8).sub(SINK_OFFSET) as *mut TsfTextServiceCom
+}
+
+#[inline]
+unsafe fn from_focus_sink_ptr(p: *mut c_void) -> *mut TsfTextServiceCom {
+    (p as *mut u8).sub(FOCUS_SINK_OFFSET) as *mut TsfTextServiceCom
 }
 
 static TIP_VTBL: ITfTextInputProcessorExVtbl = ITfTextInputProcessorExVtbl {
@@ -750,15 +801,28 @@ static SINK_VTBL: ITfKeyEventSinkVtbl = ITfKeyEventSinkVtbl {
     on_preserved_key: sink_on_preserved_key,
 };
 
+static FOCUS_SINK_VTBL: ITfThreadFocusSinkVtbl = ITfThreadFocusSinkVtbl {
+    base: IUnknownVtbl {
+        query_interface: focus_sink_qi,
+        add_ref: focus_sink_add_ref,
+        release: focus_sink_release,
+    },
+    on_set_thread_focus: focus_sink_on_set_thread_focus,
+    on_kill_thread_focus: focus_sink_on_kill_thread_focus,
+};
+
 impl TsfTextServiceCom {
     pub fn new_boxed() -> *mut Self {
         DLL_REF_COUNT.fetch_add(1, Ordering::SeqCst);
         let b = Box::new(Self {
             tip_vtbl: &TIP_VTBL,
             sink_vtbl: &SINK_VTBL,
+            focus_sink_vtbl: &FOCUS_SINK_VTBL,
             ref_count: AtomicU32::new(1),
             thread_mgr: Mutex::new(null_mut()),
             client_id: AtomicU32::new(0),
+            activated: AtomicBool::new(false),
+            focus_cookie: AtomicU32::new(u32::MAX),
         });
         Box::into_raw(b)
     }
@@ -785,6 +849,10 @@ unsafe extern "system" fn tip_qi(
         *ppv = (&(*obj).sink_vtbl) as *const _ as *mut c_void;
         tip_add_ref(obj as *mut c_void);
         S_OK
+    } else if *iid == IID_ITF_THREAD_FOCUS_SINK {
+        *ppv = (&(*obj).focus_sink_vtbl) as *const _ as *mut c_void;
+        tip_add_ref(obj as *mut c_void);
+        S_OK
     } else {
         *ppv = null_mut();
         E_NOINTERFACE
@@ -800,7 +868,9 @@ unsafe extern "system" fn tip_release(this: *mut c_void) -> u32 {
     let obj = &*(this as *mut TsfTextServiceCom);
     let prev = obj.ref_count.fetch_sub(1, Ordering::SeqCst);
     if prev == 1 {
-        let _ = tip_deactivate(this);
+        if obj.activated.load(Ordering::SeqCst) {
+            let _ = tip_deactivate(this);
+        }
         drop(Box::from_raw(this as *mut TsfTextServiceCom));
         DLL_REF_COUNT.fetch_sub(1, Ordering::SeqCst);
         0
@@ -827,15 +897,22 @@ unsafe extern "system" fn tip_activate_ex(
         return E_POINTER;
     }
     let obj = &*(this as *mut TsfTextServiceCom);
+    let was_active = obj.activated.swap(true, Ordering::SeqCst);
+    if !was_active {
+        ACTIVE_TIP_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
     obj.client_id.store(tid, Ordering::SeqCst);
 
     let unk_vtbl = *(ptim as *mut *const IUnknownVtbl);
     ((*unk_vtbl).add_ref)(ptim);
     if let Ok(mut guard) = obj.thread_mgr.lock() {
+        if !(*guard).is_null() {
+            ((*unk_vtbl).release)(*guard);
+        }
         *guard = ptim;
     }
 
-    // 挂载 ITfKeyEventSink
+    // 1. 挂载 ITfKeyEventSink（先尝试卸载同 tid 上可能残留的旧 Sink）
     let mut ks_mgr: *mut ITfKeystrokeMgr = null_mut();
     if ((*unk_vtbl).query_interface)(
         ptim,
@@ -844,9 +921,38 @@ unsafe extern "system" fn tip_activate_ex(
     ) == S_OK
         && !ks_mgr.is_null()
     {
+        let _ = ((*(*ks_mgr).lp_vtbl).unadvise_key_event_sink)(ks_mgr, tid);
         let sink_ptr = (&obj.sink_vtbl) as *const _ as *mut c_void;
         let _ = ((*(*ks_mgr).lp_vtbl).advise_key_event_sink)(ks_mgr, tid, sink_ptr, 1);
         ((*(*ks_mgr).lp_vtbl).base.release)(ks_mgr as *mut c_void);
+    }
+
+    // 2. 挂载 ITfThreadFocusSink，使窗口切焦（例如在 Edge 浏览器不同标签页或新建标签页点击时）也能可靠上报 activate
+    let mut tf_src: *mut ITfSource = null_mut();
+    if ((*unk_vtbl).query_interface)(
+        ptim,
+        &IID_ITF_SOURCE,
+        &mut tf_src as *mut *mut _ as *mut *mut c_void,
+    ) == S_OK
+        && !tf_src.is_null()
+    {
+        let prev_cookie = obj.focus_cookie.swap(u32::MAX, Ordering::SeqCst);
+        if prev_cookie != u32::MAX {
+            let _ = ((*(*tf_src).lp_vtbl).unadvise_sink)(tf_src, prev_cookie);
+        }
+        let mut cookie: u32 = u32::MAX;
+        let focus_sink_ptr = (&obj.focus_sink_vtbl) as *const _ as *mut c_void;
+        if ((*(*tf_src).lp_vtbl).advise_sink)(
+            tf_src,
+            &IID_ITF_THREAD_FOCUS_SINK,
+            focus_sink_ptr,
+            &mut cookie,
+        ) == S_OK
+            && cookie != u32::MAX
+        {
+            obj.focus_cookie.store(cookie, Ordering::SeqCst);
+        }
+        ((*(*tf_src).lp_vtbl).base.release)(tf_src as *mut c_void);
     }
 
     // 在受限 AppContainer 壳层组件（SearchHost.exe / StartMenuExperienceHost.exe）中，
@@ -856,7 +962,47 @@ unsafe extern "system" fn tip_activate_ex(
         return S_OK;
     }
 
-    // 通知中央守护服务：TSF 正式输入法已激活（自动关闭低级键盘钩子）
+    // 启动单实例进程内异步上屏轮询线程（支持鼠标点击候选框在管理员窗口如 Taskmgr.exe 中正常上屏）
+    if !COMMIT_POLLER_STARTED.swap(true, Ordering::SeqCst) {
+        std::thread::spawn(|| {
+            let my_pid = std::process::id();
+            loop {
+                std::thread::sleep(Duration::from_millis(55));
+                if ACTIVE_TIP_COUNT.load(Ordering::SeqCst) <= 0 {
+                    continue;
+                }
+                #[cfg(target_os = "windows")]
+                unsafe {
+                    let fg = GetForegroundWindow();
+                    if fg == 0 {
+                        continue;
+                    }
+                    let mut fg_pid: u32 = 0;
+                    GetWindowThreadProcessId(fg, &mut fg_pid);
+                    if fg_pid != my_pid {
+                        continue;
+                    }
+                    if let Some(resp) = send_tsf_ipc(&TsfIpcRequest {
+                        op: "poll_commit".to_string(),
+                        vk: 0,
+                        shift: false,
+                        ctrl: false,
+                        alt: false,
+                        caret_x: 0,
+                        caret_y: 0,
+                        exe_name: String::new(),
+                        pid: my_pid,
+                    }) {
+                        if !resp.commit_text.is_empty() {
+                            let _ = send_unicode_from_tsf(&resp.commit_text);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // 通知中央守护服务：TSF 正式输入法已激活
     if send_tsf_ipc(&TsfIpcRequest {
         op: "activate".to_string(),
         vk: 0,
@@ -896,7 +1042,12 @@ unsafe extern "system" fn tip_activate_ex(
 
 unsafe extern "system" fn tip_deactivate(this: *mut c_void) -> HRESULT {
     let obj = &*(this as *mut TsfTextServiceCom);
+    // 仅当实例确实处于已激活状态时才执行注销与 IPC 通知，防止 msctf 探测接口后释放未激活实例导致误发 deactivate！
+    if !obj.activated.swap(false, Ordering::SeqCst) {
+        return S_OK;
+    }
     let tid = obj.client_id.swap(0, Ordering::SeqCst);
+    let focus_cookie = obj.focus_cookie.swap(u32::MAX, Ordering::SeqCst);
     let ptim = if let Ok(mut guard) = obj.thread_mgr.lock() {
         let p = *guard;
         *guard = null_mut();
@@ -907,6 +1058,19 @@ unsafe extern "system" fn tip_deactivate(this: *mut c_void) -> HRESULT {
 
     if !ptim.is_null() {
         let unk_vtbl = *(ptim as *mut *const IUnknownVtbl);
+        if focus_cookie != u32::MAX {
+            let mut tf_src: *mut ITfSource = null_mut();
+            if ((*unk_vtbl).query_interface)(
+                ptim,
+                &IID_ITF_SOURCE,
+                &mut tf_src as *mut *mut _ as *mut *mut c_void,
+            ) == S_OK
+                && !tf_src.is_null()
+            {
+                let _ = ((*(*tf_src).lp_vtbl).unadvise_sink)(tf_src, focus_cookie);
+                ((*(*tf_src).lp_vtbl).base.release)(tf_src as *mut c_void);
+            }
+        }
         let mut ks_mgr: *mut ITfKeystrokeMgr = null_mut();
         if ((*unk_vtbl).query_interface)(
             ptim,
@@ -921,19 +1085,22 @@ unsafe extern "system" fn tip_deactivate(this: *mut c_void) -> HRESULT {
         ((*unk_vtbl).release)(ptim);
     }
 
-    let exe_name = current_exe_basename();
-    if !is_shell_appcontainer_host(&exe_name) {
-        let _ = send_tsf_ipc(&TsfIpcRequest {
-            op: "deactivate".to_string(),
-            vk: 0,
-            shift: false,
-            ctrl: false,
-            alt: false,
-            caret_x: 0,
-            caret_y: 0,
-            exe_name,
-            pid: std::process::id(),
-        });
+    let prev_active = ACTIVE_TIP_COUNT.fetch_sub(1, Ordering::SeqCst);
+    if prev_active <= 1 {
+        let exe_name = current_exe_basename();
+        if !is_shell_appcontainer_host(&exe_name) {
+            let _ = send_tsf_ipc(&TsfIpcRequest {
+                op: "deactivate".to_string(),
+                vk: 0,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                caret_x: 0,
+                caret_y: 0,
+                exe_name,
+                pid: std::process::id(),
+            });
+        }
     }
 
     S_OK
@@ -955,9 +1122,53 @@ unsafe extern "system" fn sink_release(this: *mut c_void) -> u32 {
     tip_release(from_sink_ptr(this) as *mut c_void)
 }
 
-unsafe extern "system" fn sink_on_set_focus(_this: *mut c_void, f_foreground: i32) -> HRESULT {
+unsafe extern "system" fn focus_sink_qi(
+    this: *mut c_void,
+    riid: *const GUID,
+    ppv: *mut *mut c_void,
+) -> HRESULT {
+    tip_qi(from_focus_sink_ptr(this) as *mut c_void, riid, ppv)
+}
+
+unsafe extern "system" fn focus_sink_add_ref(this: *mut c_void) -> u32 {
+    tip_add_ref(from_focus_sink_ptr(this) as *mut c_void)
+}
+
+unsafe extern "system" fn focus_sink_release(this: *mut c_void) -> u32 {
+    tip_release(from_focus_sink_ptr(this) as *mut c_void)
+}
+
+unsafe extern "system" fn focus_sink_on_set_thread_focus(this: *mut c_void) -> HRESULT {
     LOCAL_SHIFT_TAP_ARMED.store(false, Ordering::SeqCst);
-    if f_foreground != 0 {
+    let obj = &*from_focus_sink_ptr(this);
+    if obj.activated.load(Ordering::SeqCst) {
+        let exe_name = current_exe_basename();
+        if !is_shell_appcontainer_host(&exe_name) {
+            let _ = send_tsf_ipc(&TsfIpcRequest {
+                op: "activate".to_string(),
+                vk: 0,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                caret_x: 0,
+                caret_y: 0,
+                exe_name,
+                pid: std::process::id(),
+            });
+        }
+    }
+    S_OK
+}
+
+unsafe extern "system" fn focus_sink_on_kill_thread_focus(_this: *mut c_void) -> HRESULT {
+    LOCAL_SHIFT_TAP_ARMED.store(false, Ordering::SeqCst);
+    S_OK
+}
+
+unsafe extern "system" fn sink_on_set_focus(this: *mut c_void, f_foreground: i32) -> HRESULT {
+    LOCAL_SHIFT_TAP_ARMED.store(false, Ordering::SeqCst);
+    let obj = &*from_sink_ptr(this);
+    if f_foreground != 0 && obj.activated.load(Ordering::SeqCst) {
         let exe_name = current_exe_basename();
         if !is_shell_appcontainer_host(&exe_name) {
             let _ = send_tsf_ipc(&TsfIpcRequest {
@@ -1058,23 +1269,19 @@ unsafe fn commit_text_to_context(obj: &TsfTextServiceCom, pic: *mut ITfContext, 
     if text.is_empty() {
         return;
     }
-    // 优先在目标进程内使用 Unicode SendInput 上屏（100% 兼容 Chrome/Electron/微信/VS Code/Win11 记事本等所有控件）
-    let sent = send_unicode_from_tsf(&text);
-    if sent > 0 || pic.is_null() {
+    // 优先在目标进程内延迟 6ms 使用 Unicode SendInput 上屏（等待 OnKeyDown 返回 *pf_eaten=1 后再以目标进程自身权限注入，
+    // 100% 兼容 Taskmgr.exe 等管理员窗口以及 Chrome/Electron/WinUI3 XAML Island 控件）
+    let text_clone = text.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(6));
+        unsafe {
+            let _ = send_unicode_from_tsf(&text_clone);
+        }
+    });
+    if pic.is_null() {
         return;
     }
-    // 若在受限沙箱中 SendInput 返回 0，则回退至 TSF 原生 ITfInsertAtSelection
-    let tid = obj.client_id.load(Ordering::SeqCst);
-    let es = TsfEditSessionCom::new_boxed(pic, text, false);
-    let mut hr_session: HRESULT = S_OK;
-    let _ = ((*(*pic).lp_vtbl).request_edit_session)(
-        pic,
-        tid,
-        es as *mut c_void,
-        TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
-        &mut hr_session,
-    );
-    edit_session_release(es as *mut c_void);
+    let _ = obj;
 }
 
 unsafe extern "system" fn sink_on_test_key_down(
@@ -1551,13 +1758,38 @@ pub unsafe fn com_dll_register_server() -> HRESULT {
         ((*(*cat_mgr).lp_vtbl).base.release)(cat_mgr as *mut c_void);
     }
 
+    install_layout_or_tip(true);
+
     CoUninitialize();
     S_OK
+}
+
+/// 调用 Windows `input.dll!InstallLayoutOrTip` 将本输入法正式写入当前用户 `Control Panel\International\User Profile\zh-Hans-CN`
+/// 与 `CTF\SortOrder\AssemblyItem`（对齐小狼毫 Weasel 与微软拼音在 Win10/Win11 下的用户态输入法列表注册）
+#[cfg(target_os = "windows")]
+unsafe fn install_layout_or_tip(install: bool) {
+    let dll_w = to_wide("input.dll");
+    let h_mod = LoadLibraryW(dll_w.as_ptr());
+    if h_mod != 0 {
+        let p = GetProcAddress(h_mod, b"InstallLayoutOrTip\0".as_ptr());
+        if !p.is_null() {
+            type InstallLayoutOrTipFn = unsafe extern "system" fn(*const u16, u32) -> i32;
+            let func: InstallLayoutOrTipFn = std::mem::transmute(p);
+            let tip_id = to_wide(
+                "0804:{8E7A9C12-4F5B-4D8A-9E2C-1B3D5F7A9E01}{9F8B0D23-5A6C-4E9B-AF3D-2C4E6F8B0A12}",
+            );
+            // flags: 0 = 安装并启用, 1 = ILOT_UNINSTALL (卸载)
+            let _ = func(tip_id.as_ptr(), if install { 0 } else { 1 });
+        }
+        FreeLibrary(h_mod);
+    }
 }
 
 #[cfg(target_os = "windows")]
 pub unsafe fn com_dll_unregister_server() -> HRESULT {
     let _ = CoInitializeEx(null_mut(), 0x2);
+
+    install_layout_or_tip(false);
 
     let mut cat_mgr: *mut ITfCategoryMgr = null_mut();
     if CoCreateInstance(
@@ -1672,6 +1904,7 @@ pub fn activate_tsf_profile_for_current_user() -> bool {
     #[cfg(target_os = "windows")]
     unsafe {
         let _ = CoInitializeEx(null_mut(), 0x2);
+        install_layout_or_tip(true);
         let mut ok = false;
 
         let mut profiles: *mut ITfInputProcessorProfiles = null_mut();
@@ -1720,7 +1953,11 @@ pub fn activate_tsf_profile_for_current_user() -> bool {
                 && !mgr.is_null()
             {
                 // TF_PROFILETYPE_INPUTPROCESSOR = 1
-                // TF_IPPMF_FORPROCESS (0x1) | TF_IPPMF_FORSESSION (0x2) | TF_IPPMF_ENABLEPROFILE (0x4)
+                // msctf.h 标准常量：
+                // TF_IPPMF_FORPROCESS = 0x1000_0000
+                // TF_IPPMF_FORSESSION = 0x2000_0000
+                // TF_IPPMF_ENABLEPROFILE = 0x0000_0001
+                // TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE = 0x0000_0004
                 let hr = ((*(*mgr).lp_vtbl).activate_profile)(
                     mgr,
                     1,
@@ -1728,7 +1965,7 @@ pub fn activate_tsf_profile_for_current_user() -> bool {
                     &CLSID_RUST_AI_IME,
                     &GUID_RUST_AI_PROFILE,
                     0,
-                    0x1 | 0x2 | 0x4,
+                    0x2000_0000 | 0x1000_0000 | 0x0000_0001 | 0x0000_0004,
                 );
                 if hr == S_OK {
                     ok = true;

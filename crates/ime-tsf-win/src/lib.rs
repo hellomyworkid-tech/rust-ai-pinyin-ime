@@ -143,6 +143,9 @@ pub struct CandidateWindowViewModel {
     pub visible_candidates: Vec<Candidate>,
     /// 当前页内通过上下键高亮的候选项下标 (`0..visible_candidates.len()`)
     pub selected_candidate_index: usize,
+    /// 是否通过按上方向键 `↑` 选中了第 2 行的「整句」预览项（选中时按空格直接将整句上屏）
+    #[serde(default)]
+    pub full_sentence_selected: bool,
     pub active_scene_label: String,
     pub ai_semantic_hint: String,
     pub ghost_text_preview: Option<String>,
@@ -249,6 +252,8 @@ pub struct TsfKeySession {
     pub page_size: usize,
     /// 当前页面中由上下方向键选中的高亮候选词下标 (`0..page_size`)
     pub selected_candidate_index: usize,
+    /// 当前是否通过按上方向键 `↑` 将焦点移到了「整句」行（为 `true` 时按空格直接整句上屏，按 `↓` 回到候选词列表）
+    pub full_sentence_selected: bool,
     pub committed_history: String,
     pub pending_ghost_text: Option<String>,
     pub active_scene: AppScene,
@@ -280,6 +285,7 @@ impl TsfKeySession {
             current_page: 0,
             page_size: 5,
             selected_candidate_index: 0,
+            full_sentence_selected: false,
             committed_history: String::new(),
             pending_ghost_text: None,
             active_scene: AppScene::General,
@@ -366,6 +372,7 @@ impl TsfKeySession {
         self.cursor_syllable_mode = true;
         self.cursor_auto_advanced = false;
         self.last_op_was_pinyin_edit = false;
+        self.full_sentence_selected = false;
         self.current_page = 0;
         self.selected_candidate_index = 0;
         self.recompute_candidates();
@@ -377,6 +384,7 @@ impl TsfKeySession {
         self.cursor_syllable_mode = false;
         self.cursor_auto_advanced = false;
         self.last_op_was_pinyin_edit = false;
+        self.full_sentence_selected = false;
         self.current_page = 0;
         self.selected_candidate_index = 0;
         self.recompute_candidates();
@@ -471,6 +479,7 @@ impl TsfKeySession {
         self.cursor_syllable_mode = false;
         self.cursor_auto_advanced = false;
         self.last_op_was_pinyin_edit = false;
+        self.full_sentence_selected = false;
         self.current_candidates.clear();
         self.pinned_segments.clear();
         self.last_full_sentence.clear();
@@ -508,6 +517,7 @@ impl TsfKeySession {
                     return KeyAction::PassThrough;
                 }
                 self.pending_ghost_text = None;
+                self.full_sentence_selected = false;
                 // 若光标是因选定前缀词（如在 `wolaiceshi` 中选定「我来」）而自动推进到下一个未锁定音节 `|ce`，
                 // 此时用户继续敲击新拼音字母（如 `yixia`）应当追加在整串末尾（变成 `wolaiceshiyixia`），
                 // 而保持「我来」锁定与 `|ce` 焦点不变！
@@ -542,6 +552,7 @@ impl TsfKeySession {
                     self.pending_ghost_text = None;
                     return KeyAction::PassThrough;
                 }
+                self.full_sentence_selected = false;
                 let pos = self.cursor_pos.min(self.input_buffer.len());
                 // 若当前光标左侧紧挨着一个已手动选定锁定的分词块（如选定「我来」后光标位于 `|ce`），
                 // 按退格键首先解除该词块的锁定并把光标退回该词块起点（若已无任何锁定词则回到句尾）
@@ -594,6 +605,7 @@ impl TsfKeySession {
                 if self.input_buffer.is_empty() {
                     return KeyAction::PassThrough;
                 }
+                self.full_sentence_selected = false;
                 let pos = self.cursor_pos.min(self.input_buffer.len());
                 if pos < self.input_buffer.len() {
                     self.input_buffer.remove(pos);
@@ -621,14 +633,19 @@ impl TsfKeySession {
                     return KeyAction::PassThrough;
                 }
                 self.last_op_was_pinyin_edit = false;
-                if self.selected_candidate_index > 0 {
+                if self.full_sentence_selected {
+                    // 已在「整句」行时保持不动
+                } else if self.selected_candidate_index > 0 {
                     self.selected_candidate_index -= 1;
                 } else if self.current_page > 0 {
                     self.current_page -= 1;
                     let cnt = self.visible_candidate_count();
                     self.selected_candidate_index = cnt.saturating_sub(1);
+                } else if !self.last_full_sentence.is_empty() {
+                    // 当处于第 1 页第 1 个候选词（如句中改错后默认聚焦 `1 叫`）时，
+                    // 按上方向键 `↑` 向上跳选到正上方的「整句」行（如 `整句 右下角`），按空格即可整句上屏！
+                    self.full_sentence_selected = true;
                 }
-                // 已在第 1 页第 1 项时保持不动（与主流输入法一致，不回绕到最后一页）
                 KeyAction::EatAndUpdateUi(self.build_view_model())
             }
             VirtualKey::Down => {
@@ -636,6 +653,12 @@ impl TsfKeySession {
                     return KeyAction::PassThrough;
                 }
                 self.last_op_was_pinyin_edit = false;
+                if self.full_sentence_selected {
+                    // 从「整句」行按 `↓` 回到下方第 1 个候选词
+                    self.full_sentence_selected = false;
+                    self.selected_candidate_index = 0;
+                    return KeyAction::EatAndUpdateUi(self.build_view_model());
+                }
                 let cnt = self.visible_candidate_count();
                 if self.selected_candidate_index + 1 < cnt {
                     self.selected_candidate_index += 1;
@@ -671,6 +694,7 @@ impl TsfKeySession {
                 self.cursor_syllable_mode = true;
                 self.cursor_auto_advanced = false;
                 self.last_op_was_pinyin_edit = false;
+                self.full_sentence_selected = false;
                 self.current_page = 0;
                 self.selected_candidate_index = 0;
                 self.recompute_candidates();
@@ -692,6 +716,7 @@ impl TsfKeySession {
                 }
                 self.cursor_auto_advanced = false;
                 self.last_op_was_pinyin_edit = false;
+                self.full_sentence_selected = false;
                 self.current_page = 0;
                 self.selected_candidate_index = 0;
                 self.recompute_candidates();
@@ -714,6 +739,7 @@ impl TsfKeySession {
                 }
                 self.cursor_auto_advanced = false;
                 self.last_op_was_pinyin_edit = false;
+                self.full_sentence_selected = false;
                 self.current_page = 0;
                 self.selected_candidate_index = 0;
                 self.recompute_candidates();
@@ -731,6 +757,7 @@ impl TsfKeySession {
                 self.cursor_syllable_mode = true;
                 self.cursor_auto_advanced = false;
                 self.last_op_was_pinyin_edit = false;
+                self.full_sentence_selected = false;
                 self.current_page = 0;
                 self.selected_candidate_index = 0;
                 self.recompute_candidates();
@@ -747,11 +774,9 @@ impl TsfKeySession {
                 if self.input_buffer.is_empty() {
                     return KeyAction::PassThrough;
                 }
-                // 如果用户刚刚在句中修改了输错的拼音字母且未按上下键切换候选词，按空格直接将修正后的整句上屏！
-                if self.last_op_was_pinyin_edit
-                    && self.selected_candidate_index == 0
-                    && !self.last_full_sentence.is_empty()
-                {
+                // 若已通过按上方向键 `↑` 高亮选中了「整句」行，按空格直接将整句上屏；
+                // 否则提交当前高亮选中的候选词（与界面视觉高亮完全一致）
+                if self.full_sentence_selected && !self.last_full_sentence.is_empty() {
                     return self.commit_full_sentence();
                 }
                 self.commit_candidate_at_visible_index(self.selected_candidate_index)
@@ -760,6 +785,7 @@ impl TsfKeySession {
                 if self.input_buffer.is_empty() {
                     return KeyAction::PassThrough;
                 }
+                self.full_sentence_selected = false;
                 let idx = (d as usize).saturating_sub(1);
                 if idx < self.page_size {
                     self.commit_candidate_at_visible_index(idx)
@@ -770,6 +796,9 @@ impl TsfKeySession {
             VirtualKey::Enter => {
                 if self.input_buffer.is_empty() {
                     return KeyAction::PassThrough;
+                }
+                if self.full_sentence_selected && !self.last_full_sentence.is_empty() {
+                    return self.commit_full_sentence();
                 }
                 // 回车键直接将当前已锁定的前缀词与剩余原始英文字母串一并上屏
                 let raw = self.format_raw_with_pins();
@@ -806,6 +835,7 @@ impl TsfKeySession {
                 if self.input_buffer.is_empty() {
                     return KeyAction::PassThrough;
                 }
+                self.full_sentence_selected = false;
                 let max_page = self.current_candidates.len().saturating_sub(1) / self.page_size;
                 if self.current_page < max_page {
                     self.current_page += 1;
@@ -817,6 +847,7 @@ impl TsfKeySession {
                 if self.input_buffer.is_empty() {
                     return KeyAction::PassThrough;
                 }
+                self.full_sentence_selected = false;
                 self.current_page = self.current_page.saturating_sub(1);
                 self.selected_candidate_index = 0;
                 KeyAction::EatAndUpdateUi(self.build_view_model())
@@ -1103,6 +1134,7 @@ impl TsfKeySession {
             self.cursor_syllable_mode = true;
             self.cursor_auto_advanced = true;
             self.last_op_was_pinyin_edit = false;
+            self.full_sentence_selected = false;
             self.current_page = 0;
             self.selected_candidate_index = 0;
             self.recompute_candidates();
@@ -1259,6 +1291,7 @@ impl TsfKeySession {
             total_candidates: self.current_candidates.len(),
             visible_candidates,
             selected_candidate_index: selected_idx,
+            full_sentence_selected: self.full_sentence_selected,
             active_scene_label: self.active_scene.label().to_string(),
             ai_semantic_hint: self.last_ai_hint.clone(),
             ghost_text_preview: None,
@@ -1410,12 +1443,46 @@ mod tests {
         session.process_key(VirtualKey::Char('e'));
         assert_eq!(session.input_buffer, "wozaiyongrustxieapi");
         assert_eq!(session.last_full_sentence, "我在用 Rust 写 API");
-        // 修改完拼音后直接按空格，应立即将修正后的整句上屏！
+        // 修改完句中拼音后，默认焦点在当前音节候选词上；按 ↑ 键选中「整句」行，按空格将修正后的整句上屏！
+        assert!(!session.build_view_model().full_sentence_selected);
+        session.process_key(VirtualKey::Up);
+        assert!(session.build_view_model().full_sentence_selected);
         let commit_act = session.process_key(VirtualKey::Space);
         assert_eq!(
             commit_act,
             KeyAction::EatAndCommit {
                 committed_text: "我在用 Rust 写 API".to_string(),
+                ghost_text: None,
+            }
+        );
+
+        // 1b. 测试用户真实场景：误输 "youxiaojiao"，按 ← 跳到 |jiao 后按退格删掉 xiao 的 'o' 变成 "youxiajiao"：
+        // 此时默认焦点仍在 jiao 的候选词（1 叫），按 ↑ 键可向上选中「整句 右下角」，按 ↓ 键可退回 `1 叫`，按 ↑ 再按空格即输出「右下角」！
+        for ch in "youxiaojiao".chars() {
+            session.process_key(VirtualKey::Char(ch));
+        }
+        session.process_key(VirtualKey::Left); // 跳到 |jiao
+        session.process_key(VirtualKey::Backspace); // 删掉 xiao 末尾的 'o'
+        let vm_yxj = session.build_view_model();
+        assert_eq!(session.input_buffer, "youxiajiao");
+        assert_eq!(vm_yxj.composed_full_sentence, "右下角");
+        assert!(!vm_yxj.full_sentence_selected);
+        assert_eq!(vm_yxj.selected_candidate_index, 0);
+        // 按 ↑ 选中「整句 右下角」
+        session.process_key(VirtualKey::Up);
+        assert!(session.build_view_model().full_sentence_selected);
+        // 按 ↓ 退回下方第 1 候选词
+        session.process_key(VirtualKey::Down);
+        assert!(!session.build_view_model().full_sentence_selected);
+        assert_eq!(session.build_view_model().selected_candidate_index, 0);
+        // 再次按 ↑ 选中「整句 右下角」并按空格上屏
+        session.process_key(VirtualKey::Up);
+        assert!(session.build_view_model().full_sentence_selected);
+        let commit_yxj = session.process_key(VirtualKey::Space);
+        assert_eq!(
+            commit_yxj,
+            KeyAction::EatAndCommit {
+                committed_text: "右下角".to_string(),
                 ghost_text: None,
             }
         );
