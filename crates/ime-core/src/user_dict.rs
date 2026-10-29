@@ -214,6 +214,91 @@ impl UserDict {
         }
     }
 
+    /// 从全拼编码与上屏中文词推导首字母简拼键（例如 `("woziji", "我自己") -> Some("wzj")`）
+    pub fn derive_jianpin_key(code_key: &str, text: &str) -> Option<String> {
+        let chars: Vec<char> = text.chars().collect();
+        let char_count = chars.len();
+        if !(2..=12).contains(&char_count) || !chars.iter().all(|c| !c.is_ascii()) {
+            return None;
+        }
+        if code_key.contains('\'') || code_key.contains(' ') {
+            let parts: Vec<&str> = code_key
+                .split(|c: char| c == '\'' || c.is_whitespace())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.len() == char_count {
+                let jp: String = parts
+                    .iter()
+                    .filter_map(|s| s.chars().next())
+                    .map(|c| c.to_ascii_lowercase())
+                    .collect();
+                if jp.len() == char_count && jp.bytes().all(|b| b.is_ascii_lowercase()) {
+                    return Some(jp);
+                }
+            }
+        }
+        let norm = Self::normalize_key(code_key);
+        if norm.len() < char_count || !norm.bytes().all(|b| b.is_ascii_lowercase()) {
+            return None;
+        }
+        if norm.len() == char_count {
+            return Some(norm);
+        }
+        let fuzzy = crate::pinyin::FuzzyPinyinConfig::default();
+        let mut initials = Vec::with_capacity(char_count);
+        if split_into_k_syllables(&norm, char_count, &fuzzy, false, &mut initials)
+            || split_into_k_syllables(&norm, char_count, &fuzzy, true, &mut initials)
+        {
+            return String::from_utf8(initials).ok();
+        }
+        None
+    }
+
+    /// 根据简拼编码（如 `"wzj"`）检索用户曾经输入过的全拼词条（支持精确简拼匹配与 3+ 字母简拼前缀联想）
+    pub fn top_jianpin_records(&self, jp_query: &str) -> Vec<UserWordRecord> {
+        let norm_jp = Self::normalize_key(jp_query);
+        if norm_jp.len() < 2
+            || !norm_jp.bytes().all(|b| b.is_ascii_lowercase())
+            || can_segment_as_full_syllables(&norm_jp)
+        {
+            return Vec::new();
+        }
+        let now_secs = Self::now_secs();
+        let mut matches: Vec<(f32, bool, UserWordRecord)> = Vec::new();
+        for rec in self.records.values() {
+            let Some(jp) = Self::derive_jianpin_key(&rec.code_key, &rec.text) else {
+                continue;
+            };
+            let is_exact = jp == norm_jp;
+            let is_prefix = !is_exact
+                && norm_jp.len() >= 3
+                && jp.starts_with(&norm_jp)
+                && jp.len() <= norm_jp.len() + 2;
+            if !is_exact && !is_prefix {
+                continue;
+            }
+            let elapsed = now_secs.saturating_sub(rec.last_updated_secs) as f32;
+            let mut decayed = rec.dynamic_score * (-self.decay_lambda * elapsed).exp();
+            if !is_exact {
+                decayed *= 0.85;
+            }
+            let mut cloned = rec.clone();
+            cloned.dynamic_score = decayed;
+            matches.push((decayed, is_exact, cloned));
+        }
+        matches.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| b.2.commit_count.cmp(&a.2.commit_count))
+                .then_with(|| b.2.last_seq.cmp(&a.2.last_seq))
+        });
+        let mut seen = std::collections::HashSet::new();
+        matches
+            .into_iter()
+            .filter_map(|(_, _, r)| seen.insert(r.text.clone()).then_some(r))
+            .collect()
+    }
+
     /// 获取某编码下按用户记忆强度排序的所有历史候选记录（最高频/最近使用的排最前）
     pub fn top_user_records(&self, code_key: &str) -> Vec<UserWordRecord> {
         let normalized_key = Self::normalize_key(code_key);
@@ -289,6 +374,50 @@ impl UserDict {
         let dict: Self = serde_json::from_str(&content)?;
         Ok(dict)
     }
+}
+
+fn can_segment_as_full_syllables(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    let max_len = s.len().min(6);
+    for len in (2..=max_len).rev() {
+        if crate::pinyin::is_valid_syllable(&s[..len]) && can_segment_as_full_syllables(&s[len..]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn split_into_k_syllables(
+    rem: &str,
+    k: usize,
+    fuzzy: &crate::pinyin::FuzzyPinyinConfig,
+    allow_single_consonant: bool,
+    out_initials: &mut Vec<u8>,
+) -> bool {
+    if k == 0 {
+        return rem.is_empty();
+    }
+    if rem.len() < k || rem.len() > k * 6 {
+        return false;
+    }
+    let max_len = (rem.len() - (k - 1)).min(6);
+    for len in (1..=max_len).rev() {
+        let piece = &rem[..len];
+        let is_valid = crate::pinyin::is_valid_syllable(piece)
+            || (len >= 2 && !fuzzy.expand_fuzzy(piece).is_empty())
+            || (allow_single_consonant && len == 1);
+        if !is_valid {
+            continue;
+        }
+        out_initials.push(piece.as_bytes()[0]);
+        if split_into_k_syllables(&rem[len..], k - 1, fuzzy, allow_single_consonant, out_initials) {
+            return true;
+        }
+        out_initials.pop();
+    }
+    false
 }
 
 #[cfg(test)]

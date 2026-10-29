@@ -246,10 +246,17 @@ impl BilingualDecoder {
                     // 单音节记忆（如曾在某句中把 `de` 选成「得」）只在用户单独输入该音节时生效，
                     // 绝不注入到长句中间，否则会把所有句子里的「的」都替换成「得」
                     let is_whole_input = i == 0 && end_pos == n;
-                    if !is_whole_input && crate::pinyin::is_valid_syllable(raw_slice) {
+                    if !is_whole_input && (crate::pinyin::is_valid_syllable(raw_slice) || raw_slice.len() <= 1) {
                         continue;
                     }
-                    let user_recs = user_dict.top_user_records(raw_slice);
+                    let mut user_recs = user_dict.top_user_records(raw_slice);
+                    if is_whole_input {
+                        for jrec in user_dict.top_jianpin_records(raw_slice) {
+                            if !user_recs.iter().any(|r| r.text == jrec.text) {
+                                user_recs.push(jrec);
+                            }
+                        }
+                    }
                     if user_recs.is_empty() {
                         continue;
                     }
@@ -259,8 +266,11 @@ impl BilingualDecoder {
                         .map(|e| e.code_key.clone())
                         .unwrap_or_else(|| raw_slice.to_string());
 
-                    for urec in user_recs.into_iter().take(2) {
-                        if urec.dynamic_score >= 4.5 || urec.commit_count >= 2 {
+                    for urec in user_recs.into_iter().take(4) {
+                        if urec.dynamic_score >= 4.5
+                            || urec.commit_count >= 2
+                            || (is_whole_input && urec.code_key != raw_slice && urec.commit_count >= 1)
+                        {
                             let is_ascii = urec.text.is_ascii();
                             edges_at_i.push(LatticeEdge {
                                 start: i,
@@ -482,22 +492,26 @@ impl BilingualDecoder {
             }
         }
 
+        while unpinned_start < n && lattice.input.as_bytes()[unpinned_start] == b'\'' {
+            unpinned_start += 1;
+        }
+
         // 整句候选只保留少量「真正可能」的版本：
         // - 覆盖全部输入的单一词条（如 `xuanci` → 选词/选此）都是合法同音词，全部保留；
-        // - 多段拼接的整句：除第 1 名首选整句外，最多再保留 1 条「首个未锁定词块不同」的备选整句
+        // - 多段拼接的整句：除第 1 名首选整句外，最多再保留 1 条「首个未锁定词块不同且代价极其接近」的备选整句
         //   （如首选「你在反思排查一下」，备选整句保留「你再反思排查一下」，而剔除句首相同、仅后半句换成生僻同音词的
         //   「你在反死排查一下」「你在反四排查一下」）。
         const MAX_DIFF_HEAD_SENTENCE_ALTS: usize = 1;
-        const SENTENCE_COST_MARGIN: f32 = 4.8;
-        let first_unpinned_seg_text = |c: &Candidate| -> Option<String> {
+        const SENTENCE_COST_MARGIN: f32 = 2.2;
+        let first_unpinned_seg = |c: &Candidate| -> Option<(usize, usize, String)> {
             c.segment_spans
                 .iter()
                 .find(|s| s.start >= unpinned_start)
-                .map(|s| s.text.clone())
+                .map(|s| (s.start, s.end, s.text.clone()))
         };
-        if let Some((best_cost, first_head)) = candidates
+        if let Some((best_cost, best_seg_cnt, first_head)) = candidates
             .first()
-            .map(|c| (c.l1_cost, first_unpinned_seg_text(c)))
+            .map(|c| (c.l1_cost, c.segments.len(), first_unpinned_seg(c)))
         {
             let mut kept_diff_head = 0usize;
             let mut idx = 0usize;
@@ -507,8 +521,14 @@ impl BilingualDecoder {
                 if is_first || c.segments.len() <= 1 {
                     return true;
                 }
-                let head_differs = first_unpinned_seg_text(c) != first_head;
-                if head_differs
+                let cur_head = first_unpinned_seg(c);
+                let is_clean_head_alt = match (&cur_head, &first_head) {
+                    (Some((cs, ce, ct)), Some((fs, fe, ft))) => {
+                        cs == fs && ce == fe && ct != ft && c.segments.len() <= best_seg_cnt
+                    }
+                    _ => false,
+                };
+                if is_clean_head_alt
                     && kept_diff_head < MAX_DIFF_HEAD_SENTENCE_ALTS
                     && c.l1_cost <= best_cost + SENTENCE_COST_MARGIN
                 {
@@ -520,11 +540,11 @@ impl BilingualDecoder {
         }
 
         // 整句候选之后，严格按照主流输入法层次依次给出从 `unpinned_start` 起算的：
-        //   1) 所有精确匹配的多字前缀词组（三字词/双字词排在单字之前，如 `nizaifansipaichayixia` → 你在 / 你再 / 拟在）
-        //   2) 首音节全部同音单字（按字频排序，如 你 / 尼 / 泥 / 逆 / 拟 …）
+        //   1) 所有精确匹配的多字前缀词组（三字词/双字词排在单字之前，如 `nizaifansipaichayixia` → 你在 / 你再 / 拟在；`wzj` → 文章 / 网站 / 位置 / 我在 / 完整）
+        //   2) 首音节全部同音单字（按字频排序，如 你 / 尼 / 泥 / 逆 / 拟 …；或简拼首字母单字 我 / 为 / 无 / 问 / 外 / 王 …）
         //   3) 模糊音/纠错词组与单字
-        const MAX_PREFIX_WORDS: usize = 12;
-        const MAX_PREFIX_CHARS: usize = 30;
+        const MAX_PREFIX_WORDS: usize = 20;
+        const MAX_PREFIX_CHARS: usize = 200;
         let rank_cost = |e: &LatticeEdge| -> f32 {
             let raw = &lattice.input[e.start..e.end];
             e.base_cost - user_dict.user_boost(raw, &e.text).min(6.0) + if e.is_fuzzy { 1.5 } else { 0.0 }
@@ -538,7 +558,15 @@ impl BilingualDecoder {
         } else {
             &[]
         };
-        // 补齐首音节在词库中的全部同音单字（长句 `n > 6` 构图时每个音节只保留了 Top-4 单字以加速束搜索解码）
+        // 判断从 `unpinned_start` 起是否存在全拼多字母音节或全拼词组；
+        // 若不存在（例如用户输入 `wzj` 等纯简拼串），则允许局部前缀简拼词（如 `wz` -> 我在/文章/位置/完整）进入前缀候选
+        let has_full_pinyin_at_start = prefix_edges.iter().any(|e| {
+            !e.is_fuzzy
+                && (e.kind == EdgeKind::ChineseWord
+                    || (e.kind == EdgeKind::ChineseChar && e.end > unpinned_start + 1))
+        });
+
+        // 补齐首音节在词库中的全部同音单字（或简拼首字母对应的全部常用单字）
         let first_syl_end = candidates
             .first()
             .and_then(|c| {
@@ -558,17 +586,28 @@ impl BilingualDecoder {
         if let Some(syl_end) = first_syl_end {
             if syl_end > unpinned_start && syl_end <= n {
                 let lower_syl = lattice.input[unpinned_start..syl_end].to_ascii_lowercase();
-                for &id in lexicon.syllable_trie.exact_lookup(&lower_syl) {
+                let exact = lexicon.syllable_trie.exact_lookup(&lower_syl);
+                let (lookup_ids, is_abbrev_initial) = if exact.is_empty() && lower_syl.len() == 1 {
+                    (lexicon.abbrev_trie.exact_lookup(&lower_syl), true)
+                } else {
+                    (exact, false)
+                };
+                for &id in lookup_ids {
                     let entry = &lexicon.entries[id as usize];
-                    if !prefix_edges
-                        .iter()
-                        .any(|e| e.end == syl_end && e.text == entry.text)
+                    if entry.pinyin_syllables.len() == 1
+                        && !prefix_edges
+                            .iter()
+                            .any(|e| e.end == syl_end && e.text == entry.text)
                     {
                         extra_char_edges.push(LatticeEdge {
                             start: unpinned_start,
                             end: syl_end,
                             text: entry.text.clone(),
-                            code_key: entry.syllable_key.clone(),
+                            code_key: if is_abbrev_initial {
+                                lower_syl.clone()
+                            } else {
+                                entry.syllable_key.clone()
+                            },
                             kind: EdgeKind::ChineseChar,
                             base_cost: entry.cost,
                             domain: entry.domain,
@@ -586,18 +625,20 @@ impl BilingualDecoder {
             if edge.text.is_empty() {
                 continue;
             }
-            // 局部前缀里的简拼（`shi` 里的 s'h → 上海）与英文片段（`zairen…` 里的 Zaire）几乎从不是用户想要的，
-            // 只有整串输入本身是简拼 / 英文时才有意义（那种情况已在整句组中给出）
-            if edge.end < n
-                && matches!(
+            // 在全拼句子中过滤局部前缀简拼（`shi` 里的 s'h → 上海）与英文片段（`zairen…` 里的 Zaire）；
+            // 但在纯简拼输入（`!has_full_pinyin_at_start`，如 `wzj`）中保留前缀简拼词（`wz` → 我在/文章/位置/完整）
+            if edge.end < n {
+                if matches!(
                     edge.kind,
-                    EdgeKind::AbbrevPinyin
-                        | EdgeKind::EnglishWord
+                    EdgeKind::EnglishWord
                         | EdgeKind::EnglishPrefixCompletion
                         | EdgeKind::EnglishRaw
-                )
-            {
-                continue;
+                ) {
+                    continue;
+                }
+                if edge.kind == EdgeKind::AbbrevPinyin && has_full_pinyin_at_start {
+                    continue;
+                }
             }
             let is_single_cjk = edge.text.chars().count() == 1 && !edge.text.is_ascii();
             if is_single_cjk {
@@ -606,10 +647,11 @@ impl BilingualDecoder {
                 word_edges.push(edge);
             }
         }
-        // 词组：精确拼音优先于纠错词；覆盖拼音越长越靠前；同长度按词频（含个人记忆）排序
+        // 词组：精确拼音优先于纠错词；覆盖音节数越多越靠前；同音节数按覆盖长度与词频（含个人记忆）排序
         word_edges.sort_by(|a, b| {
             a.is_fuzzy
                 .cmp(&b.is_fuzzy)
+                .then_with(|| b.syllable_count.cmp(&a.syllable_count))
                 .then_with(|| b.end.cmp(&a.end))
                 .then_with(|| {
                     rank_cost(a)
@@ -634,6 +676,118 @@ impl BilingualDecoder {
             .iter()
             .map(|c| c.l1_cost)
             .fold(10.0_f32, f32::max);
+
+        let mut rank = 0usize;
+        let mut added_words = 0usize;
+
+        // 1.0) 对齐微软拼音多段递进短语候选（如输入 `keyiyouhuadedif` 时，在首选整句「可以优化的地方」之后，
+        //      依次提供递进前缀短语「可以优化的」「可以优化」，方便一键锁定前 N-1 / N-2 个词块）
+        if has_full_pinyin_at_start {
+            if let Some(best_cand) = candidates.first().cloned() {
+                let unpinned_segs: Vec<SegmentSpan> = best_cand
+                    .segment_spans
+                    .iter()
+                    .filter(|s| s.start >= unpinned_start && !s.text.is_empty())
+                    .cloned()
+                    .collect();
+                if unpinned_segs.len() >= 3 {
+                    let max_prog = if candidates.len() <= 1 { 2 } else { 1 };
+                    let mut added_prog = 0usize;
+                    let max_k = unpinned_segs.len().min(5);
+                    for k in (2..max_k).rev() {
+                        if added_prog >= max_prog {
+                            break;
+                        }
+                        let slice_segs = &unpinned_segs[..k];
+                        let prog_start = slice_segs.first().unwrap().start;
+                        let prog_end = slice_segs.last().unwrap().end;
+                        let mut prog_text = String::new();
+                        let mut prev_ascii: Option<bool> = None;
+                        for sp in slice_segs {
+                            let cur_ascii = sp.text.is_ascii();
+                            if let Some(pa) = prev_ascii {
+                                if pa != cur_ascii || (pa && cur_ascii) {
+                                    prog_text.push(' ');
+                                }
+                            }
+                            prog_text.push_str(&sp.text);
+                            prev_ascii = Some(cur_ascii);
+                        }
+                        if prog_text.is_empty() || !seen_surface.insert(prog_text.clone()) {
+                            continue;
+                        }
+                        let prog_syls: Vec<SegmentSpan> = best_cand
+                            .syllable_spans
+                            .iter()
+                            .filter(|s| s.start >= prog_start && s.end <= prog_end)
+                            .cloned()
+                            .collect();
+                        let prog_preedit = prog_syls
+                            .iter()
+                            .map(|s| s.code_key.as_str())
+                            .collect::<Vec<_>>()
+                            .join("'");
+                        candidates.push(Candidate {
+                            text: prog_text.clone(),
+                            preedit: prog_preedit,
+                            consumed_len: prog_end.saturating_sub(prog_start),
+                            l1_cost: max_beam_cost + 0.3 + rank as f32 * 0.05,
+                            final_score: (min_beam_score - 1.0) - rank as f32 * 0.01,
+                            ai_boosted: false,
+                            tag: "[前缀选词]".to_string(),
+                            segments: slice_segs.iter().map(|s| s.text.clone()).collect(),
+                            segment_spans: slice_segs.to_vec(),
+                            syllable_spans: prog_syls.clone(),
+                        });
+                        rank += 1;
+                        added_prog += 1;
+
+                        // 若该递进短语末尾词块含助词后缀（如「优化的」以「的/了/着/过」结尾），继续派生去除末尾助词的主干短语（如「可以优化」）
+                        if added_prog < max_prog && prog_syls.len() >= 3 {
+                            if let Some(last_seg) = slice_segs.last() {
+                                if last_seg.text.chars().count() >= 2
+                                    && last_seg.text.ends_with(['的', '了', '着', '过'])
+                                {
+                                    let stem_syls = prog_syls[..prog_syls.len() - 1].to_vec();
+                                    let stem_end = stem_syls.last().unwrap().end;
+                                    let last_char_len = last_seg.text.chars().last().unwrap().len_utf8();
+                                    let stem_text = prog_text[..prog_text.len() - last_char_len].to_string();
+                                    if !stem_text.is_empty()
+                                        && stem_end > prog_start
+                                        && seen_surface.insert(stem_text.clone())
+                                    {
+                                        let mut stem_segs = slice_segs.to_vec();
+                                        if let Some(last_s) = stem_segs.last_mut() {
+                                            last_s.end = stem_end;
+                                            last_s.text = last_seg.text[..last_seg.text.len() - last_char_len].to_string();
+                                        }
+                                        let stem_preedit = stem_syls
+                                            .iter()
+                                            .map(|s| s.code_key.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("'");
+                                        candidates.push(Candidate {
+                                            text: stem_text,
+                                            preedit: stem_preedit,
+                                            consumed_len: stem_end.saturating_sub(prog_start),
+                                            l1_cost: max_beam_cost + 0.3 + rank as f32 * 0.05,
+                                            final_score: (min_beam_score - 1.0) - rank as f32 * 0.01,
+                                            ai_boosted: false,
+                                            tag: "[前缀选词]".to_string(),
+                                            segments: stem_segs.iter().map(|s| s.text.clone()).collect(),
+                                            segment_spans: stem_segs,
+                                            syllable_spans: stem_syls,
+                                        });
+                                        rank += 1;
+                                        added_prog += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let mut push_prefix = |edge: &LatticeEdge, rank: usize, candidates: &mut Vec<Candidate>| -> bool {
             if !seen_surface.insert(edge.text.clone()) {
@@ -673,9 +827,15 @@ impl BilingualDecoder {
             true
         };
 
-        // 1) 所有精确匹配的多字前缀词组（三字词、双字词）一律排在单字之前！
-        let mut rank = 0usize;
-        let mut added_words = 0usize;
+        // 若当前为 3 字母及以上的纯简拼输入（如 `wzj`），将前 2 个最高频整词（如「为自己」「我自己」）保留在最前，
+        // 随后立即穿插高频 2 字简拼前缀词（如「文章」「网站」「位置」「文字」「我在」「完整」），对齐微软拼音简拼体验
+        let deferred_abbrev_full: Vec<Candidate> = if !has_full_pinyin_at_start && n >= 3 && candidates.len() > 2 {
+            candidates.drain(2..).collect()
+        } else {
+            Vec::new()
+        };
+
+        // 1) 所有精确匹配的多字前缀词组（递进短语、三字词、双字词）一律排在单字之前！
         for &edge in &word_edges {
             if edge.is_fuzzy {
                 continue;
@@ -687,6 +847,12 @@ impl BilingualDecoder {
                 rank += 1;
                 added_words += 1;
             }
+        }
+        // 1b) 追加其余完整简拼词条
+        for mut cand in deferred_abbrev_full {
+            cand.final_score = (min_beam_score - 1.0) - rank as f32 * 0.01;
+            rank += 1;
+            candidates.push(cand);
         }
         // 2) 首音节精确匹配的单字候选
         let mut added_chars = 0usize;
@@ -774,11 +940,22 @@ impl BilingualDecoder {
         }
 
         // 个人输入记忆首选晋升（User Memory Top Promotion）：
-        // 若用户针对当前完整编码高频输入或主动选择过某个字词句，直接将其置顶为第 1 首选词！
+        // 若用户针对当前完整编码高频输入或主动选择过某个字词句，或输入简拼匹配到历史全拼输入过的词条，直接将其置顶！
         if pinned_segments.is_empty() {
-            let user_recs = user_dict.top_user_records(&lattice.input);
-            for urec in user_recs.into_iter().take(2).rev() {
-                if urec.dynamic_score >= 4.5 || urec.commit_count >= 2 {
+            let mut user_recs = user_dict.top_user_records(&lattice.input);
+            let mut jianpin_set = HashSet::new();
+            for jrec in user_dict.top_jianpin_records(&lattice.input) {
+                jianpin_set.insert(jrec.text.clone());
+                if !user_recs.iter().any(|r| r.text == jrec.text) {
+                    user_recs.push(jrec);
+                }
+            }
+            for urec in user_recs.into_iter().take(4).rev() {
+                let is_jp_recall = jianpin_set.contains(&urec.text);
+                if urec.dynamic_score >= 4.5
+                    || urec.commit_count >= 2
+                    || (is_jp_recall && urec.commit_count >= 1)
+                {
                     let mem_tag = format!("[记忆·{}次]", urec.commit_count);
                     if let Some(pos) = candidates.iter().position(|c| c.text == urec.text) {
                         let mut item = candidates.remove(pos);
@@ -932,16 +1109,25 @@ fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan
         }
         let next_end = if idx + 1 == syls.len() {
             edge.end
+        } else if edge.kind == EdgeKind::AbbrevPinyin || span_len == syls.len() {
+            // 首字母简拼词条（如 `wzj` -> `wei'zi'ji`）：每个音节固定对应 1 个输入字母
+            (cur + 1).min(edge.end)
         } else if total_syl_len == span_len {
             (cur + syl.len()).min(edge.end)
         } else {
-            // 若存在模糊音导致长度不等（如 z/zh, n/ng），在剩余输入中匹配合法音节前缀
+            // 若存在混拼/半拼（如 `dif` -> `di'fang`）或模糊音导致长度不等，为后续每个音节至少预留 1 字节，并优先匹配原音节前缀
             let rem = &input[cur..edge.end];
-            let mut matched_len = syl.len().min(rem.len());
-            for try_len in (1..=rem.len().min(6)).rev() {
-                if crate::pinyin::is_valid_syllable(&rem[..try_len]) {
-                    matched_len = try_len;
-                    break;
+            let rem_syls_after = syls.len().saturating_sub(idx + 1);
+            let max_try = rem.len().saturating_sub(rem_syls_after).min(6);
+            let mut matched_len = 1.min(rem.len());
+            if syl.len() <= max_try && rem[..max_try].starts_with(syl) {
+                matched_len = syl.len();
+            } else {
+                for try_len in (1..=max_try).rev() {
+                    if crate::pinyin::is_valid_syllable(&rem[..try_len]) {
+                        matched_len = try_len;
+                        break;
+                    }
                 }
             }
             (cur + matched_len).min(edge.end)

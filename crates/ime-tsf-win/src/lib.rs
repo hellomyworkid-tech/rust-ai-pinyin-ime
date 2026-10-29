@@ -405,6 +405,9 @@ impl TsfKeySession {
                 break;
             }
         }
+        while pos < n && self.input_buffer.as_bytes()[pos] == b'\'' {
+            pos += 1;
+        }
         pos
     }
 
@@ -959,10 +962,42 @@ impl TsfKeySession {
                                     ai_boosted: false,
                                     tag: "[余下整句]".to_string(),
                                     segments: suffix_segs.iter().map(|s| s.text.clone()).collect(),
-                                    segment_spans: suffix_segs,
-                                    syllable_spans: suffix_syls,
+                                    segment_spans: suffix_segs.clone(),
+                                    syllable_spans: suffix_syls.clone(),
                                 },
                             );
+                        }
+                        if suffix_segs.len() >= 3 {
+                            let sub_segs = suffix_segs[..suffix_segs.len() - 1].to_vec();
+                            let sub_text = Self::format_segment_spans(&sub_segs);
+                            let sub_end = sub_segs.last().unwrap().end;
+                            if !sub_text.is_empty() && !local_cands.iter().any(|c| c.text == sub_text) {
+                                let sub_syls: Vec<SegmentSpan> = suffix_syls
+                                    .iter()
+                                    .filter(|s| s.end <= sub_end)
+                                    .cloned()
+                                    .collect();
+                                let sub_preedit = sub_syls
+                                    .iter()
+                                    .map(|s| s.code_key.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("'");
+                                local_cands.insert(
+                                    1.min(local_cands.len()),
+                                    Candidate {
+                                        text: sub_text,
+                                        preedit: sub_preedit,
+                                        consumed_len: sub_end.saturating_sub(syl_span.start),
+                                        l1_cost: 0.2,
+                                        final_score: 138.0,
+                                        ai_boosted: false,
+                                        tag: "[前缀选词]".to_string(),
+                                        segments: sub_segs.iter().map(|s| s.text.clone()).collect(),
+                                        segment_spans: sub_segs,
+                                        syllable_spans: sub_syls,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -1105,14 +1140,16 @@ impl TsfKeySession {
                             .find(|(_, &(e, _))| e == span_start)
                             .map(|(_, (_, txt))| txt.clone())
                     });
-                let is_single_syllable = ime_core::pinyin::is_valid_syllable(&slice_code);
+                let is_single_syllable = ime_core::pinyin::is_valid_syllable(&slice_code)
+                    || slice_code.len() <= 1
+                    || chosen.text.chars().count() <= 1;
                 if is_single_syllable {
                     // 句中单字改选：只学习「上一个词 + 这个字」的搭配，不全局提升该字，
                     // 避免一次把 `de` 选成「得」后所有句子里的「的」都变成「得」
                     if let Some(prev) = prev_word.as_deref() {
                         self.core.learn_bigram(prev, &chosen.text);
                     }
-                } else if chosen.segment_spans.len() == 1 {
+                } else if chosen.segment_spans.len() == 1 || chosen.text.chars().count() <= 6 {
                     self.core.commit_candidate_ex(
                         &slice_code,
                         &chosen.text,

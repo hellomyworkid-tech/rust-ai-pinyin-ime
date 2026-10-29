@@ -347,6 +347,22 @@ mod win32_installer {
                     "✔ 已安装 Windows TSF 正式系统输入法 COM 组件: ime_tsf_win.dll".to_string(),
                 );
             }
+            // 2b. 32 位 TSF 组件（供 WPS Office 等 32 位程序加载）
+            if let Some(dll32_src) = self.find_source_file(&[
+                "ime_tsf_win_x86.dll",
+                "dist\\ime_tsf_win_x86.dll",
+            ]) {
+                let dll32_dst = target_dir.join("ime_tsf_win_x86.dll");
+                if fs::copy(&dll32_src, &dll32_dst).is_err() {
+                    let old_bak = target_dir.join(format!("ime_tsf_win_x86.{}.old", std::process::id()));
+                    let _ = fs::remove_file(&old_bak);
+                    let _ = fs::rename(&dll32_dst, &old_bak);
+                    let _ = fs::copy(&dll32_src, &dll32_dst);
+                }
+                self.status_logs.push(
+                    "✔ 已安装 32 位 TSF 组件（WPS 等 32 位程序）: ime_tsf_win_x86.dll".to_string(),
+                );
+            }
 
             // 3. Copy desktop workbench if available
             if let Some(ui_src) = self.find_source_file(&[

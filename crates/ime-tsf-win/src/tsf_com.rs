@@ -416,21 +416,39 @@ static LAST_CARET_RECT: Mutex<(i32, i32)> = Mutex::new((0, 0));
 static LOCAL_SHIFT_TAP_ARMED: AtomicBool = AtomicBool::new(false);
 static COMMIT_POLLER_STARTED: AtomicBool = AtomicBool::new(false);
 
+/// Win32 `KEYBDINPUT`（`dwExtraInfo` 为指针宽度，兼容 x64 与 x86 32 位 DLL）
 #[cfg(target_os = "windows")]
 #[repr(C)]
-struct INPUT {
-    input_type: u32,
-    _pad0: u32,
+struct KEYBDINPUT {
     w_vk: u16,
     w_scan: u16,
     dw_flags: u32,
     time: u32,
-    _pad1: u32,
     dw_extra_info: usize,
-    _pad_union: u64,
+}
+
+/// Win32 `INPUT`：联合体大小由 `MOUSEINPUT` 决定，比 `KEYBDINPUT` 多 8 字节（x64 共 40 字节，x86 共 28 字节）
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct INPUT {
+    input_type: u32,
+    ki: KEYBDINPUT,
+    _pad_union: [u8; 8],
 }
 #[cfg(target_os = "windows")]
+impl INPUT {
+    fn unicode(unit: u16, dw_flags: u32) -> Self {
+        INPUT {
+            input_type: 1, // INPUT_KEYBOARD
+            ki: KEYBDINPUT { w_vk: 0, w_scan: unit, dw_flags, time: 0, dw_extra_info: 0 },
+            _pad_union: [0; 8],
+        }
+    }
+}
+#[cfg(all(target_os = "windows", target_pointer_width = "64"))]
 const _: () = assert!(std::mem::size_of::<INPUT>() == 40);
+#[cfg(all(target_os = "windows", target_pointer_width = "32"))]
+const _: () = assert!(std::mem::size_of::<INPUT>() == 28);
 
 #[cfg(target_os = "windows")]
 #[link(name = "kernel32")]
@@ -964,6 +982,19 @@ unsafe extern "system" fn tip_activate_ex(
 
     // 启动单实例进程内异步上屏轮询线程（支持鼠标点击候选框在管理员窗口如 Taskmgr.exe 中正常上屏）
     if !COMMIT_POLLER_STARTED.swap(true, Ordering::SeqCst) {
+        // 轮询线程常驻于本 DLL 代码中：先将 DLL 钉住（GET_MODULE_HANDLE_EX_FLAG_PIN），
+        // 防止宿主进程调用 CoFreeUnusedLibraries 卸载 DLL 后线程唤醒时访问已卸载代码导致宿主崩溃
+        #[cfg(target_os = "windows")]
+        {
+            const GET_MODULE_HANDLE_EX_FLAG_PIN: u32 = 0x0000_0001;
+            const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x0000_0004;
+            let mut h_pin: isize = 0;
+            let _ = GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                com_dll_get_class_object as *const u16,
+                &mut h_pin,
+            );
+        }
         std::thread::spawn(|| {
             let my_pid = std::process::id();
             loop {
@@ -1210,28 +1241,8 @@ unsafe fn send_unicode_from_tsf(text: &str) -> u32 {
     }
     let mut inputs = Vec::with_capacity(utf16.len() * 2);
     for &unit in &utf16 {
-        inputs.push(INPUT {
-            input_type: 1,
-            _pad0: 0,
-            w_vk: 0,
-            w_scan: unit,
-            dw_flags: 0x0004, // KEYEVENTF_UNICODE
-            time: 0,
-            _pad1: 0,
-            dw_extra_info: 0,
-            _pad_union: 0,
-        });
-        inputs.push(INPUT {
-            input_type: 1,
-            _pad0: 0,
-            w_vk: 0,
-            w_scan: unit,
-            dw_flags: 0x0004 | 0x0002, // KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-            time: 0,
-            _pad1: 0,
-            dw_extra_info: 0,
-            _pad_union: 0,
-        });
+        inputs.push(INPUT::unicode(unit, 0x0004)); // KEYEVENTF_UNICODE
+        inputs.push(INPUT::unicode(unit, 0x0004 | 0x0002)); // KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
     }
     SendInput(
         inputs.len() as u32,

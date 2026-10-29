@@ -130,6 +130,18 @@ impl FlatTrie {
 
     /// 插入一个键与对应的词条 ID（假设插入顺序已按 cost 升序排列）
     pub fn insert(&mut self, key: &str, entry_id: u32, record_prefix_top: bool, max_prefix_top: usize) {
+        self.insert_with_limit(key, entry_id, record_prefix_top, max_prefix_top, 255);
+    }
+
+    /// 插入一个键与对应的词条 ID，并指定当前节点精确命中列表的最大容量（上限 255，与二进制格式 `u8` 对齐）
+    pub fn insert_with_limit(
+        &mut self,
+        key: &str,
+        entry_id: u32,
+        record_prefix_top: bool,
+        max_prefix_top: usize,
+        max_exact: usize,
+    ) {
         let mut curr = 0u32;
         for &b in key.as_bytes() {
             let next = match self.nodes[curr as usize].find_child(b) {
@@ -152,7 +164,8 @@ impl FlatTrie {
             }
         }
         let exact = &mut self.nodes[curr as usize].exact_entries;
-        if exact.len() < 24 && !exact.contains(&entry_id) {
+        let cap = max_exact.min(255);
+        if exact.len() < cap && !exact.contains(&entry_id) {
             exact.push(entry_id);
         }
     }
@@ -825,15 +838,23 @@ impl MultiSourceBuilder {
         for (idx, entry) in entries.iter().enumerate() {
             let id = idx as u32;
             if entry.is_english {
-                english_trie.insert(&entry.flat_key, id, true, 6);
+                english_trie.insert_with_limit(&entry.flat_key, id, true, 6, 24);
             } else {
-                syllable_trie.insert(&entry.syllable_key, id, false, 0);
-                // 仅对中高频 2~5 字词建立首字母简拼索引，避免十万级长尾生僻词污染简拼候选
-                if (2..=5).contains(&entry.pinyin_syllables.len())
+                // 单音节汉字保留全部同音字（8105 字表中单音节最多 141 字 <= 255，彻底杜绝如 `ji` 漏掉「吉」等常用字）
+                let syl_cap = if entry.pinyin_syllables.len() == 1 { 255 } else { 64 };
+                syllable_trie.insert_with_limit(&entry.syllable_key, id, false, 0, syl_cap);
+                if entry.pinyin_syllables.len() == 1
+                    && entry.text.chars().count() == 1
                     && !entry.abbrev_key.is_empty()
-                    && entry.raw_weight >= 500.0
                 {
-                    abbrev_trie.insert(&entry.abbrev_key, id, false, 0);
+                    // 单字首字母简拼索引（如 `w` -> 我/为/无/问/外/王，`z` -> 在/这/中/正，`j` -> 就/家/吉/佳）
+                    abbrev_trie.insert_with_limit(&entry.abbrev_key, id, false, 0, 120);
+                } else if (2..=6).contains(&entry.pinyin_syllables.len())
+                    && !entry.abbrev_key.is_empty()
+                    && entry.raw_weight >= 100.0
+                {
+                    // 对 2~6 字常用词建立首字母简拼索引（如 `wz` -> 我在/文章/位置/完整，`wzj` -> 为自己/我自己/我这就）
+                    abbrev_trie.insert_with_limit(&entry.abbrev_key, id, false, 0, 48);
                 }
             }
         }

@@ -82,55 +82,125 @@ impl BilingualLattice {
 
         // 2. 基于 Trie 节点增量游走的零拷贝 DFS：枚举从位置 i 出发的 1~6 个连续中文音节路径，无前缀时立即剪枝
         for start_pos in 0..n {
-            if spans_at[start_pos].is_empty() {
-                continue;
+            if !spans_at[start_pos].is_empty() {
+                collect_chinese_edges(
+                    start_pos,
+                    start_pos,
+                    0,
+                    0,
+                    0.0,
+                    input,
+                    &spans_at,
+                    lexicon,
+                    &mut edges_from[start_pos],
+                );
+            } else if start_pos == 0 && (2..=6).contains(&n) && !spans_at[1].is_empty() {
+                // 2.1 首音节声母简拼 + 后继全拼音节（混拼，如 `zme` -> 怎么、`sme` -> 什么、`wmen` -> 我们、`dfang` -> 地方）
+                let first_c = &input[0..1];
+                if first_c.as_bytes()[0].is_ascii_lowercase() {
+                    let sep_nodes = collect_first_initial_sep_nodes(lexicon, first_c);
+                    for sep_node in sep_nodes {
+                        collect_chinese_edges_from_sep(
+                            0,
+                            1,
+                            sep_node,
+                            1,
+                            1.35,
+                            input,
+                            &spans_at,
+                            lexicon,
+                            &mut edges_from[0],
+                        );
+                    }
+                }
             }
-            collect_chinese_edges(
-                start_pos,
-                start_pos,
-                0,
-                0,
-                0.0,
-                input,
-                &spans_at,
-                lexicon,
-                &mut edges_from[start_pos],
-            );
         }
 
-        // 3. 扫描首字母简拼前缀树 (`abbrev_trie`)，支持如 `jsj` -> `计算机`, `bg` -> `报告/变更`
+        // 3. 扫描首字母简拼前缀树 (`abbrev_trie`)，支持如 `jsj` -> `计算机`, `wzj` -> `为自己 / 我在... / 我...`
+        let lower_input = input.to_ascii_lowercase();
         for start_pos in 0..n {
             let suffix = &input[start_pos..];
             if !suffix.as_bytes()[0].is_ascii_lowercase() {
                 continue;
             }
+            let no_full_syl_at_start = spans_at[start_pos].is_empty();
             for (matched_len, entry_ids) in lexicon.abbrev_trie.common_prefix_search(suffix) {
                 let end_pos = start_pos + matched_len;
-                // 简拼只在长度 >= 2 时启用
-                if matched_len < 2 {
-                    continue;
-                }
-                // 如果该段本身已是单个完整合法音节（例如 `de`, `le`, `shi`），跳过 2 字母简拼干扰
                 let span_str = &input[start_pos..end_pos];
-                let is_single_full_syl = crate::pinyin::is_valid_syllable(span_str);
                 let is_whole_input = start_pos == 0 && end_pos == n;
 
-                // 关键规则：只有当用户整串输入本身就是简拼（如单独打 `rgzn` / `jsj`）时才给予低惩罚；
-                // 若在长句中间（如 `...xiankayijiamddecpushang`），严禁 4 字母简拼 `mdde`（没到点儿）抢夺 `amd + de`！
-                if !is_whole_input && n > 6 {
+                // 3.1 单字母声母简拼单字（如输入 `w`、`wzj` 中的 `w`/`z`/`j`、或长句末尾正在输入的声母 `f`）：
+                // 允许在短输入（n <= 6）或句尾最后一个未成音节声母（`end_pos == n`）处启用，杜绝长句末尾退化为原样英文字母
+                if matched_len == 1 {
+                    if !no_full_syl_at_start || (n > 6 && end_pos < n) {
+                        continue;
+                    }
+                    let take_chars = if n == 1 { 30 } else { 6 };
+                    let char_penalty = if n == 1 {
+                        0.5
+                    } else if n <= 6 {
+                        2.6
+                    } else {
+                        3.2
+                    };
+                    for &id in entry_ids.iter().take(take_chars) {
+                        let entry = &lexicon.entries[id as usize];
+                        if entry.pinyin_syllables.len() == 1 {
+                            edges_from[start_pos].push(LatticeEdge {
+                                start: start_pos,
+                                end: end_pos,
+                                text: entry.text.clone(),
+                                code_key: span_str.to_string(),
+                                kind: EdgeKind::ChineseChar,
+                                base_cost: entry.cost + char_penalty,
+                                domain: entry.domain,
+                                syllable_count: 1,
+                                is_fuzzy: false,
+                            });
+                        }
+                    }
                     continue;
                 }
 
-                let abbrev_penalty = if is_single_full_syl {
-                    4.2
+                // 3.2 多字母词组简拼（长度 >= 2）：
+                // 若当前片段已被起始于同一位置的单个精确全拼音节覆盖（如 `shi` / `shiyong` 中的 `sh`），
+                // 且并非整串输入，则直接跳过，杜绝全拼词首被拆成 `s'h -> 上海`
+                let covered_by_single_full_syl = spans_at[start_pos]
+                    .iter()
+                    .any(|sp| sp.fuzzy_penalty == 0.0 && sp.end >= end_pos);
+                if covered_by_single_full_syl && !is_whole_input {
+                    continue;
+                }
+                let is_single_full_syl = crate::pinyin::is_valid_syllable(span_str);
+                let is_sentence_tail_abbrev = end_pos == n
+                    && no_full_syl_at_start
+                    && matched_len <= 4
+                    && lexicon
+                        .english_trie
+                        .exact_lookup(&lower_input[start_pos..end_pos])
+                        .is_empty();
+
+                // 关键规则：若在长句中间（n > 6 且不在句尾纯声母处），严禁局部简拼抢夺全拼与英文词（如 `amd + de`）
+                if !is_whole_input && n > 6 && !is_sentence_tail_abbrev {
+                    continue;
+                }
+
+                let (abbrev_penalty, take_limit) = if is_single_full_syl {
+                    (4.2, 6)
                 } else if is_whole_input {
-                    1.6 + (matched_len as f32) * 0.25
+                    (1.6 + (matched_len as f32) * 0.25, 24)
+                } else if no_full_syl_at_start {
+                    // 纯简拼串的前缀词组（如 `wzj` 中的 `wz`）或长句末尾简拼词（如 `keyiyouhuadedf` 中的 `df` -> 地方）
+                    (2.2 + (matched_len as f32) * 0.35, 20)
                 } else {
-                    6.8 + (matched_len as f32) * 1.8
+                    (6.8 + (matched_len as f32) * 1.8, 6)
                 };
 
-                for &id in entry_ids.iter().take(6) {
+                for &id in entry_ids.iter().take(take_limit) {
                     let entry = &lexicon.entries[id as usize];
+                    if entry.pinyin_syllables.len() < 2 {
+                        continue;
+                    }
                     edges_from[start_pos].push(LatticeEdge {
                         start: start_pos,
                         end: end_pos,
@@ -144,11 +214,40 @@ impl BilingualLattice {
                     });
                 }
             }
+
+            // 3.3 句尾不完整单音节前缀补全（如输入 `zh`/`ch`/`sh`/`zho`/`zhon`/`sho`/`xio`/`dua` 等尚未敲完韵母的单字）
+            let tail_len = n - start_pos;
+            if (2..=5).contains(&tail_len)
+                && suffix.bytes().all(|b| b.is_ascii_lowercase())
+                && !crate::pinyin::is_valid_syllable(suffix)
+                && lexicon
+                    .english_trie
+                    .exact_lookup(&lower_input[start_pos..n])
+                    .is_empty()
+            {
+                let take_inc = if start_pos == 0 { 24 } else { 6 };
+                let inc_char_penalty = if start_pos == 0 { 1.25 } else { 2.85 };
+                for id in collect_syllable_prefix_entries(lexicon, 0, suffix, false, take_inc) {
+                    let entry = &lexicon.entries[id as usize];
+                    if entry.pinyin_syllables.len() == 1 && entry.text.chars().count() == 1 {
+                        edges_from[start_pos].push(LatticeEdge {
+                            start: start_pos,
+                            end: n,
+                            text: entry.text.clone(),
+                            code_key: suffix.to_string(),
+                            kind: EdgeKind::ChineseChar,
+                            base_cost: entry.cost + inc_char_penalty,
+                            domain: entry.domain,
+                            syllable_count: 1,
+                            is_fuzzy: false,
+                        });
+                    }
+                }
+            }
         }
 
         // 4. 扫描英文与程序员规范词库 (`english_trie`)，实现无空格中英混输
         let detector = PhonotacticDetector::global();
-        let lower_input = input.to_ascii_lowercase();
 
         for start_pos in 0..n {
             let lower_suffix = &lower_input[start_pos..];
@@ -393,5 +492,207 @@ fn collect_chinese_edges<'a>(
             lexicon,
             out_edges,
         );
+    }
+
+    // 多音节词末尾不完整音节/声母补全（如 `keyiyouhuadedif` 中的 `di` + `f` -> `地方`，`zenm` -> `怎么`，`weishenm` -> `为什么`，`zenmy` -> `怎么样`）
+    if depth >= 1 && accum_fuzzy == 0.0 && effective_pos < n {
+        let rem_tail = &input[effective_pos..n];
+        if rem_tail.len() <= 5 && rem_tail.bytes().all(|b| b.is_ascii_lowercase()) {
+            let tail_is_valid_syl = crate::pinyin::is_valid_syllable(rem_tail);
+            let whole_slice_is_en = !lexicon
+                .english_trie
+                .exact_lookup(&input[origin_start..n].to_ascii_lowercase())
+                .is_empty();
+            let inc_penalty = if whole_slice_is_en {
+                2.8
+            } else if !tail_is_valid_syl {
+                0.95
+            } else {
+                1.55
+            };
+            // 句尾已是完整音节（如 `shima` 的 `ma`、`api` 的 `pi`）时，仅保留比精确匹配词更常用的补全词
+            // （如 `zhonggu` -> 中国 强于 中古），避免把「是吗」扩展出「时髦 / 是毛」之类的噪音
+            let exact_best_cost = if tail_is_valid_syl {
+                lexicon
+                    .syllable_trie
+                    .advance_node(base_node, rem_tail)
+                    .and_then(|nd| lexicon.syllable_trie.nodes[nd as usize].exact_entries.first().copied())
+                    .map(|id| lexicon.entries[id as usize].cost)
+            } else {
+                None
+            };
+            for id in collect_syllable_prefix_entries(lexicon, base_node, rem_tail, false, 8) {
+                if exact_best_cost.is_some_and(|best| lexicon.entries[id as usize].cost >= best) {
+                    continue;
+                }
+                let entry = &lexicon.entries[id as usize];
+                out_edges.push(LatticeEdge {
+                    start: origin_start,
+                    end: n,
+                    text: entry.text.clone(),
+                    code_key: entry.syllable_key.clone(),
+                    kind: EdgeKind::ChineseWord,
+                    base_cost: entry.cost + inc_penalty,
+                    domain: entry.domain,
+                    syllable_count: syl_count,
+                    is_fuzzy: false,
+                });
+            }
+            if rem_tail.len() == 2 && !tail_is_valid_syl && !whole_slice_is_en && syl_count + 1 <= 6 {
+                for id in collect_two_initial_tail_entries(
+                    lexicon,
+                    base_node,
+                    &rem_tail[0..1],
+                    &rem_tail[1..2],
+                    6,
+                ) {
+                    let entry = &lexicon.entries[id as usize];
+                    out_edges.push(LatticeEdge {
+                        start: origin_start,
+                        end: n,
+                        text: entry.text.clone(),
+                        code_key: entry.syllable_key.clone(),
+                        kind: EdgeKind::ChineseWord,
+                        base_cost: entry.cost + 1.35,
+                        domain: entry.domain,
+                        syllable_count: syl_count + 1,
+                        is_fuzzy: false,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// 在 `syllable_trie` 中从 `start_node` 出发沿不完整音节前缀 `prefix_slice` 前进，
+/// 收集其当前音节子树（不跨越下一个 `'`）中按 `cost` 升序排列的前 `limit` 个词条 ID。
+fn collect_syllable_prefix_entries(
+    lexicon: &CompiledLexicon,
+    start_node: u32,
+    prefix_slice: &str,
+    include_self: bool,
+    limit: usize,
+) -> Vec<u32> {
+    let Some(p_node) = lexicon.syllable_trie.advance_node(start_node, prefix_slice) else {
+        return Vec::new();
+    };
+    let mut stack = vec![(p_node, 0u8)];
+    let mut cands: Vec<(f32, u32)> = Vec::new();
+    while let Some((node_idx, depth)) = stack.pop() {
+        let node = &lexicon.syllable_trie.nodes[node_idx as usize];
+        if depth > 0 || include_self {
+            for &id in &node.exact_entries {
+                let cost = lexicon.entries[id as usize].cost;
+                cands.push((cost, id));
+            }
+        }
+        if depth < 5 {
+            for &(ch, child_idx) in &node.transitions {
+                if ch.is_ascii_lowercase() {
+                    stack.push((child_idx, depth + 1));
+                }
+            }
+        }
+    }
+    cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    cands.dedup_by_key(|&mut (_, id)| id);
+    cands.into_iter().take(limit).map(|(_, id)| id).collect()
+}
+
+/// 收集末尾连续两个声母（如 `zenmy` 中的 `m` + `y`、`shurf` 中的 `r` + `f`）对应的词条 ID
+fn collect_two_initial_tail_entries(
+    lexicon: &CompiledLexicon,
+    start_node: u32,
+    c1: &str,
+    c2: &str,
+    limit: usize,
+) -> Vec<u32> {
+    let Some(p1) = lexicon.syllable_trie.advance_node(start_node, c1) else {
+        return Vec::new();
+    };
+    let mut stack1 = vec![(p1, 0u8)];
+    let mut after_sep_nodes = Vec::new();
+    while let Some((node_idx, d)) = stack1.pop() {
+        let node = &lexicon.syllable_trie.nodes[node_idx as usize];
+        if let Some(sep_child) = node.find_child(b'\'') {
+            after_sep_nodes.push(sep_child);
+        }
+        if d < 5 {
+            for &(ch, child_idx) in &node.transitions {
+                if ch.is_ascii_lowercase() {
+                    stack1.push((child_idx, d + 1));
+                }
+            }
+        }
+    }
+    let mut cands: Vec<(f32, u32)> = Vec::new();
+    for sep_node in after_sep_nodes {
+        for id in collect_syllable_prefix_entries(lexicon, sep_node, c2, true, limit) {
+            cands.push((lexicon.entries[id as usize].cost, id));
+        }
+    }
+    cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    cands.dedup_by_key(|&mut (_, id)| id);
+    cands.into_iter().take(limit).map(|(_, id)| id).collect()
+}
+
+/// 收集首音节以单字母声母 `first_c` 起始且后接分隔符 `'` 的所有 Trie 节点（用于 `zme` -> 怎么、`sme` -> 什么）
+fn collect_first_initial_sep_nodes(lexicon: &CompiledLexicon, first_c: &str) -> Vec<u32> {
+    let Some(p0) = lexicon.syllable_trie.advance_node(0, first_c) else {
+        return Vec::new();
+    };
+    let mut stack = vec![(p0, 0u8)];
+    let mut sep_nodes = Vec::new();
+    while let Some((node_idx, d)) = stack.pop() {
+        let node = &lexicon.syllable_trie.nodes[node_idx as usize];
+        if let Some(sep_child) = node.find_child(b'\'') {
+            sep_nodes.push(sep_child);
+        }
+        if d < 5 {
+            for &(ch, child_idx) in &node.transitions {
+                if ch.is_ascii_lowercase() {
+                    stack.push((child_idx, d + 1));
+                }
+            }
+        }
+    }
+    sep_nodes
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_chinese_edges_from_sep<'a>(
+    origin_start: usize,
+    curr_pos: usize,
+    sep_node: u32,
+    depth: usize,
+    base_penalty: f32,
+    _input: &str,
+    spans_at: &[Vec<&'a SyllableSpan>],
+    lexicon: &CompiledLexicon,
+    out_edges: &mut Vec<LatticeEdge>,
+) {
+    let syl_count = depth + 1;
+    for &sp in &spans_at[curr_pos] {
+        if sp.fuzzy_penalty > 0.0 {
+            continue;
+        }
+        let Some(next_node) = lexicon.syllable_trie.advance_node(sep_node, &sp.syllable) else {
+            continue;
+        };
+        let hit_ids = &lexicon.syllable_trie.nodes[next_node as usize].exact_entries;
+        for &id in hit_ids.iter().take(6) {
+            let entry = &lexicon.entries[id as usize];
+            out_edges.push(LatticeEdge {
+                start: origin_start,
+                end: sp.end,
+                text: entry.text.clone(),
+                code_key: entry.syllable_key.clone(),
+                kind: EdgeKind::ChineseWord,
+                base_cost: entry.cost + base_penalty,
+                domain: entry.domain,
+                syllable_count: syl_count,
+                is_fuzzy: false,
+            });
+        }
     }
 }

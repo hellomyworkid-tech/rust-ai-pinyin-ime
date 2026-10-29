@@ -266,6 +266,13 @@ unsafe fn status_bar_should_show() -> bool {
     {
         return active;
     }
+    // 前台进程中根本没有加载本输入法的 TSF 组件（例如切换到了其他输入法、32 位程序缺少 32 位组件、
+    // 或被安全软件阻止注入），说明本输入法在该窗口中不可能处于激活状态，隐藏状态栏
+    if !is_shell_appcontainer_host(&get_foreground_exe_name()) {
+        if let Some(false) = process_has_our_tsf_dll(pid) {
+            return false;
+        }
+    }
     if let Some(false) = is_our_tip_default_in_ctf_registry() {
         return false;
     }
@@ -1121,6 +1128,67 @@ unsafe fn send_unicode_text(text: &str) {
     }
 }
 
+/// 检查进程是否已加载本输入法的 TSF 组件（`ime_tsf_win.dll` / `ime_tsf_win_x86.dll`）。
+/// 返回 `None` 表示无法查询（例如管理员权限进程拒绝访问）。结果按 PID 缓存 1.5 秒。
+unsafe fn process_has_our_tsf_dll(pid: u32) -> Option<bool> {
+    static CACHE: Mutex<(u32, Option<bool>, u64)> = Mutex::new((0, None, 0));
+    let now = mono_ms();
+    if let Ok(g) = CACHE.lock() {
+        if g.0 == pid && now.saturating_sub(g.2) < 1500 {
+            return g.1;
+        }
+    }
+    #[repr(C)]
+    struct MODULEENTRY32W {
+        dw_size: u32,
+        th32_module_id: u32,
+        th32_process_id: u32,
+        glblcnt_usage: u32,
+        proccnt_usage: u32,
+        mod_base_addr: *mut u8,
+        mod_base_size: u32,
+        h_module: isize,
+        sz_module: [u16; 256],
+        sz_exe_path: [u16; 260],
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
+        fn Module32FirstW(h: isize, me: *mut MODULEENTRY32W) -> i32;
+        fn Module32NextW(h: isize, me: *mut MODULEENTRY32W) -> i32;
+    }
+    const TH32CS_SNAPMODULE: u32 = 0x8;
+    const TH32CS_SNAPMODULE32: u32 = 0x10;
+    let mut result: Option<bool> = None;
+    // 进程刚启动或正在加载模块时可能返回 ERROR_BAD_LENGTH，重试几次
+    for _ in 0..3 {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if snap == -1 || snap == 0 {
+            continue;
+        }
+        let mut me: MODULEENTRY32W = std::mem::zeroed();
+        me.dw_size = std::mem::size_of::<MODULEENTRY32W>() as u32;
+        let mut found = false;
+        let mut ok = Module32FirstW(snap, &mut me);
+        while ok != 0 {
+            let len = me.sz_module.iter().position(|&c| c == 0).unwrap_or(me.sz_module.len());
+            let name = String::from_utf16_lossy(&me.sz_module[..len]).to_ascii_lowercase();
+            if name.starts_with("ime_tsf_win") {
+                found = true;
+                break;
+            }
+            ok = Module32NextW(snap, &mut me);
+        }
+        CloseHandle(snap);
+        result = Some(found);
+        break;
+    }
+    if let Ok(mut g) = CACHE.lock() {
+        *g = (pid, result, now);
+    }
+    result
+}
+
 /// 获取当前焦点窗口的可执行文件名（如 `notepad.exe`, `Code.exe`, `WeChat.exe`）
 unsafe fn get_foreground_exe_name() -> String {
     let hwnd = GetForegroundWindow();
@@ -1309,8 +1377,13 @@ fn map_chinese_punctuation(vk: u32, shift: bool) -> Option<&'static str> {
     match (vk, shift) {
         (0xBC, false) => Some("，"),
         (0xBE, false) => Some("。"),
+        (0xBC, true) => Some("《"),
+        (0xBE, true) => Some("》"),
         (0xBF, true) => Some("？"),
         (0x31, true) => Some("！"),
+        (0x34, true) => Some("￥"),
+        (0x36, true) => Some("……"),
+        (0xBD, true) => Some("——"),
         (0xBA, false) => Some("；"),
         (0xBA, true) => Some("："),
         (0x39, true) => Some("（"),
@@ -3936,6 +4009,41 @@ fn ensure_tsf_dll_installed() -> Option<PathBuf> {
     }
 }
 
+/// 查找并部署 32 位 TSF 组件 `ime_tsf_win_x86.dll`（WPS Office 等 32 位程序只能加载 32 位 TSF DLL，
+/// 需使用 `SysWOW64\regsvr32.exe` 注册到 `HKCR\WOW6432Node\CLSID`）
+fn ensure_tsf_x86_dll_installed() -> Option<PathBuf> {
+    let target_dir = std::env::var("LOCALAPPDATA")
+        .map(|p| PathBuf::from(p).join("RustAiPinyinIME"))
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let installed_dll = target_dir.join("ime_tsf_win_x86.dll");
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("ime_tsf_win_x86.dll"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("ime_tsf_win_x86.dll"));
+        candidates.push(cwd.join("dist").join("ime_tsf_win_x86.dll"));
+    }
+    for src in candidates {
+        if src.exists() && src != installed_dll {
+            if std::fs::copy(&src, &installed_dll).is_err() {
+                let old_bak = target_dir.join(format!("ime_tsf_win_x86.{}.old", std::process::id()));
+                let _ = std::fs::remove_file(&old_bak);
+                let _ = std::fs::rename(&installed_dll, &old_bak);
+                let _ = std::fs::copy(&src, &installed_dll);
+            }
+            break;
+        }
+    }
+    if installed_dll.exists() {
+        Some(installed_dll)
+    } else {
+        None
+    }
+}
+
 /// 切换设置页：只显示属于当前页的子控件，并按 TSF 注册状态显示对应的模式按钮
 unsafe fn set_settings_page(hwnd: isize, page: usize) {
     let page = page.min(NAV_ITEMS.len() - 1);
@@ -4000,6 +4108,7 @@ unsafe fn run_tsf_registration(hwnd: isize, ctrls: SettingsControls, register: b
             "正在请求管理员权限注销系统输入法，请在弹出的 UAC 窗口中点击「是」…"
         },
     );
+    let dll32_path = ensure_tsf_x86_dll_installed();
     std::thread::spawn(move || unsafe {
         let dll_str = dll_path.to_string_lossy().replace('\'', "''");
         let args = if register {
@@ -4007,7 +4116,27 @@ unsafe fn run_tsf_registration(hwnd: isize, ctrls: SettingsControls, register: b
         } else {
             format!("'/u','/s','\"{dll_str}\"'")
         };
-        let ps_cmd = format!("Start-Process regsvr32.exe -ArgumentList {args} -Verb RunAs -Wait");
+        let mut ps_cmd = format!("Start-Process regsvr32.exe -ArgumentList {args} -Verb RunAs -Wait");
+        // 同时注册 / 注销 32 位组件（WPS Office 等 32 位程序），使用 SysWOW64 下的 32 位 regsvr32；
+        // 写入临时脚本后以管理员权限执行一次，只弹出一个 UAC 确认
+        if let Some(p32) = dll32_path.as_ref() {
+            let u = if register { "" } else { "/u " };
+            let script = format!(
+                "Start-Process \"$env:windir\\System32\\regsvr32.exe\" -ArgumentList '{u}/s \"{d64}\"' -Wait\r\nStart-Process \"$env:windir\\SysWOW64\\regsvr32.exe\" -ArgumentList '{u}/s \"{d32}\"' -Wait\r\n",
+                d64 = dll_path.to_string_lossy().replace('\'', "''"),
+                d32 = p32.to_string_lossy().replace('\'', "''"),
+            );
+            let script_path = std::env::temp_dir().join("rust_ai_ime_tsf_register.ps1");
+            // 带 UTF-8 BOM，避免 Windows PowerShell 5.1 以 GBK 解析含中文用户名的路径
+            let mut bytes = vec![0xEF, 0xBB, 0xBF];
+            bytes.extend_from_slice(script.as_bytes());
+            if std::fs::write(&script_path, &bytes).is_ok() {
+                let sp = script_path.to_string_lossy().replace('\'', "''");
+                ps_cmd = format!(
+                    "Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"{sp}\"'"
+                );
+            }
+        }
         let _ = std::process::Command::new("powershell")
             .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
             .status();

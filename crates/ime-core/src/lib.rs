@@ -164,18 +164,30 @@ impl ImeCoreEngine {
         }
         let lattice = self.get_or_build_lattice(input);
         let mut edges = lattice.edges_from.get(start_pos).cloned().unwrap_or_default();
-        // 补齐当前音节在词库中的全部同音单字（长句构图时每个音节只保留了 Top-4 单字以加速整句解码）
+        // 补齐当前音节在词库中的全部同音单字（或简拼首字母对应的全部单字）
         let end_clamped = preferred_end.min(input.len()).max(start_pos + 1);
         let raw_slice = &input[start_pos..end_clamped];
         let lower_slice = raw_slice.to_ascii_lowercase();
-        for &id in self.lexicon.syllable_trie.exact_lookup(&lower_slice) {
+        let exact_ids = self.lexicon.syllable_trie.exact_lookup(&lower_slice);
+        let (lookup_ids, is_abbrev_initial) = if exact_ids.is_empty() && lower_slice.len() == 1 {
+            (self.lexicon.abbrev_trie.exact_lookup(&lower_slice), true)
+        } else {
+            (exact_ids, false)
+        };
+        for &id in lookup_ids {
             let entry = &self.lexicon.entries[id as usize];
-            if !edges.iter().any(|e| e.end == end_clamped && e.text == entry.text) {
+            if entry.pinyin_syllables.len() == 1
+                && !edges.iter().any(|e| e.end == end_clamped && e.text == entry.text)
+            {
                 edges.push(LatticeEdge {
                     start: start_pos,
                     end: end_clamped,
                     text: entry.text.clone(),
-                    code_key: entry.syllable_key.clone(),
+                    code_key: if is_abbrev_initial {
+                        lower_slice.clone()
+                    } else {
+                        entry.syllable_key.clone()
+                    },
                     kind: EdgeKind::ChineseChar,
                     base_cost: entry.cost,
                     domain: entry.domain,
@@ -187,10 +199,15 @@ impl ImeCoreEngine {
         edges.retain(|e| !e.text.is_empty());
 
         // 将从当前音节出发的候选严格分层，对齐主流输入法体验：
-        // 1) 从该音节起始的所有精确匹配多字词组（三字词、双字词排在单字之前，如 `ni'zai` -> "你在", "你再", "拟在"；`shi'yong` -> "使用", "实用"）
-        // 2) 当前音节精确对应的全部同音单字（`e.end == preferred_end`，如 `ni` -> "你", "尼", "泥", "逆", "拟"）
+        // 1) 从该音节起始的所有精确匹配多字词组（三字词、双字词排在单字之前，如 `ni'zai` -> "你在", "你再", "拟在"；`shi'yong` -> "使用", "实用"；`z'j` -> "自己", "直接"）
+        // 2) 当前音节精确对应的全部同音单字（`e.end == preferred_end`，如 `ni` -> "你", "尼", "泥", "逆", "拟"；或简拼首字母单字）
         // 3) 模糊音/纠错词与单字兜底
         let n = input.len();
+        let has_full_pinyin_at_start = edges.iter().any(|e| {
+            !e.is_fuzzy
+                && (e.kind == EdgeKind::ChineseWord
+                    || (e.kind == EdgeKind::ChineseChar && e.end > start_pos + 1))
+        });
         let rank_cost = |e: &LatticeEdge| -> f32 {
             let raw = &input[e.start..e.end.min(n)];
             e.base_cost - self.user_dict.user_boost(raw, &e.text).min(6.0)
@@ -201,6 +218,7 @@ impl ImeCoreEngine {
             .filter(|e| {
                 e.end > preferred_end
                     && (e.kind == EdgeKind::ChineseWord
+                        || (!has_full_pinyin_at_start && e.kind == EdgeKind::AbbrevPinyin)
                         || (e.end == n && e.kind == EdgeKind::EnglishWord))
             })
             .cloned()
@@ -208,6 +226,7 @@ impl ImeCoreEngine {
         multi_syl_words.sort_by(|a, b| {
             a.is_fuzzy
                 .cmp(&b.is_fuzzy)
+                .then_with(|| b.syllable_count.cmp(&a.syllable_count))
                 .then_with(|| b.end.cmp(&a.end))
                 .then_with(|| {
                     rank_cost(a)
@@ -236,14 +255,20 @@ impl ImeCoreEngine {
         let mut other_edges: Vec<LatticeEdge> = edges
             .into_iter()
             .filter(|e| {
-                !(e.end < n
-                    && matches!(
+                if e.end < n {
+                    if matches!(
                         e.kind,
-                        EdgeKind::AbbrevPinyin
-                            | EdgeKind::EnglishWord
+                        EdgeKind::EnglishWord
                             | EdgeKind::EnglishPrefixCompletion
                             | EdgeKind::EnglishRaw
-                    ))
+                    ) {
+                        return false;
+                    }
+                    if e.kind == EdgeKind::AbbrevPinyin && has_full_pinyin_at_start {
+                        return false;
+                    }
+                }
+                true
             })
             .collect();
         other_edges.sort_by(|a, b| {
@@ -255,8 +280,9 @@ impl ImeCoreEngine {
         });
 
         let mut ordered_edges = Vec::new();
-        // 1) 精确匹配的多字词组（前 4 个高频同音词组，如「你在/你再/拟在」「测试/侧视/策士」「使用/实用/适用/试用」）排在单字之前
-        for e in multi_syl_words.iter().filter(|e| !e.is_fuzzy).take(4) {
+        let top_word_take = 12;
+        // 1) 精确匹配的多字词组排在单字之前
+        for e in multi_syl_words.iter().filter(|e| !e.is_fuzzy).take(top_word_take) {
             ordered_edges.push(e.clone());
         }
         // 2) 当前音节精确匹配的同音单字
@@ -277,11 +303,21 @@ impl ImeCoreEngine {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
 
-        // 优先注入用户针对当前音节高频记忆的单字或词条
+        // 优先注入用户针对当前音节高频记忆的单字或词条（含全拼历史词的简拼联想）
         let end_clamped = preferred_end.min(input.len()).max(start_pos + 1);
         let raw_slice = &input[start_pos..end_clamped];
-        for urec in self.user_dict.top_user_records(raw_slice).into_iter().take(2) {
-            if (urec.dynamic_score >= 4.5 || urec.commit_count >= 2) && seen.insert(urec.text.clone()) {
+        let mut user_recs = self.user_dict.top_user_records(raw_slice);
+        for jrec in self.user_dict.top_jianpin_records(raw_slice) {
+            if !user_recs.iter().any(|r| r.text == jrec.text) {
+                user_recs.push(jrec);
+            }
+        }
+        for urec in user_recs.into_iter().take(4) {
+            if (urec.dynamic_score >= 4.5
+                || urec.commit_count >= 2
+                || (urec.code_key != raw_slice && urec.commit_count >= 1))
+                && seen.insert(urec.text.clone())
+            {
                 let span = SegmentSpan {
                     start: start_pos,
                     end: end_clamped,
@@ -337,7 +373,7 @@ impl ImeCoreEngine {
                 segment_spans: vec![span.clone()],
                 syllable_spans: vec![span],
             });
-            if out.len() >= 45 {
+            if out.len() >= 200 {
                 break;
             }
         }
@@ -588,6 +624,93 @@ mod tests {
                 rare,
                 tuo5
             );
+        }
+
+        // ji 必须包含「吉」等全部 8105 常用字（不能在 24 字处被截断）
+        let ji_all: Vec<String> = engine
+            .decode("ji", AppScene::General, "")
+            .candidates
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert!(
+            ji_all.contains(&"吉".to_string()),
+            "ji candidates should contain 吉, total={}",
+            ji_all.len()
+        );
+        assert!(ji_all.len() >= 100, "ji should have >=100 candidates, got {}", ji_all.len());
+
+        // wzj 简拼必须同时提供：3字词（为自己/我自己）、2字前缀词（我在/文章/位置/完整）、1字首字母单字（我/为/王/问），且音节切分为 w'z'j
+        let wzj_out = engine.decode("wzj", AppScene::General, "");
+        let wzj_texts: Vec<String> = wzj_out.candidates.iter().map(|c| c.text.clone()).collect();
+        println!("wzj total={}, top15={:?}", wzj_texts.len(), &wzj_texts[..wzj_texts.len().min(15)]);
+        assert!(wzj_texts.contains(&"为自己".to_string()));
+        assert!(wzj_texts.contains(&"我在".to_string()));
+        assert!(wzj_texts.contains(&"文章".to_string()));
+        assert!(wzj_texts.contains(&"位置".to_string()));
+        assert!(wzj_texts.contains(&"完整".to_string()));
+        assert!(wzj_texts.contains(&"我".to_string()));
+        assert!(wzj_texts.contains(&"王".to_string()));
+        let top_syls: Vec<&str> = wzj_out.candidates[0]
+            .syllable_spans
+            .iter()
+            .map(|s| s.code_key.as_str())
+            .collect();
+        assert_eq!(top_syls, vec!["w", "z", "j"]);
+
+        // 用户曾经用全拼输入过的词（如 wenzhaiji -> 文摘集），之后输入简写 wzj 必须能自动联想到并排在首位
+        let mut engine_mem = build_test_engine();
+        engine_mem.commit_candidate_ex("wenzhaiji", "文摘集", None, true);
+        let wzj_after = engine_mem.decode("wzj", AppScene::General, "");
+        assert_eq!(wzj_after.candidates[0].text, "文摘集");
+
+        // 混拼/半拼与递进短语候选（对齐微软拼音体验：输入 keyiyouhuadedif 应依次给出「可以优化的地方」「可以优化的」「可以优化」「可以有」「可以」等，绝不输出「可以优化的地 f」）
+        let ky_out = engine.decode("keyiyouhuadedif", AppScene::General, "");
+        let ky_top7: Vec<String> = ky_out
+            .candidates
+            .iter()
+            .take(7)
+            .map(|c| c.text.clone())
+            .collect();
+        println!("keyiyouhuadedif top7 = {:?}", ky_top7);
+        assert_eq!(ky_top7[0], "可以优化的地方");
+        assert!(ky_top7.contains(&"可以优化的".to_string()));
+        assert!(ky_top7.contains(&"可以优化".to_string()));
+        assert!(ky_top7.contains(&"可以有".to_string()));
+        assert!(ky_top7.contains(&"可以".to_string()));
+
+        // 常见半拼/混拼与未完音节测试
+        assert_eq!(engine.decode("dif", AppScene::General, "").candidates[0].text, "地方");
+        assert_eq!(engine.decode("zenm", AppScene::General, "").candidates[0].text, "怎么");
+        assert_eq!(engine.decode("shenm", AppScene::General, "").candidates[0].text, "什么");
+        assert_eq!(engine.decode("weishenm", AppScene::General, "").candidates[0].text, "为什么");
+        assert_eq!(engine.decode("zenmy", AppScene::General, "").candidates[0].text, "怎么样");
+        assert_eq!(engine.decode("shurf", AppScene::General, "").candidates[0].text, "输入法");
+        assert_eq!(engine.decode("zme", AppScene::General, "").candidates[0].text, "怎么");
+        assert_eq!(engine.decode("sme", AppScene::General, "").candidates[0].text, "什么");
+    }
+
+    /// 打印常用输入的前 6 个候选（回归抽查用）：`cargo test -p ime-core dump_top_candidates -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_top_candidates() {
+        let engine = build_test_engine();
+        for py in [
+            "keyiyouhuadedif", "keyiyouhuadedf", "dfang", "wmen", "zh", "zho", "zhonggu", "zhongguo",
+            "nihao", "women", "xian", "fangan", "shi", "de", "jintiantianqibucuo", "wozaiyongrustxieapi",
+            "api", "bug", "haode", "xiexie", "shima", "zenmeyang", "keyi", "nihaoa", "wobuzhidao",
+        ] {
+            let out = engine.decode(py, AppScene::General, "");
+            let top: Vec<String> = out
+                .candidates
+                .iter()
+                .take(6)
+                .map(|c| {
+                    let syl: Vec<&str> = c.syllable_spans.iter().map(|s| s.code_key.as_str()).collect();
+                    format!("{}[{}]{}", c.text, syl.join("'"), c.tag)
+                })
+                .collect();
+            println!("{py:<28} {}", top.join("  "));
         }
     }
 }

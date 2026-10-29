@@ -25,6 +25,9 @@ $env:RUSTFLAGS = "--remap-path-prefix=$env:USERPROFILE=C:\build --remap-path-pre
 Push-Location $RootDir
 try {
     cargo build --release -p ime-tsf-win --target-dir $TargetDir
+    # 32 位 TSF 组件（WPS Office 等 32 位程序只能加载 32 位输入法 DLL）
+    # 需要：rustup toolchain install stable-i686-pc-windows-gnu --profile minimal --force-non-host
+    cargo +stable-i686-pc-windows-gnu build --release -p ime-tsf-win --lib --target i686-pc-windows-gnu --target-dir $TargetDir
 } finally {
     Pop-Location
     Remove-Item Env:\RUSTFLAGS -ErrorAction SilentlyContinue
@@ -39,6 +42,7 @@ Copy-Item (Join-Path $Bin "ime-global-service.exe") (Join-Path $Stage "RustAI拼
 Copy-Item (Join-Path $Bin "ime-installer.exe")      (Join-Path $Stage "RustAI拼音输入法_安装程序.exe")
 Copy-Item (Join-Path $Bin "ime-desktop-ui.exe")     (Join-Path $Stage "AI拼音输入法桌面体验台.exe")
 Copy-Item (Join-Path $Bin "ime_tsf_win.dll")        (Join-Path $Stage "ime_tsf_win.dll")
+Copy-Item (Join-Path $TargetDir "i686-pc-windows-gnu\release\ime_tsf_win.dll") (Join-Path $Stage "ime_tsf_win_x86.dll")
 Copy-Item $Lexicon (Join-Path $Stage "data\compiled\merged_lexicon.bin")
 Copy-Item (Join-Path $RootDir "LICENSE") $Stage
 Copy-Item (Join-Path $RootDir "README.md") $Stage
