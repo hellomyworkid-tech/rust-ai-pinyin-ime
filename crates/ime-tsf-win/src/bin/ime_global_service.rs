@@ -3868,10 +3868,11 @@ unsafe fn render_ime_icon_bgra(size: i32) -> Vec<u32> {
 
     for y in 0..size {
         let fy = (y as f32 + 0.5 - half).abs() - box_ext;
+        // 白色键帽底（与 assets/rust_ai_ime.ico 方案一致）：顶部纯白 → 底部 #EEF1FA
         let t_grad = (y as u32 * 255) / (size.max(1) as u32);
-        let bg_r = (37 * (255 - t_grad) + 29 * t_grad) / 255;
-        let bg_g = (99 * (255 - t_grad) + 78 * t_grad) / 255;
-        let bg_b = (235 * (255 - t_grad) + 216 * t_grad) / 255;
+        let bg_r = (255 * (255 - t_grad) + 238 * t_grad) / 255;
+        let bg_g = (255 * (255 - t_grad) + 241 * t_grad) / 255;
+        let bg_b = (255 * (255 - t_grad) + 250 * t_grad) / 255;
 
         for x in 0..size {
             let fx = (x as f32 + 0.5 - half).abs() - box_ext;
@@ -3892,9 +3893,16 @@ unsafe fn render_ime_icon_bgra(size: i32) -> Vec<u32> {
                 .max((raw >> 8) & 0xFF)
                 .max((raw >> 16) & 0xFF))
                 .min(255);
-            let r = (bg_r * (255 - lum) + 255 * lum) / 255;
-            let g = (bg_g * (255 - lum) + 255 * lum) / 255;
-            let b = (bg_b * (255 - lum) + 255 * lum) / 255;
+            // 「拼」字蓝→紫对角渐变：#2F6BFF → #9B3CF0
+            let t_diag = ((x + y) as u32 * 255) / ((2 * size).max(1) as u32);
+            let fg_r = (47 * (255 - t_diag) + 155 * t_diag) / 255;
+            let fg_g = (107 * (255 - t_diag) + 60 * t_diag) / 255;
+            let fg_b = (255 * (255 - t_diag) + 240 * t_diag) / 255;
+            // 键帽描边 #C9D0E6
+            let (bg_r, bg_g, bg_b) = if dist > -1.5 { (201, 208, 230) } else { (bg_r, bg_g, bg_b) };
+            let r = (bg_r * (255 - lum) + fg_r * lum) / 255;
+            let g = (bg_g * (255 - lum) + fg_g * lum) / 255;
+            let b = (bg_b * (255 - lum) + fg_b * lum) / 255;
             // Premultiplied / straight ARGB in BGRA little-endian u32: 0xAARRGGBB
             out[(y * size + x) as usize] = (edge_alpha << 24) | (r << 16) | (g << 8) | b;
         }
