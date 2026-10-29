@@ -139,8 +139,9 @@ const COLLOCATION_RULES: &[HomophoneCollocationRule] = &[
         weight: 4.2,
     },
     // 必须 vs 必需 (bixu)
+    // 注意：触发词不能用「品」「生活」等单字/泛用词，否则上文出现「产品」「作品」时会把「产品必须符合标准」误改为「必需」
     HomophoneCollocationRule {
-        triggers: &["生活", "日常", "生存", "营养", "人体", "物资", "品"],
+        triggers: &["必需品", "日用品", "生活用品", "营养素", "物资", "生存所", "人体所"],
         boost_targets: &["必需"],
         penalty_targets: &[],
         weight: 3.8,
@@ -160,7 +161,7 @@ const COLLOCATION_RULES: &[HomophoneCollocationRule] = &[
     },
     // 爆发 vs 暴发 (baofa)
     HomophoneCollocationRule {
-        triggers: &["山洪", "泥石流", "疫情", "疾病", "传染病", "户", "冷门"],
+        triggers: &["山洪", "泥石流", "疫情", "疾病", "传染病", "暴发户", "爆冷门", "冷门"],
         boost_targets: &["暴发"],
         penalty_targets: &["爆发"],
         weight: 4.4,
@@ -192,13 +193,14 @@ const COLLOCATION_RULES: &[HomophoneCollocationRule] = &[
     },
     // 侦查 vs 侦察 (zhencha)
     HomophoneCollocationRule {
-        triggers: &["公安", "检察院", "立案", "犯罪", "案件", "嫌疑人", "警方", "刑事"],
+        triggers: &["公安", "检察院", "立案", "犯罪", "案件", "嫌疑人", "警方", "刑事", "机关"],
         boost_targets: &["侦查"],
         penalty_targets: &["侦察"],
         weight: 4.5,
     },
     HomophoneCollocationRule {
-        triggers: &["敌情", "地形", "哨兵", "部队", "无人机", "卫星", "炮兵", "机"],
+        // 不能用单字「机」作触发词：否则「侦查机关」会因含「机」被误判为军事侦察语境
+        triggers: &["敌情", "地形", "哨兵", "部队", "无人机", "卫星", "炮兵", "侦察机", "战机", "飞机"],
         boost_targets: &["侦察"],
         penalty_targets: &["侦查"],
         weight: 4.5,
@@ -488,20 +490,28 @@ impl OnDeviceAiEngine {
                 }
             }
 
+            // 9. 现代汉语虚词与句法相干性评分（「再/在」「吧/把」「的/地/得」句内及跨上文语法校验）
+            ai_bonus += score_chinese_grammar_coherence(context, cand);
+
             if ai_bonus.abs() > 0.5 {
-                cand.final_score += ai_bonus;
+                if cand.tag == "[整句备选]" && ai_bonus > 0.5 {
+                    cand.final_score = (100.0 - cand.l1_cost) + ai_bonus;
+                } else {
+                    cand.final_score += ai_bonus;
+                }
                 if ai_bonus > 0.5 {
                     cand.ai_boosted = true;
                 }
             }
         }
 
-        // 仅对消费了相同最大长度（整句/全词匹配）的候选项按 AI 融合得分重排，保持整句优先于单字前缀
+        // 仅对属于「整句/全词顶层竞争池」（`consumed_len == max_len && final_score >= 90.0`）的候选项按 AI 融合得分重排，
+        // 保持未提权的递进短语与前缀词组顺序稳定
         let max_len = candidates.iter().map(|c| c.consumed_len).max().unwrap_or(0);
         candidates.sort_by(|a, b| {
-            let a_full = a.consumed_len == max_len;
-            let b_full = b.consumed_len == max_len;
-            b_full.cmp(&a_full).then_with(|| {
+            let a_top = a.consumed_len == max_len && a.final_score >= 90.0;
+            let b_top = b.consumed_len == max_len && b.final_score >= 90.0;
+            b_top.cmp(&a_top).then_with(|| {
                 b.final_score
                     .partial_cmp(&a.final_score)
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -549,6 +559,66 @@ impl OnDeviceAiEngine {
         }
         None
     }
+}
+
+fn score_chinese_grammar_coherence(context: &str, cand: &Candidate) -> f32 {
+    let text = cand.text.as_str();
+    let segs = &cand.segments;
+    if segs.is_empty() {
+        return 0.0;
+    }
+    let mut bonus = 0.0f32;
+
+    // 1. 「再 + 动词 + 一下/一遍/一次/看看/试试」 vs 「在 + 动词 + 一下」语法判别
+    let ends_with_tentative = matches!(
+        segs.last().map(|s| s.as_str()),
+        Some("一下" | "一遍" | "一次" | "一会儿" | "一点" | "一番" | "一趟" | "看看" | "试试" | "说说" | "想想")
+    );
+    let has_zai_again = segs
+        .iter()
+        .any(|s| matches!(s.as_str(), "再" | "你再" | "我再" | "先再"));
+    let has_zai_prog = segs
+        .iter()
+        .any(|s| matches!(s.as_str(), "在" | "你在" | "我在"));
+
+    if ends_with_tentative {
+        if has_zai_again {
+            bonus += 3.2;
+        } else if has_zai_prog {
+            bonus -= 3.2;
+        }
+    }
+
+    // 「现在再 + 动词」 vs 「现在在 + 非处所动词」及跨上文「先...再...」呼应
+    if text.starts_with("现在再") && segs.len() >= 3 {
+        bonus += 2.2;
+    } else if text.starts_with("现在在") && segs.len() >= 3 && ends_with_tentative {
+        bonus -= 2.8;
+    }
+    if (context.contains("先") || context.contains("稍后") || context.contains("回头") || context.contains("等会"))
+        && (has_zai_again || text.starts_with("再"))
+    {
+        bonus += 2.4;
+    }
+
+    // 2. 句尾语气助词「吧/吗/呢/啊/呀/啦」 vs 句尾未完介词「把/别把/先把/再把」
+    if let Some(last_seg) = segs.last() {
+        if segs.len() >= 2 {
+            if matches!(
+                last_seg.as_str(),
+                "吧" | "吗" | "呢" | "啊" | "呀" | "啦" | "呗" | "嘛"
+            ) {
+                bonus += 2.2;
+            } else if matches!(
+                last_seg.as_str(),
+                "把" | "别把" | "先把" | "再把" | "就把" | "要把" | "快把" | "请把" | "没把" | "都把"
+            ) {
+                bonus -= 3.5;
+            }
+        }
+    }
+
+    bonus
 }
 
 fn detect_dominant_topic_label(st: &CachedContextState) -> String {

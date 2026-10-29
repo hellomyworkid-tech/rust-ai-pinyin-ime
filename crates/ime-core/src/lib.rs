@@ -688,6 +688,30 @@ mod tests {
         assert_eq!(engine.decode("shurf", AppScene::General, "").candidates[0].text, "输入法");
         assert_eq!(engine.decode("zme", AppScene::General, "").candidates[0].text, "怎么");
         assert_eq!(engine.decode("sme", AppScene::General, "").candidates[0].text, "什么");
+
+        // 现代汉语虚词搭配与句末语气助词测试（对齐微软拼音体验：xianzaizaiyanjiuyixia -> 现在再研究一下，shibieba -> 识别吧）
+        let xz_out = engine.decode("xianzaizaiyanjiuyixia", AppScene::General, "");
+        let xz_top5: Vec<String> = xz_out
+            .candidates
+            .iter()
+            .take(5)
+            .map(|c| c.text.clone())
+            .collect();
+        println!("xianzaizaiyanjiuyixia top5 = {:?}", xz_top5);
+        assert_eq!(xz_top5[0], "现在再研究一下");
+        assert!(xz_top5.contains(&"现在在".to_string()));
+        assert!(xz_top5.contains(&"现在".to_string()));
+
+        let sb_out = engine.decode("shibieba", AppScene::General, "");
+        let sb_top5: Vec<String> = sb_out
+            .candidates
+            .iter()
+            .take(5)
+            .map(|c| c.text.clone())
+            .collect();
+        println!("shibieba top5 = {:?}", sb_top5);
+        assert_eq!(sb_top5[0], "识别吧");
+        assert_eq!(sb_top5[1], "识别");
     }
 
     /// 打印常用输入的前 6 个候选（回归抽查用）：`cargo test -p ime-core dump_top_candidates -- --ignored --nocapture`

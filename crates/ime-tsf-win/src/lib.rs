@@ -635,7 +635,6 @@ impl TsfKeySession {
                 if self.input_buffer.is_empty() || self.current_candidates.is_empty() {
                     return KeyAction::PassThrough;
                 }
-                self.last_op_was_pinyin_edit = false;
                 if self.full_sentence_selected {
                     // 已在「整句」行时保持不动
                 } else if self.selected_candidate_index > 0 {
@@ -645,8 +644,7 @@ impl TsfKeySession {
                     let cnt = self.visible_candidate_count();
                     self.selected_candidate_index = cnt.saturating_sub(1);
                 } else if !self.last_full_sentence.is_empty() {
-                    // 当处于第 1 页第 1 个候选词（如句中改错后默认聚焦 `1 叫`）时，
-                    // 按上方向键 `↑` 向上跳选到正上方的「整句」行（如 `整句 右下角`），按空格即可整句上屏！
+                    // 当处于第 1 页第 1 个候选词时，按上方向键 `↑` 向上跳选到正上方的「整句」行，按空格即可整句上屏！
                     self.full_sentence_selected = true;
                 }
                 KeyAction::EatAndUpdateUi(self.build_view_model())
@@ -655,7 +653,6 @@ impl TsfKeySession {
                 if self.input_buffer.is_empty() || self.current_candidates.is_empty() {
                     return KeyAction::PassThrough;
                 }
-                self.last_op_was_pinyin_edit = false;
                 if self.full_sentence_selected {
                     // 从「整句」行按 `↓` 回到下方第 1 个候选词
                     self.full_sentence_selected = false;
@@ -714,11 +711,14 @@ impl TsfKeySession {
                 if self.cursor_pos >= self.input_buffer.len() {
                     // 光标回到拼音最右端末尾，恢复整句首选模式
                     self.cursor_syllable_mode = false;
+                    self.last_op_was_pinyin_edit = false;
                 } else {
                     self.cursor_syllable_mode = true;
+                    if !(self.last_op_was_pinyin_edit && self.pinned_segments.is_empty()) {
+                        self.last_op_was_pinyin_edit = false;
+                    }
                 }
                 self.cursor_auto_advanced = false;
-                self.last_op_was_pinyin_edit = false;
                 self.full_sentence_selected = false;
                 self.current_page = 0;
                 self.selected_candidate_index = 0;
@@ -1045,6 +1045,19 @@ impl TsfKeySession {
         self.build_view_model()
     }
 
+    /// 后台大模型异步仲裁完成后的刷新：
+    /// 若用户此时正在翻页、用 ↑↓ 选中了非首项或选中了整句行，则不立即重排，
+    /// 避免候选在用户按数字键的瞬间突然变动导致选错词（结果已写入缓存，下一次击键自然生效）。
+    pub fn refresh_candidates_after_ai(&mut self) -> CandidateWindowViewModel {
+        let user_is_navigating = self.current_page > 0
+            || self.selected_candidate_index > 0
+            || self.full_sentence_selected;
+        if !self.input_buffer.is_empty() && !user_is_navigating {
+            self.recompute_candidates();
+        }
+        self.build_view_model()
+    }
+
     /// 动态应用并保存 AI 模型与模糊音配置
     pub fn apply_persistent_config(&mut self, cfg: &ImePersistentConfig) {
         self.core.fuzzy_config = cfg.fuzzy_config.clone();
@@ -1117,6 +1130,41 @@ impl TsfKeySession {
         //   且已选定部分绝不再重复出现在候选中！
         if self.active_syllable_index().is_some() || span_start > 0 || span_end < n {
             if !chosen.segment_spans.is_empty() {
+                // 当用户在非句首音节（`span_start > 0`，如 `gan jue |ying gai` 的 `ying`）选词时，
+                // 光标前尚未锁定的前缀部分（如 `0..6` 的「感觉」，在整句行中已用高亮颜色标出）将作为已确认前缀一并锁定落下！
+                if span_start > 0 {
+                    for seg in &self.last_full_segments {
+                        if seg.end <= span_start {
+                            let s_start = seg.start.min(n);
+                            let s_end = seg.end.min(n);
+                            if s_start < s_end
+                                && !self
+                                    .pinned_segments
+                                    .iter()
+                                    .any(|(&s, &(e, _))| s < s_end && e > s_start)
+                            {
+                                self.pinned_segments
+                                    .insert(s_start, (s_end, seg.text.clone()));
+                            }
+                        } else if seg.start < span_start && seg.end > span_start {
+                            for syl in &self.last_syllable_spans {
+                                if syl.start >= seg.start && syl.end <= span_start {
+                                    let s_start = syl.start.min(n);
+                                    let s_end = syl.end.min(n);
+                                    if s_start < s_end
+                                        && !self
+                                            .pinned_segments
+                                            .iter()
+                                            .any(|(&s, &(e, _))| s < s_end && e > s_start)
+                                    {
+                                        self.pinned_segments
+                                            .insert(s_start, (s_end, syl.text.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 for seg in &chosen.segment_spans {
                     let s_start = seg.start.min(n);
                     let s_end = seg.end.min(n);
@@ -1257,22 +1305,49 @@ impl TsfKeySession {
             self.input_buffer.clone()
         };
 
+        let active_prefix_end = active_syl
+            .and_then(|idx| self.last_syllable_spans.get(idx))
+            .map(|s| s.start)
+            .unwrap_or(0);
         let mut full_sentence_parts: Vec<(String, bool)> = Vec::new();
-        if self.last_full_segments.is_empty() || self.pinned_segments.is_empty() {
+        if self.last_full_segments.is_empty()
+            || (self.pinned_segments.is_empty() && active_prefix_end == 0)
+        {
             if !self.last_full_sentence.is_empty() {
                 full_sentence_parts.push((self.last_full_sentence.clone(), false));
             }
         } else {
+            // 若某个词级片段横跨了当前光标音节起点 `active_prefix_end`，按音节拆开以便精确标色光标前将落下的前缀
+            let mut display_segments: Vec<SegmentSpan> =
+                Vec::with_capacity(self.last_full_segments.len() + 2);
+            for seg in &self.last_full_segments {
+                if active_prefix_end > seg.start && active_prefix_end < seg.end {
+                    let sub_syls: Vec<SegmentSpan> = self
+                        .last_syllable_spans
+                        .iter()
+                        .filter(|s| s.start >= seg.start && s.end <= seg.end)
+                        .cloned()
+                        .collect();
+                    if !sub_syls.is_empty() {
+                        display_segments.extend(sub_syls);
+                    } else {
+                        display_segments.push(seg.clone());
+                    }
+                } else {
+                    display_segments.push(seg.clone());
+                }
+            }
             let full = self.last_full_sentence.as_str();
             let mut byte_cursor = 0usize;
-            for seg in &self.last_full_segments {
+            for seg in &display_segments {
                 if seg.text.is_empty() {
                     continue;
                 }
-                let is_pinned = self
-                    .pinned_segments
-                    .iter()
-                    .any(|(&s, &(e, _))| seg.start >= s && seg.end <= e);
+                let is_pinned = seg.end <= active_prefix_end
+                    || self
+                        .pinned_segments
+                        .iter()
+                        .any(|(&s, &(e, _))| seg.start >= s && seg.end <= e);
                 if let Some(rel) = full[byte_cursor..].find(&seg.text) {
                     let prefix_gap = &full[byte_cursor..byte_cursor + rel];
                     if !prefix_gap.is_empty() {
@@ -1658,6 +1733,53 @@ mod tests {
             page1_texts.contains(&"你再".to_string()),
             "Expected '你再' on Page 1, got: {:?}",
             page1_texts
+        );
+        session.process_key(VirtualKey::Escape);
+
+        // 7. 测试当光标位于句中音节（如 `gan jue |ying gai`）或句中改错后位于 `|ying` 时：
+        // - 候选栏展示 `ying` 起始的候选词（`1 应该  2 应  3 影 ...`）
+        // - 整句栏中 `|ying` 之前会随空格一并落下的前缀「感觉」必须标记为高亮着色（`("感觉", true)`），
+        //   让用户清楚知道自选 `ying` 或按空格时前面没手动选的部分会落下什么字！
+        for ch in "ganjieyinggai".chars() {
+            session.process_key(VirtualKey::Char(ch));
+        }
+        session.process_key(VirtualKey::Left); // 跳到 |gai
+        session.process_key(VirtualKey::Left); // 跳到 |ying（即 jie 末尾 byte 6）
+        session.process_key(VirtualKey::Backspace); // 删 'e'
+        session.process_key(VirtualKey::Backspace); // 删 'i'
+        session.process_key(VirtualKey::Char('u'));
+        session.process_key(VirtualKey::Char('e'));
+        let vm_gj = session.build_view_model();
+        assert_eq!(session.input_buffer, "ganjueyinggai");
+        assert_eq!(vm_gj.cursor_byte_pos, 6);
+        assert_eq!(vm_gj.active_syllable_index, Some(2));
+        assert_eq!(vm_gj.visible_candidates[0].text, "应该");
+        assert_eq!(
+            vm_gj.full_sentence_parts,
+            vec![("感觉".to_string(), true), ("应该".to_string(), false)],
+            "光标在 |ying 时，整句栏必须将前面会一并落下的『感觉』标记为颜色高亮 (true)"
+        );
+        // 若在 |ying 处自选单字（如 `3 影`），则『感觉』+『影』一并锁定高亮，光标推进到 |gai
+        let ying_char_idx = vm_gj
+            .visible_candidates
+            .iter()
+            .position(|c| c.text == "影")
+            .expect("Expected '影' in ying candidates");
+        session.process_key(VirtualKey::Digit((ying_char_idx + 1) as u8));
+        let vm_gj_after_pick = session.build_view_model();
+        assert_eq!(
+            vm_gj_after_pick.full_sentence_parts,
+            vec![("感觉影".to_string(), true), ("该".to_string(), false)]
+        );
+        assert_eq!(vm_gj_after_pick.active_syllable_index, Some(3));
+        // 再按空格选定最后一个音节『该』，合成整句『感觉影该』上屏
+        let commit_gj = session.process_key(VirtualKey::Space);
+        assert_eq!(
+            commit_gj,
+            KeyAction::EatAndCommit {
+                committed_text: "感觉影该".to_string(),
+                ghost_text: None,
+            }
         );
     }
 

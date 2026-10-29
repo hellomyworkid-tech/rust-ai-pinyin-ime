@@ -731,7 +731,8 @@ impl OpenAiCompatibleClient {
             return Err("Gemini API 需要填写 API Key".to_string());
         }
         let clean_model = model.strip_prefix("models/").unwrap_or(model);
-        let endpoint = format!("{api_base}/models/{clean_model}:generateContent?key={key}");
+        // API Key 仅通过 `x-goog-api-key` 请求头传递，不拼进 URL，避免出现在代理/错误日志中泄露
+        let endpoint = format!("{api_base}/models/{clean_model}:generateContent");
 
         let body_val = serde_json::json!({
             "systemInstruction": {
@@ -859,11 +860,15 @@ fn sanitize_llm_candidate_output(raw: &str, candidates: &[Candidate]) -> String 
             return c.text.clone();
         }
     }
-    // 若大模型输出了类似 "选：级数" 或包含候选词本身，优先匹配候选词
-    for c in candidates.iter().take(4) {
-        if !c.text.is_empty() && stripped_num.contains(&c.text) {
-            return c.text.clone();
-        }
+    // 若大模型输出了类似 "选：级数" 或包含候选词本身，优先匹配被包含的「最长」候选词
+    // （避免输出「现在再研究一下」时被更短的候选「现在」抢先匹配）
+    if let Some(c) = candidates
+        .iter()
+        .take(4)
+        .filter(|c| !c.text.is_empty() && stripped_num.contains(&c.text))
+        .max_by_key(|c| c.text.chars().count())
+    {
+        return c.text.clone();
     }
 
     candidates

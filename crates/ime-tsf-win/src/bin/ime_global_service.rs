@@ -2235,7 +2235,7 @@ unsafe extern "system" fn wnd_proc_cand(
         WM_APP_AI_READY => {
             if let Ok(mut guard) = GLOBAL_STATE.lock() {
                 if let Some(st) = guard.as_mut() {
-                    st.session.refresh_candidates();
+                    st.session.refresh_candidates_after_ai();
                 }
             }
             sync_ui_windows();
@@ -2455,14 +2455,29 @@ unsafe extern "system" fn wnd_proc_cand(
                     } else if vm.visible {
                         // 第 1 行：拼音音节（焦点音节浅蓝底 + 蓝字，已锁定音节绿色，光标为 2px 蓝色竖线）
                         let total_syls = vm.syllable_spans.len();
+                        let caret_syl_idx = vm
+                            .active_syllable_index
+                            .filter(|&i| {
+                                vm.syllable_spans
+                                    .get(i)
+                                    .is_some_and(|s| vm.cursor_byte_pos >= s.start && vm.cursor_byte_pos <= s.end)
+                            })
+                            .or_else(|| {
+                                if vm.cursor_byte_pos == 0 {
+                                    Some(0)
+                                } else {
+                                    vm.syllable_spans
+                                        .iter()
+                                        .position(|s| vm.cursor_byte_pos <= s.end)
+                                        .or_else(|| total_syls.checked_sub(1))
+                                }
+                            });
                         for (idx, syl) in vm.syllable_spans.iter().enumerate() {
                             let Some(rc) = find(CandHitZone::PinyinSyllable(idx)) else {
                                 continue;
                             };
                             let is_active = vm.active_syllable_index == Some(idx);
-                            let is_tail = vm.active_syllable_index.is_none()
-                                && idx + 1 == total_syls
-                                && vm.cursor_byte_pos >= syl.end;
+                            let has_caret = caret_syl_idx == Some(idx);
                             let is_hover = hover == CandHitZone::PinyinSyllable(idx);
                             let is_pinned = session
                                 .pinned_segments
@@ -2485,7 +2500,7 @@ unsafe extern "system" fn wnd_proc_cand(
                             };
                             let tx = rc.left + 5;
                             s_text(hdc, f.pinyin, col, tx, rc.top, rc.right + 2, rc.bottom, &syl.code_key, T_LINE);
-                            if is_active || is_tail {
+                            if has_caret {
                                 SelectObject(hdc, f.pinyin);
                                 let rel = vm
                                     .cursor_byte_pos
@@ -2552,7 +2567,7 @@ unsafe extern "system" fn wnd_proc_cand(
                                     let r = (cur_x + w + 10).min(max_x);
                                     s_round(hdc, cur_x, rc.top + 3, r, rc.bottom - 3, 6, UI_PINNED_BG, UI_PINNED_BG);
                                     s_text(hdc, f.num, UI_PINNED, cur_x + 5, rc.top, r, rc.bottom, part, T_LINE);
-                                    cur_x = r;
+                                    cur_x = r + 2;
                                 } else {
                                     let r = (cur_x + w + 2).min(max_x);
                                     s_text(hdc, f.num, unpinned_fg, cur_x, rc.top, r, rc.bottom, part, T_LINE);
@@ -2663,7 +2678,7 @@ unsafe extern "system" fn wnd_proc_status(
         WM_APP_AI_READY => {
             if let Ok(mut guard) = GLOBAL_STATE.lock() {
                 if let Some(st) = guard.as_mut() {
-                    st.session.refresh_candidates();
+                    st.session.refresh_candidates_after_ai();
                 }
             }
             sync_ui_windows();

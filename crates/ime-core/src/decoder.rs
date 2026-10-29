@@ -375,6 +375,7 @@ impl BilingualDecoder {
                             bg_bonus = bg_bonus.max(lexicon.bigram_bonus(ctx_w, &edge.text));
                         }
                     }
+                    bg_bonus += grammar_transition_bonus(state, prev_word, edge, n);
 
                     let mut next_edges = state.edges.clone();
                     next_edges.push(edge.clone());
@@ -497,23 +498,17 @@ impl BilingualDecoder {
         }
 
         // 整句候选只保留少量「真正可能」的版本：
-        // - 覆盖全部输入的单一词条（如 `xuanci` → 选词/选此）都是合法同音词，全部保留；
-        // - 多段拼接的整句：除第 1 名首选整句外，最多再保留 1 条「首个未锁定词块不同且代价极其接近」的备选整句
-        //   （如首选「你在反思排查一下」，备选整句保留「你再反思排查一下」，而剔除句首相同、仅后半句换成生僻同音词的
-        //   「你在反死排查一下」「你在反四排查一下」）。
-        const MAX_DIFF_HEAD_SENTENCE_ALTS: usize = 1;
-        const SENTENCE_COST_MARGIN: f32 = 2.2;
-        let first_unpinned_seg = |c: &Candidate| -> Option<(usize, usize, String)> {
-            c.segment_spans
-                .iter()
-                .find(|s| s.start >= unpinned_start)
-                .map(|s| (s.start, s.end, s.text.clone()))
-        };
-        if let Some((best_cost, best_seg_cnt, first_head)) = candidates
+        // - 覆盖全部输入的单一词条（如 `xuanci` → 选词/选此）都是合法同音词，全部保留在最前；
+        // - 多段拼接的整句：除第 1 名首选整句外，将代价接近的前 2 条备选整句暂存至 `alt_sentences`：
+        //   一方面用于提取句首第二词块同音对比前缀（如首选「现在再研究一下」时提取对比前缀「现在在」），
+        //   另一方面保留在候选池供 L2 端侧 AI / 大模型做语境与语法逆转重排，同时不挤占第一页前缀词位置。
+        const MAX_BACKUP_SENTENCES: usize = 2;
+        const SENTENCE_COST_MARGIN: f32 = 3.2;
+        let mut alt_sentences: Vec<Candidate> = Vec::new();
+        if let Some((best_cost, best_seg_cnt)) = candidates
             .first()
-            .map(|c| (c.l1_cost, c.segments.len(), first_unpinned_seg(c)))
+            .map(|c| (c.l1_cost, c.segments.len()))
         {
-            let mut kept_diff_head = 0usize;
             let mut idx = 0usize;
             candidates.retain(|c| {
                 let is_first = idx == 0;
@@ -521,19 +516,14 @@ impl BilingualDecoder {
                 if is_first || c.segments.len() <= 1 {
                     return true;
                 }
-                let cur_head = first_unpinned_seg(c);
-                let is_clean_head_alt = match (&cur_head, &first_head) {
-                    (Some((cs, ce, ct)), Some((fs, fe, ft))) => {
-                        cs == fs && ce == fe && ct != ft && c.segments.len() <= best_seg_cnt
-                    }
-                    _ => false,
-                };
-                if is_clean_head_alt
-                    && kept_diff_head < MAX_DIFF_HEAD_SENTENCE_ALTS
+                if alt_sentences.len() < MAX_BACKUP_SENTENCES
+                    && c.segments.len() <= best_seg_cnt + 1
                     && c.l1_cost <= best_cost + SENTENCE_COST_MARGIN
+                    && !c.tag.starts_with("[纠错")
                 {
-                    kept_diff_head += 1;
-                    return true;
+                    let mut backup = c.clone();
+                    backup.tag = "[整句备选]".to_string();
+                    alt_sentences.push(backup);
                 }
                 false
             });
@@ -691,19 +681,24 @@ impl BilingualDecoder {
                     .cloned()
                     .collect();
                 if unpinned_segs.len() >= 3 {
-                    let max_prog = if candidates.len() <= 1 { 2 } else { 1 };
+                    let max_prog = 2usize;
                     let mut added_prog = 0usize;
                     let max_k = unpinned_segs.len().min(5);
                     for k in (2..max_k).rev() {
                         if added_prog >= max_prog {
                             break;
                         }
-                        let slice_segs = &unpinned_segs[..k];
+                        let mut slice_segs = unpinned_segs[..k].to_vec();
+                        // 当 `k == 2` 且第 2 个词块为单字「再」（如首选「现在再研究一下」的前两段 `["现在", "再"]`）时，
+                        // 首选整句本身已包含「现在再」，此时将第 2 段替换为同音对比字「在」生成「现在在」，对齐微软拼音体验！
+                        if k == 2 && slice_segs.get(1).is_some_and(|s| s.text == "再") {
+                            slice_segs[1].text = "在".to_string();
+                        }
                         let prog_start = slice_segs.first().unwrap().start;
                         let prog_end = slice_segs.last().unwrap().end;
                         let mut prog_text = String::new();
                         let mut prev_ascii: Option<bool> = None;
-                        for sp in slice_segs {
+                        for sp in &slice_segs {
                             let cur_ascii = sp.text.is_ascii();
                             if let Some(pa) = prev_ascii {
                                 if pa != cur_ascii || (pa && cur_ascii) {
@@ -736,13 +731,14 @@ impl BilingualDecoder {
                             ai_boosted: false,
                             tag: "[前缀选词]".to_string(),
                             segments: slice_segs.iter().map(|s| s.text.clone()).collect(),
-                            segment_spans: slice_segs.to_vec(),
+                            segment_spans: slice_segs.clone(),
                             syllable_spans: prog_syls.clone(),
                         });
                         rank += 1;
                         added_prog += 1;
 
-                        // 若该递进短语末尾词块含助词后缀（如「优化的」以「的/了/着/过」结尾），继续派生去除末尾助词的主干短语（如「可以优化」）
+                        // 若该递进短语末尾词块含助词后缀（如「优化的」以「的/了/着/过」结尾），继续派生去除末尾助词的主干短语（如「可以优化」）；
+                        // 若末尾词块为「再+双字动词」（如「现在 + 再研究」），同步派生前 3 音节同音对比前缀「现在在」，对齐微软拼音体验！
                         if added_prog < max_prog && prog_syls.len() >= 3 {
                             if let Some(last_seg) = slice_segs.last() {
                                 if last_seg.text.chars().count() >= 2
@@ -761,6 +757,66 @@ impl BilingualDecoder {
                                             last_s.end = stem_end;
                                             last_s.text = last_seg.text[..last_seg.text.len() - last_char_len].to_string();
                                         }
+                                        let stem_preedit = stem_syls
+                                            .iter()
+                                            .map(|s| s.code_key.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("'");
+                                        candidates.push(Candidate {
+                                            text: stem_text,
+                                            preedit: stem_preedit,
+                                            consumed_len: stem_end.saturating_sub(prog_start),
+                                            l1_cost: max_beam_cost + 0.3 + rank as f32 * 0.05,
+                                            final_score: (min_beam_score - 1.0) - rank as f32 * 0.01,
+                                            ai_boosted: false,
+                                            tag: "[前缀选词]".to_string(),
+                                            segments: stem_segs.iter().map(|s| s.text.clone()).collect(),
+                                            segment_spans: stem_segs,
+                                            syllable_spans: stem_syls,
+                                        });
+                                        rank += 1;
+                                        added_prog += 1;
+                                    }
+                                } else if (last_seg.text.chars().count() == 3
+                                    && last_seg.text.starts_with(['再', '在']))
+                                    || (slice_segs.first().is_some_and(|s0| {
+                                        s0.text.chars().count() == 3
+                                            && s0.text.ends_with(['再', '在'])
+                                    }))
+                                {
+                                    let stem_syls = prog_syls[..3.min(prog_syls.len())].to_vec();
+                                    let stem_end = stem_syls.last().unwrap().end;
+                                    let first_two_chars: String =
+                                        prog_text.chars().take(2).collect();
+                                    let third_char = prog_text.chars().nth(2).unwrap_or('再');
+                                    let alt_particle = if third_char == '再' { "在" } else { "再" };
+                                    let stem_text = format!("{first_two_chars}{alt_particle}");
+                                    let first_two_end = stem_syls
+                                        .get(1)
+                                        .map(|s| s.end)
+                                        .unwrap_or(prog_start);
+                                    let stem_segs = vec![
+                                        SegmentSpan {
+                                            start: prog_start,
+                                            end: first_two_end,
+                                            text: first_two_chars,
+                                            code_key: stem_syls[..2.min(stem_syls.len())]
+                                                .iter()
+                                                .map(|s| s.code_key.as_str())
+                                                .collect::<Vec<_>>()
+                                                .join("'"),
+                                        },
+                                        SegmentSpan {
+                                            start: first_two_end,
+                                            end: stem_end,
+                                            text: alt_particle.to_string(),
+                                            code_key: stem_syls.last().unwrap().code_key.clone(),
+                                        },
+                                    ];
+                                    if !stem_text.is_empty()
+                                        && stem_end > prog_start
+                                        && seen_surface.insert(stem_text.clone())
+                                    {
                                         let stem_preedit = stem_syls
                                             .iter()
                                             .map(|s| s.code_key.as_str())
@@ -848,11 +904,16 @@ impl BilingualDecoder {
                 added_words += 1;
             }
         }
-        // 1b) 追加其余完整简拼词条
+        // 1b) 追加其余完整简拼词条与备选整句（备选整句保留原始 l1_cost 供 L2 端侧 AI / 大模型语境重排，默认排在前缀词之后不挤占第一页）
         for mut cand in deferred_abbrev_full {
             cand.final_score = (min_beam_score - 1.0) - rank as f32 * 0.01;
             rank += 1;
             candidates.push(cand);
+        }
+        for mut alt in alt_sentences {
+            alt.final_score = (min_beam_score - 1.0) - rank as f32 * 0.01;
+            rank += 1;
+            candidates.push(alt);
         }
         // 2) 首音节精确匹配的单字候选
         let mut added_chars = 0usize;
@@ -1025,6 +1086,154 @@ fn is_common_sentence_particle(ch: &str) -> bool {
             | "谁" | "个" | "去" | "来" | "看" | "说" | "做" | "用" | "能" | "会" | "要"
             | "想" | "多" | "少" | "大" | "小" | "好" | "新" | "老" | "高" | "低"
     )
+}
+
+/// 现代汉语语法结构与虚词同音搭配奖励（在 Beam Search 转移时实时消歧「再/在」「吧/把」「的/地/得」「了/乐」）
+fn grammar_transition_bonus(
+    state: &BeamState,
+    prev_word: &str,
+    edge: &LatticeEdge,
+    n: usize,
+) -> f32 {
+    let mut bonus = 0.0f32;
+    let w = edge.text.as_str();
+    let is_end = edge.end == n && edge.start > 0;
+
+    // 1. 句末语气助词（吧/吗/呢/啊/呀/啦/呗/嘛） vs 句末未完介词结构（把/别把/先把/再把）
+    if matches!(w, "吧" | "吗" | "呢" | "啊" | "呀" | "啦" | "呗" | "嘛") {
+        if is_end {
+            if prev_word.chars().count() >= 2 {
+                bonus += 1.45;
+            } else if !prev_word.is_empty() {
+                bonus += 0.95;
+            }
+        } else if edge.end < n {
+            bonus -= 0.55;
+        }
+    }
+    if is_end {
+        if w == "把"
+            && !matches!(
+                prev_word,
+                "一" | "两" | "三" | "四" | "五" | "几" | "这" | "那" | "每" | "大" | "小" | "火" | "刀" | "手"
+            )
+        {
+            bonus -= 1.65;
+        } else if matches!(
+            w,
+            "别把" | "先把" | "再把" | "就把" | "要把" | "快把" | "请把" | "没把" | "都把" | "还把" | "又把" | "才把" | "却把" | "总把"
+        ) {
+            bonus -= 2.35;
+        }
+        if w == "了" && !prev_word.is_empty() {
+            bonus += 0.55;
+        }
+    }
+    if prev_word == "是" && w == "别把" {
+        bonus -= 1.20;
+    }
+
+    // 2. 「再」vs「在」语法功能与句式呼应（如「现在再研究一下」「你再反思排查一下」vs「现在在哪里」「现在在开会」）
+    let is_lexical_zai_word = matches!(
+        w,
+        "在家" | "在场" | "在线" | "在内" | "在世" | "在职" | "在座" | "在逃" | "在即"
+            | "在望" | "在乎" | "在意" | "在行" | "在理" | "在野" | "在朝" | "在案" | "在册"
+            | "在编" | "在籍" | "在押" | "在位" | "在于" | "在先" | "在后"
+    );
+    let is_zai_verb_phrase =
+        w.starts_with('在') && w.chars().count() >= 2 && !is_lexical_zai_word && w != "你在" && w != "我在";
+
+    if w == "再" {
+        if matches!(
+            prev_word,
+            "现在" | "先" | "稍后" | "以后" | "回头" | "明天" | "下次" | "改天" | "等会"
+                | "一会儿" | "之后" | "后来" | "然后" | "接着" | "不妨" | "不如" | "还要"
+                | "还得" | "需要" | "可以" | "应该" | "决定" | "准备" | "重新" | "继续"
+        ) || state
+            .edges
+            .iter()
+            .any(|e| matches!(e.text.as_str(), "先" | "首先" | "稍后" | "回头" | "等会"))
+        {
+            bonus += 1.45;
+        } else if matches!(prev_word, "你" | "我" | "他" | "她" | "我们" | "你们" | "咱们" | "大家")
+            && edge.end < n
+        {
+            bonus += 0.45;
+        }
+    } else if w == "在" || is_zai_verb_phrase {
+        if prev_word.ends_with('在') {
+            // 抑制「现在 + 在」「现在 + 在研究」这类叠字进行体粘连
+            bonus -= if is_zai_verb_phrase { 2.65 } else { 0.95 };
+        }
+    }
+
+    if prev_word == "在" || prev_word == "你在" || prev_word == "我在" {
+        if matches!(
+            w,
+            "哪" | "哪里" | "哪儿" | "这" | "这里" | "这儿" | "那" | "那里" | "那儿" | "家"
+                | "家里" | "公司" | "学校" | "医院" | "路上" | "车上" | "网上" | "线上"
+                | "现场" | "外地" | "国外" | "国内" | "外面" | "里面" | "上面" | "下面"
+                | "旁边" | "一起" | "一块" | "干嘛" | "干什么" | "做什么" | "忙什么" | "上班"
+                | "上课" | "开会" | "吃饭" | "睡觉" | "休息" | "忙" | "看书" | "学习" | "工作"
+                | "如图"
+        ) || (w.chars().count() >= 2
+            && w.ends_with(['里', '上', '下', '内', '外', '中', '旁', '边', '处']))
+        {
+            bonus += 1.45;
+        }
+    } else if prev_word == "再" || prev_word == "你再" || prev_word == "我再" {
+        let is_action_verb = matches!(
+            w,
+            "研究" | "优化" | "排查" | "检查" | "测试" | "修改" | "确认" | "考虑" | "讨论"
+                | "分析" | "处理" | "解决" | "尝试" | "核对" | "完善" | "调整" | "沟通"
+                | "联系" | "发" | "看" | "试" | "想" | "说" | "问" | "找" | "改" | "加"
+                | "买" | "做" | "来" | "去"
+        );
+        if is_action_verb || (edge.kind == EdgeKind::ChineseWord && (state.edges.len() >= 2 || prev_word != "再")) {
+            bonus += 1.35;
+        }
+    }
+
+    // 尝试/反复动量补语（一下/一遍/一次/一会儿/一点/一番/一趟/看看/试试/说说/想想）在现代汉语中与「再」强呼应，与进行体「在」语法互斥
+    if matches!(
+        w,
+        "一下" | "一遍" | "一次" | "一会儿" | "一点" | "一番" | "一趟" | "看看" | "试试" | "说说" | "想想"
+    ) {
+        let has_zai_again = state
+            .edges
+            .iter()
+            .rev()
+            .take(4)
+            .any(|e| matches!(e.text.as_str(), "再" | "你再" | "我再" | "先再") || e.text.starts_with("再"));
+        let has_zai_prog = state.edges.iter().rev().take(4).any(|e| {
+            let t = e.text.as_str();
+            matches!(t, "在" | "你在" | "我在")
+                || (t.starts_with('在')
+                    && t.chars().count() >= 2
+                    && !matches!(
+                        t,
+                        "在家" | "在场" | "在线" | "在内" | "在世" | "在职" | "在座" | "在乎" | "在意" | "在于"
+                    ))
+        });
+        if has_zai_again {
+            bonus += 1.85;
+        } else if has_zai_prog {
+            bonus -= 2.45;
+        }
+    }
+
+    // 3. 「得」后接程度/结果补语搭配
+    if prev_word == "得"
+        && matches!(
+            w,
+            "很" | "好" | "快" | "慢" | "多" | "少" | "远" | "近" | "早" | "晚" | "高" | "低"
+                | "清楚" | "明白" | "出来" | "下去" | "不了" | "不起" | "不得" | "完" | "到" | "住"
+        )
+    {
+        bonus += 1.15;
+    }
+
+    bonus
 }
 
 /// 智能盘古之白格式化：在中英文 Token 交界处自动插入半角空格

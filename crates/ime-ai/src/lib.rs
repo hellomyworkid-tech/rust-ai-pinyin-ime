@@ -224,6 +224,19 @@ impl DualModeAiOrchestrator {
             }
         }
 
+        // 在完成端侧 AI 与大模型候选池提取后，剔除未夺冠的 `[整句备选]`，
+        // 确保候选框第 2~5 项始终是干净的递进短语与前缀词组（如「现在再研究」「现在在」「现在」「先在」）。
+        // 注意只按标签剔除：若 AI 推翻了 L1 首选整句，被换下来的原首选整句必须保留在第 2 位，
+        // 防止 AI 判断失误时用户再也选不到原本的整句。
+        if report.candidates.len() > 1 {
+            let mut idx = 0usize;
+            report.candidates.retain(|c| {
+                let is_first = idx == 0;
+                idx += 1;
+                is_first || c.tag != "[整句备选]"
+            });
+        }
+
         report
     }
 }
@@ -322,6 +335,87 @@ mod tests {
             l1_typhoon.candidates,
         );
         assert_eq!(l2_typhoon.candidates[0].text, "登陆");
+    }
+
+    fn synthetic_cand(text: &str, score: f32, segments: &[&str]) -> Candidate {
+        Candidate {
+            text: text.to_string(),
+            preedit: String::new(),
+            consumed_len: 10,
+            l1_cost: 100.0 - score,
+            final_score: score,
+            ai_boosted: false,
+            tag: String::new(),
+            segments: segments.iter().map(|s| s.to_string()).collect(),
+            segment_spans: Vec::new(),
+            syllable_spans: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_collocation_rules_do_not_misfire_on_single_char_triggers() {
+        let mut ai = DualModeAiOrchestrator::default();
+        // 「侦查机关」含「机」字，不应被误判为军事侦察语境而变成「侦察机关」
+        let r = ai.rerank(
+            "zhenchajiguan",
+            "",
+            AppScene::General,
+            vec![
+                synthetic_cand("侦查机关", 99.0, &["侦查", "机关"]),
+                synthetic_cand("侦察机关", 98.5, &["侦察", "机关"]),
+            ],
+        );
+        assert_eq!(r.candidates[0].text, "侦查机关");
+        // 上文含「产品」时，「必须」不应被误改为「必需」
+        let r2 = ai.rerank(
+            "bixu",
+            "这款产品",
+            AppScene::General,
+            vec![
+                synthetic_cand("必须", 99.0, &["必须"]),
+                synthetic_cand("必需", 98.5, &["必需"]),
+            ],
+        );
+        assert_eq!(r2.candidates[0].text, "必须");
+        // 上文含「用户」时，「爆发」不应被误改为「暴发」
+        let r3 = ai.rerank(
+            "baofa",
+            "很多用户的不满终于",
+            AppScene::General,
+            vec![
+                synthetic_cand("爆发", 99.0, &["爆发"]),
+                synthetic_cand("暴发", 98.5, &["暴发"]),
+            ],
+        );
+        assert_eq!(r3.candidates[0].text, "爆发");
+    }
+
+    #[test]
+    fn test_ai_flip_keeps_original_top_sentence_as_alternative() {
+        let mut ai = DualModeAiOrchestrator::default();
+        // L1 首选「现在在研究一下」被端侧语法 AI 推翻为「现在再研究一下」后，原首选整句仍应保留可选
+        let mut backup = synthetic_cand("现在再研究一下", 90.0, &["现在", "再", "研究", "一下"]);
+        backup.tag = "[整句备选]".to_string();
+        let mut noise = synthetic_cand("现在载研究一下", 89.0, &["现在", "载", "研究", "一下"]);
+        noise.tag = "[整句备选]".to_string();
+        let mut prefix = synthetic_cand("现在", 80.0, &["现在"]);
+        prefix.consumed_len = 6;
+        let r = ai.rerank(
+            "xianzaizaiyanjiuyixia",
+            "",
+            AppScene::General,
+            vec![
+                synthetic_cand("现在在研究一下", 99.0, &["现在", "在", "研究", "一下"]),
+                backup,
+                noise,
+                prefix,
+            ],
+        );
+        let texts: Vec<&str> = r.candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts[0], "现在再研究一下");
+        assert!(texts.contains(&"现在在研究一下"), "被 AI 换下的原首选整句必须保留: {texts:?}");
+        assert!(!texts.contains(&"现在载研究一下"), "未夺冠的整句备选应被剔除: {texts:?}");
+        assert!(texts.contains(&"现在"));
     }
 
     #[test]
