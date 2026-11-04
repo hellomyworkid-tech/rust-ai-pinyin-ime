@@ -13,8 +13,8 @@
 pub mod tsf_com;
 pub use tsf_com::{
     activate_tsf_profile_for_current_user, ensure_appcontainer_dir_acl,
-    is_shell_appcontainer_host, is_tsf_com_registered, send_tsf_ipc, TsfIpcRequest, TsfIpcResponse,
-    TSF_IPC_PORT,
+    invalidate_tsf_active_cache, is_our_tip_active_in_tsf, is_shell_appcontainer_host,
+    is_tsf_com_registered, send_tsf_ipc, TsfIpcRequest, TsfIpcResponse, TSF_IPC_PORT,
 };
 
 use ime_ai::{DualModeAiOrchestrator, OpenAiCompatibleConfig};
@@ -247,6 +247,8 @@ pub struct TsfKeySession {
     pub cursor_auto_advanced: bool,
     /// 最近一次操作是否为在句中直接修改拼音字母（若是，按空格可直接将修正后的整句上屏）
     pub last_op_was_pinyin_edit: bool,
+    /// 本轮输入是否因光标跳到非句首音节选词而自动锁定了光标前未手动选择的默认前缀
+    pub had_auto_prefix_lock: bool,
     pub current_candidates: Vec<Candidate>,
     pub current_page: usize,
     pub page_size: usize,
@@ -281,6 +283,7 @@ impl TsfKeySession {
             cursor_syllable_mode: false,
             cursor_auto_advanced: false,
             last_op_was_pinyin_edit: false,
+            had_auto_prefix_lock: false,
             current_candidates: Vec::new(),
             current_page: 0,
             page_size: 5,
@@ -372,6 +375,7 @@ impl TsfKeySession {
         self.cursor_syllable_mode = true;
         self.cursor_auto_advanced = false;
         self.last_op_was_pinyin_edit = false;
+        self.had_auto_prefix_lock = false;
         self.full_sentence_selected = false;
         self.current_page = 0;
         self.selected_candidate_index = 0;
@@ -384,6 +388,7 @@ impl TsfKeySession {
         self.cursor_syllable_mode = false;
         self.cursor_auto_advanced = false;
         self.last_op_was_pinyin_edit = false;
+        self.had_auto_prefix_lock = false;
         self.full_sentence_selected = false;
         self.current_page = 0;
         self.selected_candidate_index = 0;
@@ -482,6 +487,7 @@ impl TsfKeySession {
         self.cursor_syllable_mode = false;
         self.cursor_auto_advanced = false;
         self.last_op_was_pinyin_edit = false;
+        self.had_auto_prefix_lock = false;
         self.full_sentence_selected = false;
         self.current_candidates.clear();
         self.pinned_segments.clear();
@@ -1076,14 +1082,31 @@ impl TsfKeySession {
         let full_code = self.input_buffer.clone();
         let has_pins = !self.pinned_segments.is_empty();
         self.ai.invalidate_cache_for_pinyin(&full_code);
-        // 记忆「用户改过的整句」或中短词句，并同步记录句内双字及以上常用词频
-        if has_pins || full_text.chars().count() <= 12 {
+        let full_segments = self.last_full_segments.clone();
+        // 仅在用户从句首起主动逐段选字造词（`!had_auto_prefix_lock` 且总长 <= 4 字）或单段短词（<= 4 字）时将整串记入词表；
+        // 若用户只是把光标移到句中改字（自动锁定了前面未选的默认前缀）或输入多段长句，则只学习相邻词块的二元搭配（Bigram），
+        // 避免把一次句中改字（如在 `gan jue |ying gai` 中把 `ying` 选为「影」合成「感觉影该」）误造成高权重四字词而污染后续输入！
+        let full_char_cnt = full_text.chars().count();
+        if (has_pins && !self.had_auto_prefix_lock && full_char_cnt <= 4)
+            || (!has_pins && full_segments.len() <= 1 && full_char_cnt <= 4)
+        {
             self.core
                 .commit_candidate_ex(&full_code, &full_text, None, has_pins);
         }
-        let full_segments = self.last_full_segments.clone();
+        if has_pins {
+            for pair in full_segments.windows(2) {
+                self.core.learn_bigram(&pair[0].text, &pair[1].text);
+            }
+        }
         for seg in &full_segments {
-            if seg.text.chars().count() >= 2 && seg.start < seg.end && seg.end <= full_code.len() {
+            let seg_chars = seg.text.chars().count();
+            let is_particle_compound =
+                seg_chars >= 3 && seg.text.ends_with(['的', '了', '着', '过']);
+            if (2..=4).contains(&seg_chars)
+                && !is_particle_compound
+                && seg.start < seg.end
+                && seg.end <= full_code.len()
+            {
                 let seg_code = &full_code[seg.start..seg.end];
                 if seg_code != full_code {
                     self.core
@@ -1143,6 +1166,7 @@ impl TsfKeySession {
                                     .iter()
                                     .any(|(&s, &(e, _))| s < s_end && e > s_start)
                             {
+                                self.had_auto_prefix_lock = true;
                                 self.pinned_segments
                                     .insert(s_start, (s_end, seg.text.clone()));
                             }
@@ -1157,6 +1181,7 @@ impl TsfKeySession {
                                             .iter()
                                             .any(|(&s, &(e, _))| s < s_end && e > s_start)
                                     {
+                                        self.had_auto_prefix_lock = true;
                                         self.pinned_segments
                                             .insert(s_start, (s_end, syl.text.clone()));
                                     }
@@ -1233,20 +1258,32 @@ impl TsfKeySession {
         self.ai.invalidate_cache_for_pinyin(&consumed_code);
         self.ai.invalidate_cache_for_pinyin(&self.input_buffer);
 
-        if is_explicit || chosen.text.chars().count() <= 12 {
+        let chosen_char_cnt = chosen.text.chars().count();
+        if (is_explicit && (chosen_char_cnt <= 6 || chosen.segment_spans.len() <= 1))
+            || (!is_explicit && chosen.segment_spans.len() <= 1 && chosen_char_cnt <= 4)
+        {
             self.core
                 .commit_candidate_ex(&consumed_code, &chosen.text, None, is_explicit);
         }
         if chosen.segment_spans.len() > 1 {
+            if is_explicit {
+                for pair in chosen.segment_spans.windows(2) {
+                    self.core.learn_bigram(&pair[0].text, &pair[1].text);
+                }
+            }
             for span in &chosen.segment_spans {
-                if span.text.chars().count() >= 2
+                let seg_chars = span.text.chars().count();
+                let is_particle_compound =
+                    seg_chars >= 3 && span.text.ends_with(['的', '了', '着', '过']);
+                if (2..=4).contains(&seg_chars)
+                    && !is_particle_compound
                     && span.start < span.end
                     && span.end <= self.input_buffer.len()
                 {
                     let seg_code = &self.input_buffer[span.start..span.end];
                     if seg_code != consumed_code {
                         self.core
-                            .commit_candidate_ex(seg_code, &span.text, None, is_explicit);
+                            .commit_candidate_ex(seg_code, &span.text, None, false);
                         self.ai.invalidate_cache_for_pinyin(seg_code);
                     }
                 }
@@ -1781,6 +1818,14 @@ mod tests {
                 ghost_text: None,
             }
         );
+        // 关键防污染验证：因光标移到句中 |ying 改选单字而合成的『感觉影该』绝不能被误记为高优四字词，
+        // 再次输入 "ganjueyinggai" 时，首选整句与第 1 候选必须依然是『感觉应该』！
+        for ch in "ganjueyinggai".chars() {
+            session.process_key(VirtualKey::Char(ch));
+        }
+        let vm_gj_retype = session.build_view_model();
+        assert_eq!(vm_gj_retype.visible_candidates[0].text, "感觉应该");
+        session.process_key(VirtualKey::Escape);
     }
 
     #[test]

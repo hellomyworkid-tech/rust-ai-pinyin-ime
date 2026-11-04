@@ -20,8 +20,8 @@ use ime_core::{AppScene, ImeCoreEngine};
 use ime_lexicon::CompiledLexicon;
 use ime_tsf_win::{
     activate_tsf_profile_for_current_user, ensure_appcontainer_dir_acl,
-    is_shell_appcontainer_host, is_tsf_com_registered, CandidateWindowViewModel,
-    ImePersistentConfig, KeyAction,
+    invalidate_tsf_active_cache, is_our_tip_active_in_tsf, is_shell_appcontainer_host,
+    is_tsf_com_registered, send_tsf_ipc, CandidateWindowViewModel, ImePersistentConfig, KeyAction,
     TsfIpcRequest, TsfIpcResponse, TsfKeySession, VirtualKey, TSF_IPC_PORT,
 };
 use std::ffi::OsStr;
@@ -154,7 +154,120 @@ unsafe fn is_our_tip_default_in_ctf_registry() -> Option<bool> {
     Some(s == "{8E7A9C12-4F5B-4D8A-9E2C-1B3D5F7A9E01}")
 }
 
+/// 获取指定窗口的 Win32 类名（如 `"Progman"`, `"WorkerW"`, `"Shell_TrayWnd"`）
+unsafe fn get_window_class_name(hwnd: isize) -> String {
+    if hwnd == 0 {
+        return String::new();
+    }
+    let mut buf = [0u16; 128];
+    let len = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len as usize])
+}
+
+/// 检测当前前台窗口是否为全屏游戏或全屏独占应用：
+/// 在全屏游戏中按 `Shift`（冲刺/下蹲）时，若置顶桌面状态栏调用 `SetWindowPos(HWND_TOPMOST)`，
+/// 会触发 Windows DWM 强制中断独占全屏并切回桌面。因此全屏应用下必须隐藏状态栏并放行 `Shift`。
+unsafe fn is_foreground_fullscreen_app() -> bool {
+    let mut quns: i32 = 0;
+    if SHQueryUserNotificationState(&mut quns) == 0 {
+        // QUNS_RUNNING_D3D_FULL_SCREEN = 3, QUNS_PRESENTATION_MODE = 4
+        if quns == 3 || quns == 4 {
+            return true;
+        }
+    }
+    let fg = GetForegroundWindow();
+    if fg == 0 || IsWindowVisible(fg) == 0 {
+        return false;
+    }
+    let mut pid: u32 = 0;
+    GetWindowThreadProcessId(fg, &mut pid);
+    if pid == 0 || pid == std::process::id() {
+        return false;
+    }
+    // 排除 Windows 桌面背景及系统壳层窗口（Progman / WorkerW 本身也铺满屏幕，绝不能误判为全屏游戏）
+    let cls = get_window_class_name(fg);
+    if matches!(
+        cls.as_str(),
+        "Progman"
+            | "WorkerW"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "XamlExplorerHostIslandWindow"
+            | "NotifyIconOverflowWindow"
+            | "MultitaskingViewFrame"
+            | "Windows.UI.Core.CoreWindow"
+    ) {
+        return false;
+    }
+    let exe = get_foreground_exe_name().to_ascii_lowercase();
+    if matches!(
+        exe.as_str(),
+        "explorer.exe"
+            | "searchhost.exe"
+            | "startmenuexperiencehost.exe"
+            | "shellexperiencehost.exe"
+            | "textinputhost.exe"
+            | "applicationframehost.exe"
+            | "taskmgr.exe"
+            | "lockapp.exe"
+    ) {
+        return false;
+    }
+    let mut fg_rc = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if GetWindowRect(fg, &mut fg_rc) == 0 {
+        return false;
+    }
+    let hmon = MonitorFromWindow(fg, 2 /* MONITOR_DEFAULTTONEAREST */);
+    if hmon == 0 {
+        return false;
+    }
+    let mut mi = MONITORINFO {
+        cb_size: std::mem::size_of::<MONITORINFO>() as u32,
+        rc_monitor: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        rc_work: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        dw_flags: 0,
+    };
+    if GetMonitorInfoW(hmon, &mut mi) == 0 {
+        return false;
+    }
+    let covers_full_monitor = fg_rc.left <= mi.rc_monitor.left
+        && fg_rc.top <= mi.rc_monitor.top
+        && fg_rc.right >= mi.rc_monitor.right
+        && fg_rc.bottom >= mi.rc_monitor.bottom
+        && (fg_rc.right - fg_rc.left) >= (mi.rc_monitor.right - mi.rc_monitor.left)
+        && (fg_rc.bottom - fg_rc.top) >= (mi.rc_monitor.bottom - mi.rc_monitor.top);
+    if !covers_full_monitor {
+        return false;
+    }
+    // 普通最大化桌面窗口同时具有 WS_CAPTION (0x00C00000) 与 WS_MAXIMIZE (0x01000000)；
+    // 无边框全屏 / 独占全屏游戏窗口无 WS_CAPTION 或无 WS_MAXIMIZE
+    const GWL_STYLE: i32 = -16;
+    const WS_CAPTION: u32 = 0x00C0_0000;
+    const WS_MAXIMIZE: u32 = 0x0100_0000;
+    let style = GetWindowLongW(fg, GWL_STYLE) as u32;
+    (style & WS_CAPTION) == 0 || (style & WS_MAXIMIZE) == 0
+}
+
 fn note_tip_state(pid: u32, active: bool) {
+    invalidate_tsf_active_cache();
     let now = mono_ms();
     if active {
         LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
@@ -200,34 +313,71 @@ fn note_tip_state(pid: u32, active: bool) {
         } else {
             false
         };
-        // 若发起 deactivate 的并非当前可见前台窗口（例如后台进程退出、正在关闭的窗口或弹窗销毁），
-        // 仅移除该进程的进程内 TSF 标记，绝不将全局输入法状态置为停用
-        if pid != 0 && (!fg_visible || fg_pid == 0 || pid != fg_pid) {
-            if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
-                if let Some(map) = g.as_mut() {
-                    map.remove(&pid);
-                }
-            }
-            return;
-        }
-        LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
-        LAST_DEACTIVATED_PID.store(pid, Ordering::Relaxed);
+        let fg_cls = unsafe { get_window_class_name(fg) };
+        let fg_exe = unsafe { get_foreground_exe_name().to_ascii_lowercase() };
+        let is_switcher_or_shell = matches!(
+            fg_cls.as_str(),
+            "Shell_TrayWnd"
+                | "Shell_SecondaryTrayWnd"
+                | "XamlExplorerHostIslandWindow"
+                | "NotifyIconOverflowWindow"
+                | "Progman"
+                | "WorkerW"
+        ) || fg_exe == "shellexperiencehost.exe";
+        let tsf_session_inactive = is_our_tip_active_in_tsf() == Some(false);
+
         if pid != 0 {
             if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
                 let map = g.get_or_insert_with(std::collections::HashMap::new);
                 if map.len() > 512 {
                     map.clear();
                 }
+                if tsf_session_inactive {
+                    map.clear();
+                }
                 map.insert(pid, false);
             }
         }
+        // 若发起 deactivate 的并非当前可见前台窗口（例如后台进程退出、正在关闭的窗口或弹窗销毁），
+        // 且系统会话仍处于本输入法激活态、也非通过任务栏/Win+Space 切换输入法，则不将全局标记置为停用
+        if pid != 0
+            && (!fg_visible || fg_pid == 0 || pid != fg_pid)
+            && !is_switcher_or_shell
+            && !tsf_session_inactive
+        {
+            return;
+        }
+        LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
+        LAST_DEACTIVATED_PID.store(pid, Ordering::Relaxed);
     }
 }
 
 /// 计算当前是否应显示右下角状态栏
 unsafe fn status_bar_should_show() -> bool {
+    // 全屏游戏或全屏独占应用下始终隐藏状态栏，杜绝置顶弹窗打断全屏切换回桌面
+    if is_foreground_fullscreen_app() {
+        return false;
+    }
     if !TSF_MODE_ACTIVE.load(Ordering::Relaxed) {
-        return true; // 全局钩子模式下输入法对所有窗口生效
+        return true; // 全局钩子模式下输入法对所有非全屏窗口生效
+    }
+    // 优先通过 TSF ITfInputProcessorProfileMgr::GetActiveProfile 查询当前会话实时激活的输入法：
+    // 即使在选中 Windows 桌面 (Progman / WorkerW) 无输入框焦点时按 Win+Space 或托盘切到其他输入法，
+    // 也能立即感知并隐藏右下角状态栏！
+    match is_our_tip_active_in_tsf() {
+        Some(false) => {
+            LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
+            if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
+                if let Some(map) = g.as_mut() {
+                    map.clear();
+                }
+            }
+            return false;
+        }
+        Some(true) => {
+            LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
+        }
+        None => {}
     }
     // 若最近一次触发 deactivate 的进程已经退出（说明是关闭软件而非切换输入法），自动恢复激活状态
     if !LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed) {
@@ -258,6 +408,17 @@ unsafe fn status_bar_should_show() -> bool {
         if lang_id != 0 && lang_id != 0x0804 {
             return false;
         }
+    }
+    let fg_cls = get_window_class_name(fg);
+    // 当焦点位于 Windows 桌面或任务栏 (Progman / WorkerW / Shell_TrayWnd) 时，直接以 TSF 会话激活状态为准
+    if matches!(
+        fg_cls.as_str(),
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    ) {
+        if let Some(active) = is_our_tip_active_in_tsf() {
+            return active;
+        }
+        return LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed);
     }
     if let Some(active) = TIP_ACTIVE_BY_PID
         .lock()
@@ -489,8 +650,25 @@ extern "system" {
     fn GetLastError() -> u32;
 }
 
+#[repr(C)]
+struct MONITORINFO {
+    cb_size: u32,
+    rc_monitor: RECT,
+    rc_work: RECT,
+    dw_flags: u32,
+}
+const _: () = assert!(std::mem::size_of::<MONITORINFO>() == 40);
+
+#[link(name = "shell32")]
+extern "system" {
+    fn SHQueryUserNotificationState(pquns: *mut i32) -> i32;
+}
+
 #[link(name = "user32")]
 extern "system" {
+    fn GetClassNameW(h_wnd: isize, lp_class_name: *mut u16, n_max_count: i32) -> i32;
+    fn MonitorFromWindow(hwnd: isize, dw_flags: u32) -> isize;
+    fn GetMonitorInfoW(h_monitor: isize, lpmi: *mut MONITORINFO) -> i32;
     fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) -> u16;
     fn CreateWindowExW(
         dw_ex_style: u32,
@@ -1656,6 +1834,8 @@ unsafe fn expand_status_from_orb(orb_pos: (i32, i32)) -> (i32, i32) {
     clamp_to_work_area(p.0, p.1, w, STATUS_H)
 }
 
+static LAST_STATUS_BOUNDS: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
+
 unsafe fn sync_ui_windows() {
     let mut show_cand = false;
     let mut cand_pos = (0, 0);
@@ -1663,11 +1843,17 @@ unsafe fn sync_ui_windows() {
     let mut status_pos = (0, 0);
     let mut hwnd_cand = 0;
     let mut hwnd_status = 0;
+    let fullscreen = is_foreground_fullscreen_app();
 
     if let Ok(mut guard) = GLOBAL_STATE.lock() {
         if let Some(st) = guard.as_mut() {
-            show_cand =
-                !st.session.input_buffer.is_empty() || st.session.pending_ghost_text.is_some();
+            if fullscreen {
+                st.session.input_buffer.clear();
+                st.session.current_candidates.clear();
+                st.session.pending_ghost_text = None;
+            }
+            show_cand = !fullscreen
+                && (!st.session.input_buffer.is_empty() || st.session.pending_ghost_text.is_some());
             if show_cand {
                 let vm = st.session.build_view_model();
                 let ghost = if st.session.input_buffer.is_empty() {
@@ -1695,17 +1881,40 @@ unsafe fn sync_ui_windows() {
     }
 
     if hwnd_status != 0 {
-        let (sw, sh) = current_status_size();
-        SetWindowPos(
-            hwnd_status,
-            HWND_TOPMOST,
-            status_pos.0,
-            status_pos.1,
-            sw,
-            sh,
-            SWP_NOACTIVATE,
-        );
-        InvalidateRect(hwnd_status, null(), 0);
+        let want_status = !fullscreen && status_bar_should_show();
+        if want_status {
+            let (sw, sh) = current_status_size();
+            let next_bounds = (status_pos.0, status_pos.1, sw, sh);
+            let bounds_changed = LAST_STATUS_BOUNDS
+                .lock()
+                .map(|mut g| {
+                    if *g != next_bounds {
+                        *g = next_bounds;
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(true);
+            // 仅当位置或尺寸真正变化时才调用 SetWindowPos，避免切换中/英时频繁置顶刷新打断全屏画面
+            if bounds_changed {
+                SetWindowPos(
+                    hwnd_status,
+                    HWND_TOPMOST,
+                    status_pos.0,
+                    status_pos.1,
+                    sw,
+                    sh,
+                    SWP_NOACTIVATE,
+                );
+            }
+            if IsWindowVisible(hwnd_status) == 0 {
+                ShowWindow(hwnd_status, SW_SHOWNOACTIVATE);
+            }
+            InvalidateRect(hwnd_status, null(), 0);
+        } else if IsWindowVisible(hwnd_status) != 0 {
+            ShowWindow(hwnd_status, SW_HIDE);
+        }
     }
     if hwnd_cand != 0 {
         if show_cand {
@@ -1720,7 +1929,7 @@ unsafe fn sync_ui_windows() {
             );
             ShowWindow(hwnd_cand, SW_SHOWNOACTIVATE);
             InvalidateRect(hwnd_cand, null(), 0);
-        } else {
+        } else if IsWindowVisible(hwnd_cand) != 0 {
             ShowWindow(hwnd_cand, SW_HIDE);
         }
     }
@@ -1736,6 +1945,33 @@ unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
             }
         }
         return (resp, false);
+    }
+    if req.op == "quit" {
+        std::process::exit(0);
+    }
+    if req.op == "open_settings" {
+        let hwnd_st = GLOBAL_STATE
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|st| st.hwnd_status))
+            .unwrap_or(0);
+        if hwnd_st != 0 {
+            PostMessageW(hwnd_st, WM_APP_OPEN_SETTINGS, 0, 0);
+        }
+        return (TsfIpcResponse::default(), false);
+    }
+    // 全屏游戏或全屏独占应用下，直接放行所有按键（含 Shift 冲刺/下蹲），绝不拦截或触发任何置顶 UI 同步
+    if matches!(req.op.as_str(), "test_key_down" | "key_down" | "key_up")
+        && is_foreground_fullscreen_app()
+    {
+        if let Ok(mut guard) = GLOBAL_STATE.lock() {
+            if let Some(st) = guard.as_mut() {
+                st.shift_tap_armed = false;
+                st.session.input_buffer.clear();
+                st.session.current_candidates.clear();
+            }
+        }
+        return (TsfIpcResponse::default(), false);
     }
     // 除 deactivate 外，任何来自 DLL 的请求都说明本输入法正在该进程中使用
     note_tip_state(req.pid, req.op != "deactivate");
@@ -1906,6 +2142,9 @@ unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
                         }
                     }
                 }
+                "quit" => {
+                    std::process::exit(0);
+                }
                 _ => {}
             }
 
@@ -1974,6 +2213,10 @@ unsafe extern "system" fn low_level_keyboard_proc(
     // 放行由本输入法 SendInput 注入的 Unicode 字符事件；
     // 在 TSF 正式模式下对常规桌面应用自动让位，但对受 AppContainer 网络隔离的 SearchHost / StartMenuExperienceHost 直接接管按键
     if (kb.flags & LLKHF_INJECTED) != 0 {
+        return CallNextHookEx(0, n_code, w_param, l_param);
+    }
+    // 全屏游戏或全屏独占应用下完全放行所有按键，绝不响应 Shift 切换或调用 SetWindowPos 抢夺全屏显示层
+    if is_foreground_fullscreen_app() {
         return CallNextHookEx(0, n_code, w_param, l_param);
     }
     let fg_exe = get_foreground_exe_name();
@@ -2058,10 +2301,13 @@ unsafe extern "system" fn low_level_keyboard_proc(
                 }
             }
         }
+        let did_commit_shift = commit_on_shift_up.is_some();
         if let Some(txt) = commit_on_shift_up {
             send_unicode_text(&txt);
         }
-        sync_ui_windows();
+        if should_eat_up || did_commit_shift {
+            sync_ui_windows();
+        }
         if should_eat_up {
             return 1;
         }
@@ -3142,16 +3388,24 @@ const FIELD_L: i32 = 318;
 const NAV_Y0: i32 = 92;
 const NAV_STEP: i32 = 44;
 const NAV_H: i32 = 38;
-const SEG_Y: i32 = 202;
-const ACT_Y: i32 = 364;
+const SEG_Y: i32 = 190;
+const ACT_Y: i32 = 342;
 const PAGE_ALWAYS: u8 = 255;
 
 const ID_SEG_PROVIDER_BASE: isize = 1100;
 const SEG_LABELS: [&str; 5] = ["本地 Qwen", "ChatGPT", "Claude", "Gemini", "自定义"];
 const EDIT_ROWS: [(isize, i32, &str); 3] = [
-    (ID_EDT_API_BASE, 242, "接口地址"),
-    (ID_EDT_MODEL, 282, "模型名称"),
-    (ID_EDT_API_KEY, 322, "API Key"),
+    (ID_EDT_API_BASE, 228, "接口地址"),
+    (ID_EDT_MODEL, 266, "模型名称"),
+    (ID_EDT_API_KEY, 304, "API Key"),
+];
+/// 各服务商推荐模型速查（在「服务配置」卡片右上角随所选服务商动态展示）
+const PROVIDER_MODEL_TIPS: [&str; 5] = [
+    "推荐：内置 Qwen2.5-1.5B（首选）/ Ollama qwen2.5:1.5b 或 qwen3:1.7b",
+    "推荐：gpt-4.1-mini / gpt-4.1-nano / gpt-4o-mini（低延迟高性价比）",
+    "推荐：claude-3-5-haiku-latest / claude-haiku-4-5（响应最快）",
+    "推荐：gemini-2.5-flash / gemini-2.5-flash-lite（已自动关闭思考延迟）",
+    "推荐：deepseek-chat (V3) / Qwen2.5-7B-Instruct / Qwen3-8B",
 ];
 /// 侧栏导航：(Segoe MDL2 图标, 名称)
 const NAV_ITEMS: [(&str, &str); 4] = [
@@ -3459,11 +3713,23 @@ unsafe fn paint_settings(hwnd: isize) {
 
 unsafe fn paint_page_ai(hdc: isize, r: &SettingsRes) {
     // 卡片 1：总开关（开关控件铺满卡片内部）
-    s_card(hdc, 86, 146);
+    s_card(hdc, 82, 140);
 
     // 卡片 2：服务配置
-    s_card(hdc, 158, 408);
-    s_text(hdc, r.f_heading, C_TEXT, IN_L, 168, IN_R, 192, "服务配置", T_LINE);
+    s_card(hdc, 148, 420);
+    s_text(hdc, r.f_heading, C_TEXT, IN_L, 158, IN_L + 84, 182, "服务配置", T_LINE);
+    let prov_idx = get_provider_sel();
+    s_text(
+        hdc,
+        r.f_small,
+        C_ACCENT,
+        IN_L + 88,
+        159,
+        IN_R,
+        182,
+        PROVIDER_MODEL_TIPS[prov_idx],
+        T_LINE,
+    );
     s_text(hdc, r.f_body, C_TEXT2, IN_L, SEG_Y, FIELD_L - 8, SEG_Y + 32, "服务商", T_LINE);
     let focused = FOCUSED_EDIT.load(Ordering::Relaxed);
     for (id, y, label) in EDIT_ROWS {
@@ -3477,18 +3743,43 @@ unsafe fn paint_page_ai(hdc: isize, r: &SettingsRes) {
     }
     s_text(hdc, r.f_body, C_TEXT2, IN_L, ACT_Y, FIELD_L - 8, ACT_Y + 30, "快速填入", T_LINE);
 
+    // 各家推荐模型简单说明栏（底栏提示框）
+    s_round(hdc, IN_L, 378, IN_R, 414, 6, C_BG, C_BORDER);
+    s_text(
+        hdc,
+        r.f_small,
+        C_TEXT2,
+        IN_L + 8,
+        380,
+        IN_R - 8,
+        396,
+        "各家推荐 · 本地: Qwen2.5-1.5B / qwen3:1.7b   ChatGPT: gpt-4.1-mini / 4o-mini   Claude: claude-3-5-haiku-latest",
+        T_LINE,
+    );
+    s_text(
+        hdc,
+        r.f_small,
+        C_MUTED,
+        IN_L + 8,
+        396,
+        IN_R - 8,
+        412,
+        "Gemini: gemini-2.5-flash   DeepSeek/硅基: deepseek-chat (V3) / Qwen2.5-7B（勿选 R1/o1 等慢思考模型）",
+        T_LINE,
+    );
+
     // 卡片 3：内置本地模型
-    s_card(hdc, 420, 528);
-    s_text(hdc, r.f_heading, C_TEXT, IN_L, 432, IN_L + 110, 454, "内置本地模型", T_LINE);
-    s_pill(hdc, IN_L + 104, 433, IN_L + 204, 453, "免安装 Ollama", C_GREEN_SOFT, C_GREEN, false);
+    s_card(hdc, 428, 530);
+    s_text(hdc, r.f_heading, C_TEXT, IN_L, 438, IN_L + 110, 460, "内置本地模型", T_LINE);
+    s_pill(hdc, IN_L + 104, 439, IN_L + 204, 459, "免安装 Ollama", C_GREEN_SOFT, C_GREEN, false);
     s_text(
         hdc,
         r.f_small,
         C_MUTED,
         IN_L,
-        456,
+        461,
         IN_R,
-        476,
+        480,
         "自动下载 llama.cpp（Vulkan GPU 加速）与 Qwen2.5 GGUF 模型，后台运行于 127.0.0.1:18434",
         T_LINE,
     );
@@ -4231,7 +4522,7 @@ unsafe extern "system" fn wnd_proc_settings(
             let chk_ai_enabled = btn(
                 "启用大模型智能选词重排\n在后台异步运行，不阻塞打字；端侧轻量模型始终开启",
                 IN_L,
-                94,
+                89,
                 IN_R - IN_L,
                 44,
                 ID_CHK_AI_ENABLED,
@@ -4248,8 +4539,8 @@ unsafe extern "system" fn wnd_proc_settings(
             btn("硅基流动", FIELD_L + 90, ACT_Y, 84, 30, ID_BTN_PRESET_SILICON, 0);
             btn("探测本机服务", IN_R - 232, ACT_Y, 112, 30, ID_BTN_PROBE_LOCAL, 0);
             btn("测试连接", IN_R - 112, ACT_Y, 112, 30, ID_BTN_TEST_CONN, 0);
-            let tile_05 = btn("Qwen2.5-0.5B · 极速版", IN_L, 480, 264, 40, ID_BTN_PRESET_QWEN05B, 0);
-            let tile_15 = btn("Qwen2.5-1.5B · 推荐", IN_L + 276, 480, 264, 40, ID_BTN_PRESET_QWEN15B, 0);
+            let tile_05 = btn("Qwen2.5-0.5B · 极速版", IN_L, 483, 264, 40, ID_BTN_PRESET_QWEN05B, 0);
+            let tile_15 = btn("Qwen2.5-1.5B · 推荐", IN_L + 276, 483, 264, 40, ID_BTN_PRESET_QWEN15B, 0);
             MODEL_TILE_HWNDS[0].store(tile_05, Ordering::Relaxed);
             MODEL_TILE_HWNDS[1].store(tile_15, Ordering::Relaxed);
 
@@ -4453,6 +4744,7 @@ unsafe extern "system" fn wnd_proc_settings(
                     }
                 }
                 set_provider_sel(&ctrls, idx);
+                InvalidateRect(hwnd, null(), 0);
                 if let Some((base_s, model_s, key_s)) = next_cfg {
                     set_ctrl_text(ctrls.edt_api_base, &base_s);
                     set_ctrl_text(ctrls.edt_model, &model_s);
@@ -4461,8 +4753,9 @@ unsafe extern "system" fn wnd_proc_settings(
                 set_ctrl_text(
                     ctrls.lbl_status,
                     &format!(
-                        "已切换到「{}」，确认接口地址、模型与 Key 后点击「保存设置」。",
-                        next_prov.display_name()
+                        "已切换到「{}」（{}），点击「保存设置」生效。",
+                        next_prov.display_name(),
+                        PROVIDER_MODEL_TIPS[idx]
                     ),
                 );
                 return 0;
@@ -4663,16 +4956,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mutex_name = to_wide("Local\\RustAiPinyinImeGlobalServerSingletonMutex_v1");
-            let h_mutex = CreateMutexW(null(), 1, mutex_name.as_ptr());
+            let mut h_mutex = CreateMutexW(null(), 1, mutex_name.as_ptr());
             if h_mutex != 0 && GetLastError() == 183 /* ERROR_ALREADY_EXISTS */ {
-                if args.iter().any(|a| a == "--open-settings") {
-                    let cls = to_wide("RustAiGlobalImeStatusPillV1");
-                    let hwnd_existing = FindWindowW(cls.as_ptr(), null());
-                    if hwnd_existing != 0 {
-                        PostMessageW(hwnd_existing, WM_APP_OPEN_SETTINGS, 0, 0);
+                if args.iter().any(|a| a == "--restart") {
+                    CloseHandle(h_mutex);
+                    let _ = send_tsf_ipc(&TsfIpcRequest {
+                        op: "quit".to_string(),
+                        vk: 0,
+                        shift: false,
+                        ctrl: false,
+                        alt: false,
+                        caret_x: 0,
+                        caret_y: 0,
+                        exe_name: String::new(),
+                        pid: std::process::id(),
+                    });
+                    for _ in 0..30 {
+                        std::thread::sleep(Duration::from_millis(50));
+                        h_mutex = CreateMutexW(null(), 1, mutex_name.as_ptr());
+                        if h_mutex != 0 && GetLastError() != 183 {
+                            break;
+                        }
+                        if h_mutex != 0 {
+                            CloseHandle(h_mutex);
+                        }
                     }
+                } else {
+                    if args.iter().any(|a| a == "--open-settings") {
+                        let _ = send_tsf_ipc(&TsfIpcRequest {
+                            op: "open_settings".to_string(),
+                            vk: 0,
+                            shift: false,
+                            ctrl: false,
+                            alt: false,
+                            caret_x: 0,
+                            caret_y: 0,
+                            exe_name: String::new(),
+                            pid: std::process::id(),
+                        });
+                        let cls = to_wide("RustAiGlobalImeStatusPillV1");
+                        let hwnd_existing = FindWindowW(cls.as_ptr(), null());
+                        if hwnd_existing != 0 {
+                            PostMessageW(hwnd_existing, WM_APP_OPEN_SETTINGS, 0, 0);
+                        }
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
         }
     }

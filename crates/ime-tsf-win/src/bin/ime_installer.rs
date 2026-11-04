@@ -306,6 +306,17 @@ mod win32_installer {
             self.status_logs.push(format!("✔ 已创建安装目录: {}", target_dir.display()));
 
             // Stop existing running instance before overwriting
+            let _ = ime_tsf_win::send_tsf_ipc(&ime_tsf_win::TsfIpcRequest {
+                op: "quit".to_string(),
+                vk: 0,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                caret_x: 0,
+                caret_y: 0,
+                exe_name: String::new(),
+                pid: std::process::id(),
+            });
             let _ = Command::new("taskkill")
                 .args(["/F", "/IM", "RustAI拼音输入法_全局版.exe"])
                 .output();
@@ -325,8 +336,13 @@ mod win32_installer {
                 ])
                 .ok_or_else(|| "未找到全局输入法程序 (RustAI拼音输入法_全局版.exe)".to_string())?;
             let global_dst = target_dir.join("RustAI拼音输入法_全局版.exe");
-            fs::copy(&global_src, &global_dst)
-                .map_err(|e| format!("复制全局输入法服务失败: {e}"))?;
+            if fs::copy(&global_src, &global_dst).is_err() {
+                let old_bak = target_dir.join(format!("RustAI拼音输入法_全局版.{}.old", std::process::id()));
+                let _ = fs::remove_file(&old_bak);
+                let _ = fs::rename(&global_dst, &old_bak);
+                fs::copy(&global_src, &global_dst)
+                    .map_err(|e| format!("复制全局输入法服务失败: {e}"))?;
+            }
             self.status_logs
                 .push("✔ 已安装全局输入法守护服务: RustAI拼音输入法_全局版.exe".to_string());
 

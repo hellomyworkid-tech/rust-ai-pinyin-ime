@@ -513,6 +513,57 @@ mod tests {
         assert_eq!(openai_client::choose_by_lm_margin(&[-6.0, -5.0], true), 0);
     }
 
+    #[test]
+    fn test_thinking_model_handling_and_truncated_think_guard() {
+        let cands = vec![
+            Candidate {
+                text: "技术".to_string(),
+                preedit: "ji'shu".to_string(),
+                consumed_len: 5,
+                l1_cost: 1.0,
+                final_score: 99.0,
+                ai_boosted: false,
+                tag: String::new(),
+                segments: vec!["技术".to_string()],
+                segment_spans: Vec::new(),
+                syllable_spans: Vec::new(),
+            },
+            Candidate {
+                text: "级数".to_string(),
+                preedit: "ji'shu".to_string(),
+                consumed_len: 5,
+                l1_cost: 1.2,
+                final_score: 98.0,
+                ai_boosted: false,
+                tag: String::new(),
+                segments: vec!["级数".to_string()],
+                segment_spans: Vec::new(),
+                syllable_spans: Vec::new(),
+            },
+        ];
+
+        // 1. Qwen3 模型自动注入 `/no_think` 软开关
+        let mut cfg = OpenAiCompatibleConfig::default();
+        cfg.model = "qwen3:1.7b".to_string();
+        let client = OpenAiCompatibleClient::new(cfg);
+        let req = client.build_rerank_request("jishu", "微积分傅里叶", AppScene::Academic, &cands);
+        assert!(req.messages[1].content.ends_with("/no_think"));
+
+        // 2. 完整闭合 `<think>...</think>`：正常提取思考后的候选词
+        let closed_think = "<think>\n上文是微积分傅里叶，第1项是技术，第2项是级数，应选级数。\n</think>\n级数";
+        assert_eq!(
+            openai_client::sanitize_llm_candidate_output(closed_think, &cands),
+            "级数"
+        );
+
+        // 3. 未闭合的截断 `<think>`：绝不能从思考草稿中误抓候选词，应安全回退至第 1 项首选
+        let truncated_think = "<think>\n用户让我从 1. 技术 和 2. 级数 中选择一个，我们来看看级数是否";
+        assert_eq!(
+            openai_client::sanitize_llm_candidate_output(truncated_think, &cands),
+            "技术"
+        );
+    }
+
     /// 打印候选分页结构：`cargo test -p ime-ai dump_candidate_pages -- --ignored --nocapture`
     #[test]
     #[ignore]

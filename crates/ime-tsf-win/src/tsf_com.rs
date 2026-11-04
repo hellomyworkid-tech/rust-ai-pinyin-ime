@@ -1116,22 +1116,20 @@ unsafe extern "system" fn tip_deactivate(this: *mut c_void) -> HRESULT {
         ((*unk_vtbl).release)(ptim);
     }
 
-    let prev_active = ACTIVE_TIP_COUNT.fetch_sub(1, Ordering::SeqCst);
-    if prev_active <= 1 {
-        let exe_name = current_exe_basename();
-        if !is_shell_appcontainer_host(&exe_name) {
-            let _ = send_tsf_ipc(&TsfIpcRequest {
-                op: "deactivate".to_string(),
-                vk: 0,
-                shift: false,
-                ctrl: false,
-                alt: false,
-                caret_x: 0,
-                caret_y: 0,
-                exe_name,
-                pid: std::process::id(),
-            });
-        }
+    let _ = ACTIVE_TIP_COUNT.fetch_sub(1, Ordering::SeqCst);
+    let exe_name = current_exe_basename();
+    if !is_shell_appcontainer_host(&exe_name) {
+        let _ = send_tsf_ipc(&TsfIpcRequest {
+            op: "deactivate".to_string(),
+            vk: 0,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            caret_x: 0,
+            caret_y: 0,
+            exe_name,
+            pid: std::process::id(),
+        });
     }
 
     S_OK
@@ -1892,6 +1890,24 @@ pub fn is_tsf_com_registered() -> bool {
 }
 
 #[repr(C)]
+pub struct TF_INPUTPROCESSORPROFILE {
+    pub dw_profile_type: u32,
+    pub langid: u16,
+    pub clsid: GUID,
+    pub guid_profile: GUID,
+    pub catid: GUID,
+    pub hkl_substitute: isize,
+    pub dw_caps: u32,
+    pub hkl: isize,
+    pub dw_flags: u32,
+}
+
+#[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+const _: () = assert!(std::mem::size_of::<TF_INPUTPROCESSORPROFILE>() == 88);
+#[cfg(all(target_os = "windows", target_pointer_width = "32"))]
+const _: () = assert!(std::mem::size_of::<TF_INPUTPROCESSORPROFILE>() == 72);
+
+#[repr(C)]
 struct ITfInputProcessorProfileMgrVtbl {
     base: IUnknownVtbl,
     activate_profile: unsafe extern "system" fn(
@@ -1903,11 +1919,93 @@ struct ITfInputProcessorProfileMgrVtbl {
         isize,
         u32,
     ) -> HRESULT,
+    deactivate_profile: *const c_void,
+    get_profile: *const c_void,
+    enum_profiles: *const c_void,
+    release_input_processor: *const c_void,
+    register_profile: *const c_void,
+    unregister_profile: *const c_void,
+    get_active_profile: unsafe extern "system" fn(
+        *mut ITfInputProcessorProfileMgr,
+        *const GUID,
+        *mut TF_INPUTPROCESSORPROFILE,
+    ) -> HRESULT,
 }
 
 #[repr(C)]
 struct ITfInputProcessorProfileMgr {
     lp_vtbl: *const ITfInputProcessorProfileMgrVtbl,
+}
+
+static TSF_ACTIVE_CACHE_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// 0 = None, 1 = Some(false), 2 = Some(true)
+static TSF_ACTIVE_CACHE_VAL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 使 `is_our_tip_active_in_tsf` 的短期缓存立即失效（在收到 TSF 激活/停用通知时调用）
+pub fn invalidate_tsf_active_cache() {
+    TSF_ACTIVE_CACHE_AT_MS.store(0, Ordering::Relaxed);
+}
+
+/// 查询当前 Windows 会话 (`ITfInputProcessorProfileMgr::GetActiveProfile`) 实时激活的键盘输入法是否为本输入法。
+/// 即使用户在选中 Windows 桌面 (`Progman` / `WorkerW`) 等无输入框焦点区域通过 `Win+Space` 或托盘语言栏切换输入法，
+/// 该接口也能在零通知延迟下直接反映当前会话真实选中的输入法 `CLSID`。
+/// 内置 120ms 原子缓存，确保在低级键盘钩子等高频路径中调用接近零开销。
+pub fn is_our_tip_active_in_tsf() -> Option<bool> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let cached_at = TSF_ACTIVE_CACHE_AT_MS.load(Ordering::Relaxed);
+        if cached_at != 0 && now_ms.saturating_sub(cached_at) < 120 {
+            return match TSF_ACTIVE_CACHE_VAL.load(Ordering::Relaxed) {
+                1 => Some(false),
+                2 => Some(true),
+                _ => None,
+            };
+        }
+
+        let _ = CoInitializeEx(null_mut(), 0x2);
+        let mut mgr: *mut ITfInputProcessorProfileMgr = null_mut();
+        let hr_inst = CoCreateInstance(
+            &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+            null_mut(),
+            1,
+            &IID_ITF_INPUT_PROCESSOR_PROFILE_MGR,
+            &mut mgr as *mut *mut _ as *mut *mut c_void,
+        );
+        if hr_inst != S_OK || mgr.is_null() {
+            return None;
+        }
+        let mut prof: TF_INPUTPROCESSORPROFILE = std::mem::zeroed();
+        let hr = ((*(*mgr).lp_vtbl).get_active_profile)(mgr, &GUID_TFCAT_TIP_KEYBOARD, &mut prof);
+        ((*(*mgr).lp_vtbl).base.release)(mgr as *mut c_void);
+        if hr != S_OK {
+            return None;
+        }
+        // TF_PROFILETYPE_INPUTPROCESSOR = 1；若为 2 (纯键盘布局如美式英语) 或 CLSID 为微软拼音/其他输入法，返回 Some(false)
+        let res = if prof.dw_profile_type == 1 && prof.clsid == CLSID_RUST_AI_IME {
+            Some(true)
+        } else if prof.dw_profile_type == 1 || prof.dw_profile_type == 2 {
+            Some(false)
+        } else {
+            None
+        };
+        let code = match res {
+            Some(false) => 1,
+            Some(true) => 2,
+            None => 0,
+        };
+        TSF_ACTIVE_CACHE_VAL.store(code, Ordering::Relaxed);
+        TSF_ACTIVE_CACHE_AT_MS.store(now_ms, Ordering::Relaxed);
+        res
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
 }
 
 /// 在当前用户会话中启用并激活本 TSF 拼音输入法（使 Win+Space 语言栏立即生效）

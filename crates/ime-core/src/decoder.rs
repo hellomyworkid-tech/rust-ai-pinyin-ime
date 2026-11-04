@@ -267,6 +267,12 @@ impl BilingualDecoder {
                         .unwrap_or_else(|| raw_slice.to_string());
 
                     for urec in user_recs.into_iter().take(4) {
+                        let char_cnt = urec.text.chars().count();
+                        // 晶格图内部仅注入 <= 4 字的词汇级用户记忆（如人名「武增吉」、专有名词「文摘集」），
+                        // 5 字及以上的长短语/整句交由末尾 User Memory Top Promotion 处理，避免将多段整句坍缩成单段而丢失递进前缀候选
+                        if char_cnt > 4 && !urec.text.is_ascii() {
+                            continue;
+                        }
                         if urec.dynamic_score >= 4.5
                             || urec.commit_count >= 2
                             || (is_whole_input && urec.code_key != raw_slice && urec.commit_count >= 1)
@@ -279,14 +285,14 @@ impl BilingualDecoder {
                                 code_key: matched_code_key.clone(),
                                 kind: if is_ascii {
                                     EdgeKind::EnglishWord
-                                } else if urec.code_key.len() > 3 {
+                                } else if char_cnt >= 2 || urec.code_key.len() > 3 {
                                     EdgeKind::ChineseWord
                                 } else {
                                     EdgeKind::ChineseChar
                                 },
                                 base_cost: 0.15,
                                 domain: DomainTag::General,
-                                syllable_count: ((end_pos - i) / 2).max(1),
+                                syllable_count: if is_ascii { 1 } else { char_cnt.max(1) },
                                 is_fuzzy: false,
                             });
                         }
@@ -1025,17 +1031,21 @@ impl BilingualDecoder {
                         item.l1_cost = 0.05;
                         candidates.insert(0, item);
                     } else {
-                        let fallback_syls = candidates
-                            .first()
-                            .map(|c| c.syllable_spans.clone())
-                            .unwrap_or_else(|| {
-                                vec![SegmentSpan {
-                                    start: 0,
-                                    end: n,
-                                    text: urec.text.clone(),
-                                    code_key: lattice.input.clone(),
-                                }]
-                            });
+                        let split_syls =
+                            split_raw_pinyin_to_char_spans(&lattice.input, 0, n, &urec.text);
+                        let fallback_syls = split_syls.unwrap_or_else(|| {
+                            candidates
+                                .first()
+                                .map(|c| c.syllable_spans.clone())
+                                .unwrap_or_else(|| {
+                                    vec![SegmentSpan {
+                                        start: 0,
+                                        end: n,
+                                        text: urec.text.clone(),
+                                        code_key: lattice.input.clone(),
+                                    }]
+                                })
+                        });
                         candidates.insert(
                             0,
                             Candidate {
@@ -1222,7 +1232,18 @@ fn grammar_transition_bonus(
         }
     }
 
-    // 3. 「得」后接程度/结果补语搭配
+    // 3. 结构助词/时态助词（的/了/着/过/地/得）紧接多字实词后的黏着补偿：
+    // 词库中部分形容词自带预组三字词（如「狭窄的」作为单条词只计 1 次步长），而大多数动词/名词（如「下载」「修改」「安装」）
+    // 需通过「双字词 + 的」两步组合（额外承担单字 cost 与 1.75 步长惩罚）。对此给予语法黏着补偿，使「下载+的」与预组三字词处于同一量级。
+    if prev_word.chars().count() >= 2 {
+        if w == "的" {
+            bonus += 2.25;
+        } else if matches!(w, "了" | "着" | "过" | "地" | "得") {
+            bonus += 1.35;
+        }
+    }
+
+    // 4. 「得」后接程度/结果补语搭配
     if prev_word == "得"
         && matches!(
             w,
@@ -1280,10 +1301,133 @@ fn extract_context_tail_words(context: &str) -> Vec<String> {
     tails
 }
 
+/// 将无 `'` 分隔符的用户词条原始拼音区间 `[start..end]` 按汉字个数拆分为逐字对应的 `SegmentSpan`
+fn split_raw_pinyin_to_char_spans(
+    input: &str,
+    start: usize,
+    end: usize,
+    text: &str,
+) -> Option<Vec<SegmentSpan>> {
+    let chars: Vec<char> = text.chars().collect();
+    let k = chars.len();
+    if k < 2 || text.is_ascii() || start >= end || end > input.len() {
+        return None;
+    }
+    let raw = &input[start..end];
+    let mut cuts = Vec::with_capacity(k);
+    if raw.len() == k {
+        cuts.resize(k, 1);
+    } else if !find_k_syllable_cuts(raw, k, false, &mut cuts) {
+        cuts.clear();
+        if !find_k_syllable_cuts(raw, k, true, &mut cuts) {
+            return None;
+        }
+    }
+    if cuts.len() != k {
+        return None;
+    }
+    let mut out = Vec::with_capacity(k);
+    let mut cur = start;
+    for (idx, step) in cuts.into_iter().enumerate() {
+        let next_end = (cur + step).min(end);
+        if next_end > cur {
+            let code_piece = input[cur..next_end].trim_matches('\'').to_string();
+            out.push(SegmentSpan {
+                start: cur,
+                end: next_end,
+                text: chars[idx].to_string(),
+                code_key: if code_piece.is_empty() {
+                    input[cur..next_end].to_string()
+                } else {
+                    code_piece
+                },
+            });
+            cur = next_end;
+        }
+    }
+    (out.len() == k).then_some(out)
+}
+
+fn find_k_syllable_cuts(
+    rem: &str,
+    k: usize,
+    allow_fuzzy_or_abbrev: bool,
+    out_cuts: &mut Vec<usize>,
+) -> bool {
+    if k == 0 {
+        return rem.is_empty();
+    }
+    if rem.len() < k || rem.len() > k * 7 {
+        return false;
+    }
+    let lead_apos = rem.bytes().take_while(|&b| b == b'\'').count();
+    let clean = &rem[lead_apos..];
+    if clean.len() < k {
+        return false;
+    }
+    if k == 1 {
+        let ok = if !allow_fuzzy_or_abbrev {
+            crate::pinyin::is_valid_syllable(clean)
+        } else {
+            clean.len() <= 6
+        };
+        if ok {
+            out_cuts.push(rem.len());
+            return true;
+        }
+        return false;
+    }
+    let max_len = (clean.len() - (k - 1)).min(6);
+    // 第一轮优先匹配完整合法全拼音节（长音节优先）
+    for len in (2..=max_len).rev() {
+        let piece = &clean[..len];
+        if crate::pinyin::is_valid_syllable(piece) {
+            out_cuts.push(lead_apos + len);
+            if find_k_syllable_cuts(&clean[len..], k - 1, allow_fuzzy_or_abbrev, out_cuts) {
+                return true;
+            }
+            out_cuts.pop();
+        }
+    }
+    // 单字母合法韵母音节（a / e / o）
+    if matches!(clean.as_bytes()[0], b'a' | b'e' | b'o') {
+        out_cuts.push(lead_apos + 1);
+        if find_k_syllable_cuts(&clean[1..], k - 1, allow_fuzzy_or_abbrev, out_cuts) {
+            return true;
+        }
+        out_cuts.pop();
+    }
+    // 宽松模式：允许模糊音或单字母声母简拼
+    if allow_fuzzy_or_abbrev {
+        let fuzzy = crate::pinyin::FuzzyPinyinConfig::default();
+        for len in (2..=max_len).rev() {
+            let piece = &clean[..len];
+            if !crate::pinyin::is_valid_syllable(piece) && !fuzzy.expand_fuzzy(piece).is_empty() {
+                out_cuts.push(lead_apos + len);
+                if find_k_syllable_cuts(&clean[len..], k - 1, true, out_cuts) {
+                    return true;
+                }
+                out_cuts.pop();
+            }
+        }
+        out_cuts.push(lead_apos + 1);
+        if find_k_syllable_cuts(&clean[1..], k - 1, true, out_cuts) {
+            return true;
+        }
+        out_cuts.pop();
+    }
+    false
+}
+
 /// 将单条晶格图边（如多字中文词 `0..9 "wo'shi'yong" -> "我使用"`）拆解为逐个独立音节区间
 /// 这样预编辑音节栏中的每一个拼音音节都有精确对应的 `[start..end]` 字节范围与单字
 fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan> {
     if !edge.code_key.contains('\'') {
+        if let Some(spans) =
+            split_raw_pinyin_to_char_spans(input, edge.start, edge.end, &edge.text)
+        {
+            return spans;
+        }
         let raw_code = input
             .get(edge.start..edge.end)
             .unwrap_or(edge.code_key.as_str())
@@ -1324,7 +1468,8 @@ fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan
         } else if total_syl_len == span_len {
             (cur + syl.len()).min(edge.end)
         } else {
-            // 若存在混拼/半拼（如 `dif` -> `di'fang`）或模糊音导致长度不等，为后续每个音节至少预留 1 字节，并优先匹配原音节前缀
+            // 若存在混拼/半拼（如 `dif` -> `di'fang`、`zme` -> `zen'me`）或模糊音/纠错导致长度不等，
+            // 为后续每个音节至少预留 1 字节，依次尝试：原音节前缀 -> 模糊音/纠错音节 -> 字典音节首字母前缀 -> 任意合法音节
             let rem = &input[cur..edge.end];
             let rem_syls_after = syls.len().saturating_sub(idx + 1);
             let max_try = rem.len().saturating_sub(rem_syls_after).min(6);
@@ -1332,10 +1477,33 @@ fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan
             if syl.len() <= max_try && rem[..max_try].starts_with(syl) {
                 matched_len = syl.len();
             } else {
-                for try_len in (1..=max_try).rev() {
-                    if crate::pinyin::is_valid_syllable(&rem[..try_len]) {
+                let fuzzy = crate::pinyin::FuzzyPinyinConfig::default();
+                let mut found = false;
+                for try_len in (2..=max_try).rev() {
+                    let piece = &rem[..try_len];
+                    if fuzzy.expand_fuzzy(piece).iter().any(|(s, _)| s == syl) {
                         matched_len = try_len;
+                        found = true;
                         break;
+                    }
+                }
+                if !found {
+                    for try_len in (1..=syl.len().min(max_try)).rev() {
+                        if syl.starts_with(&rem[..try_len])
+                            && (try_len == 1 || crate::pinyin::is_valid_syllable(&rem[..try_len]))
+                        {
+                            matched_len = try_len;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    for try_len in (1..=max_try).rev() {
+                        if crate::pinyin::is_valid_syllable(&rem[..try_len]) {
+                            matched_len = try_len;
+                            break;
+                        }
                     }
                 }
             }

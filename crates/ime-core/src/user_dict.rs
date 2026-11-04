@@ -118,6 +118,57 @@ impl UserDict {
             .to_ascii_lowercase()
     }
 
+    /// 判断候选词条是否为未完成拼音兜底碎片（如 `"可以优化的地 f"`、`"切换的 w 时候"`、`"z 也不对"`）
+    /// 或原样小写回显（如 `"p" -> "p"`），此类碎片绝不能写入或召回自个人记忆词库
+    pub fn is_polluted_entry(code_key: &str, text: &str) -> bool {
+        let norm = Self::normalize_key(code_key);
+        let trimmed = text.trim();
+        if norm.is_empty() || trimmed.is_empty() {
+            return true;
+        }
+        // 原样纯小写字母（如敲 p 直接上屏 p）不应记入用户词频，防止压过正常汉字候选
+        if trimmed.bytes().all(|b| b.is_ascii_lowercase()) && trimmed == norm {
+            return true;
+        }
+        // 若包含中文（非 ASCII 字符），同时夹杂全小写 ASCII 字母片段（如「可以优化的地 f」「切换的 w 时候」），
+        // 属于未完成音节或误触产生的兜底残片（合法中英词如「AI 选词」「UI 设计」「同步到 GitHub」均含大写字母）
+        let has_non_ascii = trimmed.chars().any(|c| !c.is_ascii());
+        if has_non_ascii {
+            let bytes = trimmed.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i].is_ascii_alphabetic() {
+                    let start = i;
+                    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    let token = &bytes[start..i];
+                    if token.len() <= 2 && token.iter().all(|b| b.is_ascii_lowercase()) {
+                        return true;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        false
+    }
+
+    /// 清理词库中历史遗留的残片/污染词条，返回清理的条目数
+    pub fn sanitize(&mut self) -> usize {
+        let before = self.records.len();
+        self.records
+            .retain(|_, rec| !Self::is_polluted_entry(&rec.code_key, &rec.text));
+        for (key, words) in self.custom_words.iter_mut() {
+            words.retain(|w| {
+                !Self::is_polluted_entry(key, w)
+                    && self.records.contains_key(&format!("{key}\t{w}"))
+            });
+        }
+        self.custom_words.retain(|_, v| !v.is_empty());
+        before.saturating_sub(self.records.len())
+    }
+
     /// 记录一次用户选词上屏，实时提升该词及前驱 Bigram 的动态权重
     pub fn record_commit(&mut self, code_key: &str, text: &str, prev_word: Option<&str>) {
         self.record_commit_ex(code_key, text, prev_word, true);
@@ -158,10 +209,10 @@ impl UserDict {
         now_secs: u64,
         is_explicit_override: bool,
     ) {
-        let normalized_key = Self::normalize_key(code_key);
-        if normalized_key.is_empty() || text.trim().is_empty() {
+        if Self::is_polluted_entry(code_key, text) {
             return;
         }
+        let normalized_key = Self::normalize_key(code_key);
         self.next_seq = self.next_seq.wrapping_add(1);
         let cur_seq = self.next_seq;
         let map_key = format!("{normalized_key}\t{text}");
@@ -312,6 +363,9 @@ impl UserDict {
         let mut out: Vec<UserWordRecord> = words
             .iter()
             .filter_map(|w| {
+                if Self::is_polluted_entry(&normalized_key, w) {
+                    return None;
+                }
                 let map_key = format!("{normalized_key}\t{w}");
                 self.records.get(&map_key).cloned()
             })
@@ -337,7 +391,7 @@ impl UserDict {
     }
 
     pub fn user_boost_at(&self, code_key: &str, text: &str, now_secs: u64) -> f32 {
-        if self.records.is_empty() {
+        if self.records.is_empty() || Self::is_polluted_entry(code_key, text) {
             return 0.0;
         }
         let normalized_key = Self::normalize_key(code_key);
@@ -370,8 +424,12 @@ impl UserDict {
     }
 
     pub fn load_from_file(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let path = path.as_ref();
         let content = std::fs::read_to_string(path)?;
-        let dict: Self = serde_json::from_str(&content)?;
+        let mut dict: Self = serde_json::from_str(&content)?;
+        if dict.sanitize() > 0 {
+            let _ = dict.save_to_file(path);
+        }
         Ok(dict)
     }
 }

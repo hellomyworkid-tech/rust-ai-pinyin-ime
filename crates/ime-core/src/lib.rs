@@ -501,6 +501,11 @@ mod tests {
         assert_eq!(top("lvse"), "绿色");
         assert_eq!(top("nvren"), "女人");
         assert!(!top5("nvren").contains(&"路人".to_string()), "lv/nv 不应被改成 lu/nu");
+        // 长句中已存在精确双字词+助词（如 `xiazaideanjian` -> `下载的按键`）时，绝不能被词库预组三字模糊词（`xia'zhai'de` -> `狭窄的按键`）反超
+        let xzdaj = top5("xiazaideanjian");
+        assert_eq!(xzdaj[0], "下载的按键", "xiazaideanjian top5: {:?}", xzdaj);
+        assert!(xzdaj.contains(&"下载的".to_string()), "xiazaideanjian top5: {:?}", xzdaj);
+        assert!(xzdaj.contains(&"下载".to_string()), "xiazaideanjian top5: {:?}", xzdaj);
 
         // 2. 输错时纠错项仍能出现在第一页
         assert_eq!(top("zidao"), "知道");
@@ -679,7 +684,37 @@ mod tests {
         assert!(ky_top7.contains(&"可以有".to_string()));
         assert!(ky_top7.contains(&"可以".to_string()));
 
-        // 常见半拼/混拼与未完音节测试
+        // 验证个人词库防污染与多音节切分保护：
+        // 1) 残片「可以优化的地 f」禁止记入或污染 UserDict；
+        // 2) 即使「可以优化的地方」被高频记入 UserDict，仍保持 7 音节空格切分与递进前缀候选（可以优化的/可以优化）；
+        // 3) 自造词（如「武增吉」wuzengji）从 UserDict 召回时，音节栏必须切分为 ["wu", "zeng", "ji"] 而非整坨粘连
+        for _ in 0..3 {
+            engine_mem.commit_candidate_ex("keyiyouhuadedif", "可以优化的地 f", None, true);
+            engine_mem.commit_candidate_ex("keyiyouhuadedif", "可以优化的地方", None, true);
+        }
+        let ky_mem = engine_mem.decode("keyiyouhuadedif", AppScene::General, "");
+        assert_eq!(ky_mem.candidates[0].text, "可以优化的地方");
+        let ky_syls: Vec<&str> = ky_mem.candidates[0]
+            .syllable_spans
+            .iter()
+            .map(|s| s.code_key.as_str())
+            .collect();
+        assert_eq!(ky_syls, vec!["ke", "yi", "you", "hua", "de", "di", "f"]);
+        let ky_mem_texts: Vec<String> = ky_mem.candidates.iter().take(7).map(|c| c.text.clone()).collect();
+        assert!(ky_mem_texts.contains(&"可以优化的".to_string()));
+        assert!(ky_mem_texts.contains(&"可以优化".to_string()));
+
+        engine_mem.commit_candidate_ex("wuzengji", "武增吉", None, true);
+        let wzj_custom = engine_mem.decode("wuzengji", AppScene::General, "");
+        assert_eq!(wzj_custom.candidates[0].text, "武增吉");
+        let custom_syls: Vec<&str> = wzj_custom.candidates[0]
+            .syllable_spans
+            .iter()
+            .map(|s| s.code_key.as_str())
+            .collect();
+        assert_eq!(custom_syls, vec!["wu", "zeng", "ji"]);
+
+        // 常见半拼/混拼与未完音节测试（含句首/句中/句尾孤立声母兜底，绝不退化为原样英文字母如「z 也不对」「切换的 w 时候」）
         assert_eq!(engine.decode("dif", AppScene::General, "").candidates[0].text, "地方");
         assert_eq!(engine.decode("zenm", AppScene::General, "").candidates[0].text, "怎么");
         assert_eq!(engine.decode("shenm", AppScene::General, "").candidates[0].text, "什么");
@@ -688,6 +723,17 @@ mod tests {
         assert_eq!(engine.decode("shurf", AppScene::General, "").candidates[0].text, "输入法");
         assert_eq!(engine.decode("zme", AppScene::General, "").candidates[0].text, "怎么");
         assert_eq!(engine.decode("sme", AppScene::General, "").candidates[0].text, "什么");
+        assert_eq!(engine.decode("zmeban", AppScene::General, "").candidates[0].text, "怎么办");
+        let zye_top = &engine.decode("zyebudui", AppScene::General, "").candidates[0].text;
+        assert!(
+            !zye_top.chars().any(|c| c.is_ascii_alphabetic()),
+            "zyebudui should decode to pure Chinese sentence without raw ASCII 'z', got {zye_top}"
+        );
+        let qhw_top = &engine.decode("qiehuandewshihou", AppScene::General, "").candidates[0].text;
+        assert!(
+            !qhw_top.chars().any(|c| c.is_ascii_alphabetic()),
+            "qiehuandewshihou should decode to pure Chinese sentence without raw ASCII 'w', got {qhw_top}"
+        );
 
         // 现代汉语虚词搭配与句末语气助词测试（对齐微软拼音体验：xianzaizaiyanjiuyixia -> 现在再研究一下，shibieba -> 识别吧）
         let xz_out = engine.decode("xianzaizaiyanjiuyixia", AppScene::General, "");
@@ -720,7 +766,7 @@ mod tests {
     fn dump_top_candidates() {
         let engine = build_test_engine();
         for py in [
-            "keyiyouhuadedif", "keyiyouhuadedf", "dfang", "wmen", "zh", "zho", "zhonggu", "zhongguo",
+            "xiazaideanjian", "xiazai", "keyiyouhuadedif", "keyiyouhuadedf", "dfang", "wmen", "zh", "zho", "zhonggu", "zhongguo",
             "nihao", "women", "xian", "fangan", "shi", "de", "jintiantianqibucuo", "wozaiyongrustxieapi",
             "api", "bug", "haode", "xiexie", "shima", "zenmeyang", "keyi", "nihaoa", "wobuzhidao",
         ] {

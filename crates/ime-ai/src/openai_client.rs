@@ -347,8 +347,13 @@ impl OpenAiCompatibleClient {
         scene: AppScene,
         candidates: &[Candidate],
     ) -> ChatCompletionRequest {
-        let (system_prompt, user_prompt) =
+        let (system_prompt, mut user_prompt) =
             Self::build_prompts(pinyin_input, surrounding_context, scene, candidates);
+        if self.config.model.to_ascii_lowercase().contains("qwen3")
+            && !user_prompt.contains("/no_think")
+        {
+            user_prompt.push_str("\n/no_think");
+        }
         ChatCompletionRequest {
             model: self.config.model.clone(),
             messages: vec![
@@ -633,16 +638,69 @@ impl OpenAiCompatibleClient {
             format!("{api_base}/chat/completions")
         };
 
-        let body_val = serde_json::json!({
+        let m_lower = model.trim().to_ascii_lowercase();
+        let base_lower = api_base.to_ascii_lowercase();
+        let is_qwen3 = m_lower.contains("qwen3");
+        let is_openai_reasoning = m_lower.starts_with("o1")
+            || m_lower.starts_with("o3")
+            || m_lower.starts_with("o4")
+            || m_lower.starts_with("gpt-5");
+        let is_pure_reasoner = m_lower.contains("reasoner")
+            || m_lower.contains("deepseek-r1")
+            || m_lower.contains("-r1")
+            || m_lower.contains("qwq")
+            || m_lower.contains("glm-z1");
+
+        // Qwen3 系列（含 Ollama / llama.cpp / vLLM / 硅基流动 / 百炼）原生支持在 Prompt 末尾加 `/no_think` 软开关，
+        // 让 Jinja 聊天模板直接输出空 `<think>\n\n</think>` 并立即给出候选词，避免长思维链耗时或耗尽 max_tokens
+        let final_user_prompt = if is_qwen3 && !user_prompt.contains("/no_think") {
+            format!("{user_prompt}\n/no_think")
+        } else {
+            user_prompt.to_string()
+        };
+
+        let mut body_val = serde_json::json!({
             "model": model,
             "messages": [
                 { "role": "system", "content": system_prompt },
-                { "role": "user", "content": user_prompt }
+                { "role": "user", "content": final_user_prompt }
             ],
-            "temperature": 0.0,
-            "max_tokens": 32,
             "stream": false
         });
+
+        if is_openai_reasoning {
+            // OpenAI o1/o3/o4/gpt-5 推理模型使用 max_completion_tokens 且支持最小推理强度
+            body_val["max_completion_tokens"] = serde_json::json!(128);
+            body_val["reasoning_effort"] = serde_json::json!("low");
+        } else {
+            body_val["temperature"] = serde_json::json!(0.0);
+            // 若用户配置了无法关闭思考的纯推理模型（如 deepseek-reasoner / deepseek-r1 / qwq），
+            // 放宽 token 上限避免在 `<think>` 阶段被截断；普通模型与已关思考的模型保持 32
+            let max_toks = if is_pure_reasoner { 256 } else { 32 };
+            body_val["max_tokens"] = serde_json::json!(max_toks);
+        }
+
+        // 针对支持显式关闭思考字段的平台（硅基流动 / 阿里云百炼 / 本地 Ollama / vLLM / 智谱 GLM-4.5 / 火山豆包），
+        // 附带对应的免思考开关（仅在对应模型或非严格官方 OpenAI 端点下附加，避免 api.openai.com 报未知字段 400）
+        if is_qwen3
+            && (base_lower.contains("127.0.0.1")
+                || base_lower.contains("localhost")
+                || base_lower.contains("siliconflow")
+                || base_lower.contains("dashscope")
+                || base_lower.contains("aliyuncs"))
+        {
+            body_val["enable_thinking"] = serde_json::json!(false);
+            if base_lower.contains("11434") {
+                body_val["think"] = serde_json::json!(false);
+            }
+        } else if (m_lower.starts_with("glm-4.5")
+            || m_lower.starts_with("doubao-1-5-thinking")
+            || m_lower.starts_with("doubao-seed"))
+            && !base_lower.contains("api.openai.com")
+        {
+            body_val["thinking"] = serde_json::json!({ "type": "disabled" });
+        }
+
         let body_json = serde_json::to_string(&body_val).map_err(|e| e.to_string())?;
 
         let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
@@ -710,13 +768,23 @@ impl OpenAiCompatibleClient {
             return Err(format!("Claude API 错误: {err_msg}"));
         }
 
-        if let Some(text) = parsed["content"][0]["text"].as_str() {
-            return Ok(text.trim().to_string());
+        // 遍历 content 数组，跳过可能存在的 `{ "type": "thinking", ... }` 思考块，只取正文 text 块
+        if let Some(arr) = parsed["content"].as_array() {
+            for item in arr {
+                if item["type"].as_str() == Some("thinking") {
+                    continue;
+                }
+                if let Some(text) = item["text"].as_str() {
+                    if !text.trim().is_empty() {
+                        return Ok(text.trim().to_string());
+                    }
+                }
+            }
         }
         if let Some(text) = parsed["choices"][0]["message"]["content"].as_str() {
             return Ok(text.trim().to_string());
         }
-        Err(format!("Claude 响应未包含 content[0].text: {resp_json}"))
+        Err(format!("Claude 响应未包含有效 text 内容块: {resp_json}"))
     }
 
     fn call_gemini_generate_content(
@@ -731,8 +799,21 @@ impl OpenAiCompatibleClient {
             return Err("Gemini API 需要填写 API Key".to_string());
         }
         let clean_model = model.strip_prefix("models/").unwrap_or(model);
+        let m_lower = clean_model.to_ascii_lowercase();
         // API Key 仅通过 `x-goog-api-key` 请求头传递，不拼进 URL，避免出现在代理/错误日志中泄露
         let endpoint = format!("{api_base}/models/{clean_model}:generateContent");
+
+        // Gemini 2.5 系列（如默认 gemini-2.5-flash）默认开启内部思考，且 thinking tokens 计入 maxOutputTokens！
+        // 若不关闭 thinkingBudget，32 个输出 token 会被内部思考全部耗尽导致返回空内容。
+        // - 对 gemini-2.5-flash*：显式设置 thinkingBudget = 0 彻底关闭思考，延迟直降 70%；
+        // - 对不支持关闭思考的 gemini-2.5-pro*：将 maxOutputTokens 放宽至 256。
+        let mut gen_cfg = serde_json::json!({
+            "temperature": 0.0,
+            "maxOutputTokens": if m_lower.contains("2.5-pro") { 256 } else { 32 }
+        });
+        if m_lower.contains("2.5-flash") {
+            gen_cfg["thinkingConfig"] = serde_json::json!({ "thinkingBudget": 0 });
+        }
 
         let body_val = serde_json::json!({
             "systemInstruction": {
@@ -744,10 +825,7 @@ impl OpenAiCompatibleClient {
                     "parts": [{ "text": user_prompt }]
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.0,
-                "maxOutputTokens": 32
-            }
+            "generationConfig": gen_cfg
         });
         let body_json = serde_json::to_string(&body_val).map_err(|e| e.to_string())?;
 
@@ -764,13 +842,23 @@ impl OpenAiCompatibleClient {
             return Err(format!("Gemini API 错误: {err_msg}"));
         }
 
-        if let Some(text) = parsed["candidates"][0]["content"]["parts"][0]["text"].as_str() {
-            return Ok(text.trim().to_string());
+        // 遍历 parts 数组，跳过 `{ "thought": true, "text": "..." }` 思考分片，提取真正的最终候选输出
+        if let Some(parts) = parsed["candidates"][0]["content"]["parts"].as_array() {
+            for part in parts {
+                if part["thought"].as_bool() == Some(true) {
+                    continue;
+                }
+                if let Some(text) = part["text"].as_str() {
+                    if !text.trim().is_empty() {
+                        return Ok(text.trim().to_string());
+                    }
+                }
+            }
         }
         if let Some(text) = parsed["choices"][0]["message"]["content"].as_str() {
             return Ok(text.trim().to_string());
         }
-        Err(format!("Gemini 响应未包含 candidates[0].content.parts[0].text: {resp_json}"))
+        Err(format!("Gemini 响应未包含有效 candidates[0].content.parts 文本: {resp_json}"))
     }
 }
 
@@ -809,11 +897,21 @@ pub fn choose_by_lm_margin(scores: &[f64], has_context: bool) -> usize {
     }
 }
 
-/// 清理大模型返回的文本（去除思考标签 `<think>...</think>`、编号、首尾引号、句末多余标点，并严格对齐候选列表）
-fn sanitize_llm_candidate_output(raw: &str, candidates: &[Candidate]) -> String {
+/// 清理大模型返回的文本（去除思考标签 `<think>...</think>` 及被截断的未闭合 `<think>...`、编号、首尾引号、句末多余标点，并严格对齐候选列表）
+pub fn sanitize_llm_candidate_output(raw: &str, candidates: &[Candidate]) -> String {
     let mut s = raw.trim();
-    if let Some((_, after_think)) = s.split_once("</think>") {
+    if let Some((_, after_think)) = s.rsplit_once("</think>") {
         s = after_think.trim();
+    } else if let Some((before_think, _)) = s.split_once("<think>") {
+        // 若输出包含 `<think>` 但没有闭合的 `</think>`（说明在思考阶段被 max_tokens 截断），
+        // 丢弃未完成的思考过程，绝不从半截思考草稿中误匹配候选词
+        s = before_think.trim();
+    }
+    if s.is_empty() {
+        return candidates
+            .first()
+            .map(|c| c.text.clone())
+            .unwrap_or_default();
     }
     let first_line = s.lines().next().unwrap_or(s).trim();
     let without_arrow = first_line

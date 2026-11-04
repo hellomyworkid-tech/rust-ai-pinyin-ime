@@ -98,7 +98,7 @@ impl BilingualLattice {
                 // 2.1 首音节声母简拼 + 后继全拼音节（混拼，如 `zme` -> 怎么、`sme` -> 什么、`wmen` -> 我们、`dfang` -> 地方）
                 let first_c = &input[0..1];
                 if first_c.as_bytes()[0].is_ascii_lowercase() {
-                    let sep_nodes = collect_first_initial_sep_nodes(lexicon, first_c);
+                    let sep_nodes = collect_first_initial_sep_nodes(lexicon, 0, first_c);
                     for sep_node in sep_nodes {
                         collect_chinese_edges_from_sep(
                             0,
@@ -129,19 +129,33 @@ impl BilingualLattice {
                 let span_str = &input[start_pos..end_pos];
                 let is_whole_input = start_pos == 0 && end_pos == n;
 
-                // 3.1 单字母声母简拼单字（如输入 `w`、`wzj` 中的 `w`/`z`/`j`、或长句末尾正在输入的声母 `f`）：
-                // 允许在短输入（n <= 6）或句尾最后一个未成音节声母（`end_pos == n`）处启用，杜绝长句末尾退化为原样英文字母
+                // 3.1 单字母声母简拼单字（如输入 `w`、`wzj` 中的 `w`/`z`/`j`、或句首/句中/句尾未成音节的孤立声母 `z`/`w`/`f`）：
+                // 当该位置无完整全拼音节（`no_full_syl_at_start`）且句中不构成词典英文词前缀时，允许匹配高频声母单字，杜绝退化为原样英文字母
                 if matched_len == 1 {
-                    if !no_full_syl_at_start || (n > 6 && end_pos < n) {
+                    let has_eng_word_at_start = !lexicon
+                        .english_trie
+                        .common_prefix_search(&lower_input[start_pos..])
+                        .is_empty();
+                    if !no_full_syl_at_start
+                        || (n > 6 && end_pos < n && has_eng_word_at_start)
+                    {
                         continue;
                     }
-                    let take_chars = if n == 1 { 30 } else { 6 };
+                    let take_chars = if n == 1 {
+                        30
+                    } else if end_pos == n || n <= 6 {
+                        6
+                    } else {
+                        3
+                    };
                     let char_penalty = if n == 1 {
                         0.5
                     } else if n <= 6 {
                         2.6
-                    } else {
+                    } else if end_pos == n {
                         3.2
+                    } else {
+                        4.2
                     };
                     for &id in entry_ids.iter().take(take_chars) {
                         let entry = &lexicon.entries[id as usize];
@@ -453,8 +467,14 @@ fn collect_chinese_edges<'a>(
             };
             // 多音节词条的纠错惩罚略打折（完整词比碎片更可信）；
             // 单音节短输入则适当提高模糊音门槛，让 `si` 的精确字「死/四/思」排在模糊音「是/时」前面
+            let has_common_exact_word_at_origin = new_fuzzy > 0.0
+                && out_edges.iter().any(|e| !e.is_fuzzy && e.syllable_count >= 2 && e.base_cost < 9.2);
             let effective_fuzzy = if syl_count >= 2 {
-                new_fuzzy * 0.75
+                if has_common_exact_word_at_origin {
+                    new_fuzzy * 1.15
+                } else {
+                    new_fuzzy * 0.75
+                }
             } else if is_short_single_input {
                 new_fuzzy * 1.45
             } else {
@@ -636,9 +656,13 @@ fn collect_two_initial_tail_entries(
     cands.into_iter().take(limit).map(|(_, id)| id).collect()
 }
 
-/// 收集首音节以单字母声母 `first_c` 起始且后接分隔符 `'` 的所有 Trie 节点（用于 `zme` -> 怎么、`sme` -> 什么）
-fn collect_first_initial_sep_nodes(lexicon: &CompiledLexicon, first_c: &str) -> Vec<u32> {
-    let Some(p0) = lexicon.syllable_trie.advance_node(0, first_c) else {
+/// 收集从 `start_node` 起以单字母声母 `first_c` 起始且后接分隔符 `'` 的所有 Trie 节点（用于 `zme` -> 怎么、`zenmban` -> 怎么办）
+fn collect_first_initial_sep_nodes(
+    lexicon: &CompiledLexicon,
+    start_node: u32,
+    first_c: &str,
+) -> Vec<u32> {
+    let Some(p0) = lexicon.syllable_trie.advance_node(start_node, first_c) else {
         return Vec::new();
     };
     let mut stack = vec![(p0, 0u8)];
@@ -666,7 +690,7 @@ fn collect_chinese_edges_from_sep<'a>(
     sep_node: u32,
     depth: usize,
     base_penalty: f32,
-    _input: &str,
+    input: &str,
     spans_at: &[Vec<&'a SyllableSpan>],
     lexicon: &CompiledLexicon,
     out_edges: &mut Vec<LatticeEdge>,
@@ -693,6 +717,19 @@ fn collect_chinese_edges_from_sep<'a>(
                 syllable_count: syl_count,
                 is_fuzzy: false,
             });
+        }
+        if syl_count < 6 && sp.end < input.len() {
+            collect_chinese_edges(
+                origin_start,
+                sp.end,
+                next_node,
+                syl_count,
+                0.0,
+                input,
+                spans_at,
+                lexicon,
+                out_edges,
+            );
         }
     }
 }
