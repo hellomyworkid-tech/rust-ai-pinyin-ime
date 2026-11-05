@@ -3388,16 +3388,16 @@ const FIELD_L: i32 = 318;
 const NAV_Y0: i32 = 92;
 const NAV_STEP: i32 = 44;
 const NAV_H: i32 = 38;
-const SEG_Y: i32 = 190;
-const ACT_Y: i32 = 342;
+const SEG_Y: i32 = 176;
+const ACT_Y: i32 = 322;
 const PAGE_ALWAYS: u8 = 255;
 
 const ID_SEG_PROVIDER_BASE: isize = 1100;
 const SEG_LABELS: [&str; 5] = ["本地 Qwen", "ChatGPT", "Claude", "Gemini", "自定义"];
 const EDIT_ROWS: [(isize, i32, &str); 3] = [
-    (ID_EDT_API_BASE, 228, "接口地址"),
-    (ID_EDT_MODEL, 266, "模型名称"),
-    (ID_EDT_API_KEY, 304, "API Key"),
+    (ID_EDT_API_BASE, 214, "接口地址"),
+    (ID_EDT_MODEL, 250, "模型名称"),
+    (ID_EDT_API_KEY, 286, "API Key"),
 ];
 /// 各服务商推荐模型速查（在「服务配置」卡片右上角随所选服务商动态展示）
 const PROVIDER_MODEL_TIPS: [&str; 5] = [
@@ -3686,7 +3686,7 @@ unsafe fn paint_settings(hwnd: isize) {
         if reg { "系统 TSF 输入法" } else { "全局钩子模式" },
         T_LINE,
     );
-    s_text(hdc, r.f_small, C_MUTED, 24, SET_CH - 32, SIDEBAR_W - 10, SET_CH - 14, "版本 0.1.0", T_LINE);
+    s_text(hdc, r.f_small, C_MUTED, 24, SET_CH - 32, SIDEBAR_W - 10, SET_CH - 14, "版本 0.2.0", T_LINE);
 
     // ---- 页头 ----
     let (title, sub) = PAGE_HEADERS[page];
@@ -3713,20 +3713,20 @@ unsafe fn paint_settings(hwnd: isize) {
 
 unsafe fn paint_page_ai(hdc: isize, r: &SettingsRes) {
     // 卡片 1：总开关（开关控件铺满卡片内部）
-    s_card(hdc, 82, 140);
+    s_card(hdc, 78, 132);
 
     // 卡片 2：服务配置
-    s_card(hdc, 148, 420);
-    s_text(hdc, r.f_heading, C_TEXT, IN_L, 158, IN_L + 84, 182, "服务配置", T_LINE);
+    s_card(hdc, 138, 420);
+    s_text(hdc, r.f_heading, C_TEXT, IN_L, 146, IN_L + 84, 170, "服务配置", T_LINE);
     let prov_idx = get_provider_sel();
     s_text(
         hdc,
         r.f_small,
         C_ACCENT,
         IN_L + 88,
-        159,
+        147,
         IN_R,
-        182,
+        170,
         PROVIDER_MODEL_TIPS[prov_idx],
         T_LINE,
     );
@@ -3743,17 +3743,28 @@ unsafe fn paint_page_ai(hdc: isize, r: &SettingsRes) {
     }
     s_text(hdc, r.f_body, C_TEXT2, IN_L, ACT_Y, FIELD_L - 8, ACT_Y + 30, "快速填入", T_LINE);
 
-    // 各家推荐模型简单说明栏（底栏提示框）
-    s_round(hdc, IN_L, 378, IN_R, 414, 6, C_BG, C_BORDER);
+    // 各家推荐模型简单说明栏（底栏三行提示框，每行均留足右边距不截断）
+    s_round(hdc, IN_L, 358, IN_R, 412, 6, C_BG, C_BORDER);
     s_text(
         hdc,
         r.f_small,
         C_TEXT2,
         IN_L + 8,
-        380,
+        361,
         IN_R - 8,
-        396,
-        "各家推荐 · 本地: Qwen2.5-1.5B / qwen3:1.7b   ChatGPT: gpt-4.1-mini / 4o-mini   Claude: claude-3-5-haiku-latest",
+        377,
+        "各家推荐 · 本地: Qwen2.5-1.5B / qwen3:1.7b   ChatGPT: gpt-4.1-mini / 4o-mini",
+        T_LINE,
+    );
+    s_text(
+        hdc,
+        r.f_small,
+        C_TEXT2,
+        IN_L + 8,
+        377,
+        IN_R - 8,
+        393,
+        "Claude: claude-3-5-haiku-latest   Gemini: gemini-2.5-flash / 2.5-flash-lite",
         T_LINE,
     );
     s_text(
@@ -3761,10 +3772,10 @@ unsafe fn paint_page_ai(hdc: isize, r: &SettingsRes) {
         r.f_small,
         C_MUTED,
         IN_L + 8,
-        396,
+        393,
         IN_R - 8,
-        412,
-        "Gemini: gemini-2.5-flash   DeepSeek/硅基: deepseek-chat (V3) / Qwen2.5-7B（勿选 R1/o1 等慢思考模型）",
+        409,
+        "DeepSeek/硅基: deepseek-chat (V3) / Qwen2.5-7B（勿选 R1/o1 等慢思考模型）",
         T_LINE,
     );
 
@@ -3868,7 +3879,7 @@ unsafe fn paint_page_about(hdc: isize, r: &SettingsRes) {
     s_text(hdc, r.f_title, C_CARD, IN_L, 104, IN_L + 52, 156, "拼", T_CENTER);
     let tx = IN_L + 70;
     s_text(hdc, r.f_brand, C_TEXT, tx, 100, IN_R, 124, "Rust AI 拼音输入法", T_LINE);
-    s_text(hdc, r.f_small, C_TEXT2, tx, 128, IN_R, 146, "版本 0.1.0 · Rust 原生实现 · 本地优先，输入数据不出本机", T_LINE);
+    s_text(hdc, r.f_small, C_TEXT2, tx, 128, IN_R, 146, "版本 0.2.0 · Rust 原生实现 · 本地优先，输入数据不出本机", T_LINE);
     let count = LEXICON_ENTRY_COUNT.load(Ordering::Relaxed);
     s_text(
         hdc,
@@ -4522,7 +4533,7 @@ unsafe extern "system" fn wnd_proc_settings(
             let chk_ai_enabled = btn(
                 "启用大模型智能选词重排\n在后台异步运行，不阻塞打字；端侧轻量模型始终开启",
                 IN_L,
-                89,
+                83,
                 IN_R - IN_L,
                 44,
                 ID_CHK_AI_ENABLED,

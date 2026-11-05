@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ime-ai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ime-core",
  "ime-lexicon",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "ime-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ime-lexicon",
  "serde",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "ime-lexicon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "memmap2",
  "serde",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "ime-playground"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ime-ai",
  "ime-core",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "ime-tsf-win"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ime-ai",
  "ime-core",

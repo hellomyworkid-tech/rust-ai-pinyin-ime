@@ -5,10 +5,10 @@
 # - 需要先运行 scripts\sync_open_lexicons.ps1 生成 data\compiled\merged_lexicon.bin。
 #
 # 用法：
-#   powershell -ExecutionPolicy Bypass -File scripts\package_release.ps1 -Version 0.1.0
+#   powershell -ExecutionPolicy Bypass -File scripts\package_release.ps1 -Version 0.2.0
 
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "0.2.0",
     [string]$TargetDir = "C:\rust-build\rust-ai-pinyin-ime-dist"
 )
 
