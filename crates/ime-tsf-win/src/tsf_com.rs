@@ -21,6 +21,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 pub const TSF_IPC_PORT: u16 = 18435;
+/// 进程间窗口消息：由宿主进程内的 `ime_tsf_win.dll` 直接投递给状态栏窗口 (`RustAiGlobalImeStatusPillV1`)，
+/// `w_param`: `1` = 激活 (`ActivateEx` / `OnSetFocus`), `0` = 停用 (`Deactivate`)；`l_param`: 宿主进程 `PID`
+pub const WM_APP_TSF_TIP_STATE: u32 = 0x8000 + 0x7B;
 
 /// TSF 客户端与中央守护服务之间的 IPC 请求包
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -411,7 +414,11 @@ const TF_ANCHOR_END: u32 = 1;
 const TF_AE_NONE: u32 = 0;
 
 static DLL_REF_COUNT: AtomicI32 = AtomicI32::new(0);
-static ACTIVE_TIP_COUNT: AtomicI32 = AtomicI32::new(0);
+/// 当前宿主进程内本输入法 TSF TIP 是否处于激活态（`> 0` 激活，`0` 停用）。
+/// 导出为具名符号 `RUST_AI_IME_ACTIVE_TIP_COUNT`，供中央守护服务在 `SearchHost.exe` 等 AppContainer
+/// 网络隔离宿主中通过 `ReadProcessMemory` 微秒级读取真实输入法激活状态。
+#[export_name = "RUST_AI_IME_ACTIVE_TIP_COUNT"]
+pub static ACTIVE_TIP_COUNT: AtomicI32 = AtomicI32::new(0);
 static LAST_CARET_RECT: Mutex<(i32, i32)> = Mutex::new((0, 0));
 static LOCAL_SHIFT_TAP_ARMED: AtomicBool = AtomicBool::new(false);
 static COMMIT_POLLER_STARTED: AtomicBool = AtomicBool::new(false);
@@ -469,6 +476,8 @@ extern "system" {
     fn SendInput(c_inputs: u32, p_inputs: *const INPUT, cb_size: i32) -> u32;
     fn GetForegroundWindow() -> isize;
     fn GetWindowThreadProcessId(h_wnd: isize, lpdw_process_id: *mut u32) -> u32;
+    fn FindWindowW(lp_class_name: *const u16, lp_window_name: *const u16) -> isize;
+    fn PostMessageW(h_wnd: isize, msg: u32, w_param: usize, l_param: isize) -> i32;
 }
 
 #[cfg(target_os = "windows")]
@@ -897,6 +906,28 @@ unsafe extern "system" fn tip_release(this: *mut c_void) -> u32 {
     }
 }
 
+/// 通过无网络开销的 Win32 `PostMessageW` 向中央状态栏窗口投递 TSF 激活/停用状态事件。
+/// 即便在受网络环回隔离的 AppContainer 宿主进程或普通桌面进程中，也可在微秒级通知中央服务。
+fn notify_server_tip_state_winmsg(active: bool) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let cls = to_wide("RustAiGlobalImeStatusPillV1");
+        let hwnd = FindWindowW(cls.as_ptr(), std::ptr::null());
+        if hwnd != 0 {
+            let _ = PostMessageW(
+                hwnd,
+                WM_APP_TSF_TIP_STATE,
+                if active { 1 } else { 0 },
+                std::process::id() as isize,
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = active;
+    }
+}
+
 unsafe extern "system" fn tip_activate(
     this: *mut c_void,
     ptim: *mut c_void,
@@ -972,6 +1003,8 @@ unsafe extern "system" fn tip_activate_ex(
         }
         ((*(*tf_src).lp_vtbl).base.release)(tf_src as *mut c_void);
     }
+
+    notify_server_tip_state_winmsg(true);
 
     // 在受限 AppContainer 壳层组件（SearchHost.exe / StartMenuExperienceHost.exe）中，
     // 保持本 TSF TIP 激活以阻止系统切回微软拼音，同时跳过环回 TCP 通信交由中央守护服务直接拦截按键
@@ -1116,7 +1149,11 @@ unsafe extern "system" fn tip_deactivate(this: *mut c_void) -> HRESULT {
         ((*unk_vtbl).release)(ptim);
     }
 
-    let _ = ACTIVE_TIP_COUNT.fetch_sub(1, Ordering::SeqCst);
+    let prev_cnt = ACTIVE_TIP_COUNT.fetch_sub(1, Ordering::SeqCst);
+    if prev_cnt <= 1 {
+        ACTIVE_TIP_COUNT.store(0, Ordering::SeqCst);
+    }
+    notify_server_tip_state_winmsg(false);
     let exe_name = current_exe_basename();
     if !is_shell_appcontainer_host(&exe_name) {
         let _ = send_tsf_ipc(&TsfIpcRequest {
@@ -1171,6 +1208,10 @@ unsafe extern "system" fn focus_sink_on_set_thread_focus(this: *mut c_void) -> H
     LOCAL_SHIFT_TAP_ARMED.store(false, Ordering::SeqCst);
     let obj = &*from_focus_sink_ptr(this);
     if obj.activated.load(Ordering::SeqCst) {
+        if ACTIVE_TIP_COUNT.load(Ordering::SeqCst) <= 0 {
+            ACTIVE_TIP_COUNT.store(1, Ordering::SeqCst);
+        }
+        notify_server_tip_state_winmsg(true);
         let exe_name = current_exe_basename();
         if !is_shell_appcontainer_host(&exe_name) {
             let _ = send_tsf_ipc(&TsfIpcRequest {
@@ -1198,6 +1239,10 @@ unsafe extern "system" fn sink_on_set_focus(this: *mut c_void, f_foreground: i32
     LOCAL_SHIFT_TAP_ARMED.store(false, Ordering::SeqCst);
     let obj = &*from_sink_ptr(this);
     if f_foreground != 0 && obj.activated.load(Ordering::SeqCst) {
+        if ACTIVE_TIP_COUNT.load(Ordering::SeqCst) <= 0 {
+            ACTIVE_TIP_COUNT.store(1, Ordering::SeqCst);
+        }
+        notify_server_tip_state_winmsg(true);
         let exe_name = current_exe_basename();
         if !is_shell_appcontainer_host(&exe_name) {
             let _ = send_tsf_ipc(&TsfIpcRequest {
@@ -2074,7 +2119,7 @@ pub fn activate_tsf_profile_for_current_user() -> bool {
                     &CLSID_RUST_AI_IME,
                     &GUID_RUST_AI_PROFILE,
                     0,
-                    0x2000_0000 | 0x1000_0000 | 0x0000_0001 | 0x0000_0004,
+                    0x2000_0000 | 0x0000_0001 | 0x0000_0004,
                 );
                 if hr == S_OK {
                     ok = true;

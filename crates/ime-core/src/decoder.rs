@@ -615,13 +615,35 @@ impl BilingualDecoder {
             }
         }
 
+        let next_pin_start = pinned_segments
+            .keys()
+            .copied()
+            .find(|&ps| ps > unpinned_start)
+            .unwrap_or(n);
+        let best_syl_spans: Vec<SegmentSpan> = candidates
+            .first()
+            .map(|c| c.syllable_spans.clone())
+            .unwrap_or_default();
+        let best_unpinned_syl_cnt = best_syl_spans
+            .iter()
+            .filter(|s| s.start >= unpinned_start && s.end <= next_pin_start)
+            .count();
+
         let mut word_edges: Vec<&LatticeEdge> = Vec::new();
         let mut char_edges: Vec<&LatticeEdge> = Vec::new();
         for edge in prefix_edges.iter().chain(extra_char_edges.iter()) {
             if edge.text.is_empty() {
                 continue;
             }
-            // 在全拼句子中过滤局部前缀简拼（`shi` 里的 s'h → 上海）与英文片段（`zairen…` 里的 Zaire）；
+            if !pinned_segments.is_empty()
+                && pinned_segments
+                    .iter()
+                    .any(|(&p_start, &(p_end, _))| edge.start < p_end && edge.end > p_start)
+            {
+                continue;
+            }
+            // 在全拼句子中过滤局部前缀简拼（`shi` 里的 s'h → 上海）、英文片段（`zairen…` 里的 Zaire）、
+            // 以及把首选音节切碎的半音节词（如 `zaijia` 里的 `0..5 zai'ji -> 在即` 切碎了 `3..6 jia`）；
             // 但在纯简拼输入（`!has_full_pinyin_at_start`，如 `wzj`）中保留前缀简拼词（`wz` → 我在/文章/位置/完整）
             if edge.end < n {
                 if matches!(
@@ -633,6 +655,14 @@ impl BilingualDecoder {
                     continue;
                 }
                 if edge.kind == EdgeKind::AbbrevPinyin && has_full_pinyin_at_start {
+                    continue;
+                }
+                if has_full_pinyin_at_start
+                    && edge.syllable_count >= best_unpinned_syl_cnt
+                    && best_syl_spans
+                        .iter()
+                        .any(|s| s.start < edge.end && edge.end < s.end)
+                {
                     continue;
                 }
             }
@@ -684,6 +714,11 @@ impl BilingualDecoder {
                     .segment_spans
                     .iter()
                     .filter(|s| s.start >= unpinned_start && !s.text.is_empty())
+                    .take_while(|s| {
+                        !pinned_segments
+                            .iter()
+                            .any(|(&ps, &(pe, _))| s.start < pe && s.end > ps)
+                    })
                     .cloned()
                     .collect();
                 if unpinned_segs.len() >= 3 {
@@ -890,14 +925,35 @@ impl BilingualDecoder {
         };
 
         // 若当前为 3 字母及以上的纯简拼输入（如 `wzj`），将前 2 个最高频整词（如「为自己」「我自己」）保留在最前，
-        // 随后立即穿插高频 2 字简拼前缀词（如「文章」「网站」「位置」「文字」「我在」「完整」），对齐微软拼音简拼体验
+        // 随后立即穿插高频 2 字简拼前缀词（如「文章」「网站」「位置」「文字」「我在」「完整」），对齐微软拼音简拼体验；
+        // 若当前为多音节全拼整词且无更短的多字前缀词（如双音节 `zaijia` 命中多个同音二字词），首屏保留前 3 个最高频同音整词（如「在家」「再加」「宅家」），
+        // 随后穿插首音节最常用的前 2 个单字（如「在」「再」），确保第一页就能直接选前面的单字！
         let deferred_abbrev_full: Vec<Candidate> = if !has_full_pinyin_at_start && n >= 3 && candidates.len() > 2 {
             candidates.drain(2..).collect()
         } else {
             Vec::new()
         };
+        let has_strict_prefix_words = best_unpinned_syl_cnt >= 3
+            && word_edges
+                .iter()
+                .any(|e| !e.is_fuzzy && e.end < n && e.syllable_count < best_unpinned_syl_cnt);
+        let deferred_beam_full: Vec<Candidate> = if has_full_pinyin_at_start
+            && !has_strict_prefix_words
+            && !char_edges.is_empty()
+            && candidates.len() > 3
+            && best_unpinned_syl_cnt >= 2
+        {
+            candidates.drain(3..).collect()
+        } else {
+            Vec::new()
+        };
 
-        // 1) 所有精确匹配的多字前缀词组（递进短语、三字词、双字词）一律排在单字之前！
+        // 1) 所有精确匹配的多字前缀词组（递进短语、三字词、双字词）排在单字之前；
+        //    但若当前词组是覆盖整句末尾的同音整词（`edge.end >= n` 或双音节输入下的二字词），
+        //    在首屏最多保留 3 个整词后先穿插首音节最常用的单字（如「在」「再」），确保第一页就能直接选前面的单字！
+        let mut deferred_full_words: Vec<&LatticeEdge> = Vec::new();
+        let initial_full_count = candidates.iter().filter(|c| c.consumed_len >= n).count();
+        let mut full_word_count = initial_full_count;
         for &edge in &word_edges {
             if edge.is_fuzzy {
                 continue;
@@ -905,27 +961,49 @@ impl BilingualDecoder {
             if added_words >= MAX_PREFIX_WORDS {
                 break;
             }
+            let is_full_syl_word = edge.end >= n || !has_strict_prefix_words;
+            if has_full_pinyin_at_start && is_full_syl_word && full_word_count >= 3 {
+                deferred_full_words.push(edge);
+                continue;
+            }
             if push_prefix(edge, rank, &mut candidates) {
                 rank += 1;
                 added_words += 1;
+                if is_full_syl_word {
+                    full_word_count += 1;
+                }
             }
         }
-        // 1b) 追加其余完整简拼词条与备选整句（备选整句保留原始 l1_cost 供 L2 端侧 AI / 大模型语境重排，默认排在前缀词之后不挤占第一页）
+        // 1b) 追加其余完整简拼词条
         for mut cand in deferred_abbrev_full {
             cand.final_score = (min_beam_score - 1.0) - rank as f32 * 0.01;
             rank += 1;
             candidates.push(cand);
         }
-        for mut alt in alt_sentences {
-            alt.final_score = (min_beam_score - 1.0) - rank as f32 * 0.01;
-            rank += 1;
-            candidates.push(alt);
-        }
-        // 2) 首音节精确匹配的单字候选
+        // 2) 首音节精确匹配的单字候选（若存在延后的同音整词，则在穿插前 2 个最高频单字后立即补回同音整词）
         let mut added_chars = 0usize;
+        let mut deferred_flushed = false;
+        let mut deferred_beam_iter = deferred_beam_full.into_iter();
         for &edge in &char_edges {
             if edge.is_fuzzy {
                 continue;
+            }
+            if !deferred_flushed && added_chars >= 2 {
+                deferred_flushed = true;
+                for mut cand in deferred_beam_iter.by_ref() {
+                    cand.final_score = (min_beam_score - 1.0) - rank as f32 * 0.01;
+                    rank += 1;
+                    candidates.push(cand);
+                }
+                for &w_edge in &deferred_full_words {
+                    if added_words >= MAX_PREFIX_WORDS {
+                        break;
+                    }
+                    if push_prefix(w_edge, rank, &mut candidates) {
+                        rank += 1;
+                        added_words += 1;
+                    }
+                }
             }
             if added_chars >= MAX_PREFIX_CHARS {
                 break;
@@ -934,6 +1012,28 @@ impl BilingualDecoder {
                 rank += 1;
                 added_chars += 1;
             }
+        }
+        if !deferred_flushed {
+            for mut cand in deferred_beam_iter {
+                cand.final_score = (min_beam_score - 1.0) - rank as f32 * 0.01;
+                rank += 1;
+                candidates.push(cand);
+            }
+            for &w_edge in &deferred_full_words {
+                if added_words >= MAX_PREFIX_WORDS {
+                    break;
+                }
+                if push_prefix(w_edge, rank, &mut candidates) {
+                    rank += 1;
+                    added_words += 1;
+                }
+            }
+        }
+        // 2b) 备选整句保留原始 l1_cost 供 L2 端侧 AI / 大模型语境重排，未触发 AI 逆转时排在单字之后，绝不挤占前排候选
+        for mut alt in alt_sentences {
+            alt.final_score = (min_beam_score - 1.0) - rank as f32 * 0.01;
+            rank += 1;
+            candidates.push(alt);
         }
         // 3) 模糊音/纠错词组与单字放到最后兜底
         for &edge in word_edges.iter().chain(char_edges.iter()) {
@@ -981,6 +1081,28 @@ impl BilingualDecoder {
                 let mut item = candidates.remove(pos);
                 item.final_score = slot_score;
                 candidates.insert(2, item);
+                // 若插入第 3 位后导致前 4 位全是整词（`consumed_len == n`），
+                // 而紧随其后的是单字前缀候选（`consumed_len < n`），
+                // 则将顺延到第 4 位的同音整词移到前 2 个单字候选之后（第 2 页首位），
+                // 保证第 1 页同时包含前 3 个整词与前 2 个首音节高频单字（如 `zaijia` 第 1 页同时有「在」「再」）。
+                if candidates.len() > 4
+                    && candidates[3].consumed_len == n
+                    && candidates[4].consumed_len < n
+                {
+                    let mut fourth_full = candidates.remove(3);
+                    let insert_after_chars = candidates
+                        .iter()
+                        .enumerate()
+                        .skip(3)
+                        .take_while(|(_, c)| c.consumed_len < n)
+                        .take(2)
+                        .last()
+                        .map(|(idx, _)| idx + 1)
+                        .unwrap_or(3);
+                    let ref_score = candidates[insert_after_chars - 1].final_score;
+                    fourth_full.final_score = (ref_score - 0.02).min(89.8);
+                    candidates.insert(insert_after_chars, fourth_full);
+                }
             }
         }
 

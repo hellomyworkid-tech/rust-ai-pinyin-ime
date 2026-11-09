@@ -20,9 +20,9 @@ use ime_core::{AppScene, ImeCoreEngine};
 use ime_lexicon::CompiledLexicon;
 use ime_tsf_win::{
     activate_tsf_profile_for_current_user, ensure_appcontainer_dir_acl,
-    invalidate_tsf_active_cache, is_our_tip_active_in_tsf, is_shell_appcontainer_host,
-    is_tsf_com_registered, send_tsf_ipc, CandidateWindowViewModel, ImePersistentConfig, KeyAction,
-    TsfIpcRequest, TsfIpcResponse, TsfKeySession, VirtualKey, TSF_IPC_PORT,
+    invalidate_tsf_active_cache, is_shell_appcontainer_host, is_tsf_com_registered, send_tsf_ipc,
+    CandidateWindowViewModel, ImePersistentConfig, KeyAction, TsfIpcRequest, TsfIpcResponse,
+    TsfKeySession, VirtualKey, TSF_IPC_PORT, WM_APP_TSF_TIP_STATE,
 };
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
@@ -69,6 +69,7 @@ static TIP_LAST_ACTIVATE_MS_BY_PID: Mutex<Option<std::collections::HashMap<u32, 
     Mutex::new(None);
 static LAST_TIP_EVENT_ACTIVE: AtomicBool = AtomicBool::new(true);
 static LAST_DEACTIVATED_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static LAST_TRACKED_APP_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// 管理员权限目标进程（如 Taskmgr.exe）因 UIPI 阻止跨进程 SendInput 时，转交进程内 TSF DLL 轮询上屏的队列
 static PENDING_ELEVATED_COMMITS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -275,6 +276,7 @@ fn note_tip_state(pid: u32, active: bool) {
         if pid == 0 {
             return;
         }
+        LAST_TRACKED_APP_PID.store(pid, Ordering::Relaxed);
         if let Ok(mut g) = TIP_LAST_ACTIVATE_MS_BY_PID.lock() {
             let m = g.get_or_insert_with(std::collections::HashMap::new);
             if m.len() > 512 {
@@ -293,59 +295,36 @@ fn note_tip_state(pid: u32, active: bool) {
         }
     } else {
         if pid != 0 {
-            // 防抖：过滤旧版 DLL 在 Activate 探测接口瞬间释放临时 COM 对象产生的假 deactivate
-            let recent_act = TIP_LAST_ACTIVATE_MS_BY_PID
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|m| m.get(&pid).copied()))
-                .unwrap_or(0);
-            if recent_act != 0 && now.saturating_sub(recent_act) <= 250 {
+            // 若该进程已经退出（关闭窗口而非切换输入法），仅移除其记录，不将全局输入法状态置为停用
+            if !unsafe { is_process_still_alive(pid) } {
+                if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
+                    if let Some(map) = g.as_mut() {
+                        map.remove(&pid);
+                    }
+                }
                 return;
             }
-        }
-        let fg = unsafe { GetForegroundWindow() };
-        let mut fg_pid: u32 = 0;
-        let fg_visible = if fg != 0 {
-            unsafe {
-                GetWindowThreadProcessId(fg, &mut fg_pid);
-                IsWindowVisible(fg) != 0
+            // 防抖：若非进程内 ACTIVE_TIP_COUNT 已真实归零，过滤旧版 DLL 在 Activate 探测瞬间释放临时 COM 对象产生的假 deactivate
+            let confirmed_zero = unsafe { query_process_active_tip_count(pid) } == Some(0);
+            if !confirmed_zero {
+                let recent_act = TIP_LAST_ACTIVATE_MS_BY_PID
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|m| m.get(&pid).copied()))
+                    .unwrap_or(0);
+                if recent_act != 0 && now.saturating_sub(recent_act) <= 250 {
+                    return;
+                }
             }
-        } else {
-            false
-        };
-        let fg_cls = unsafe { get_window_class_name(fg) };
-        let fg_exe = unsafe { get_foreground_exe_name().to_ascii_lowercase() };
-        let is_switcher_or_shell = matches!(
-            fg_cls.as_str(),
-            "Shell_TrayWnd"
-                | "Shell_SecondaryTrayWnd"
-                | "XamlExplorerHostIslandWindow"
-                | "NotifyIconOverflowWindow"
-                | "Progman"
-                | "WorkerW"
-        ) || fg_exe == "shellexperiencehost.exe";
-        let tsf_session_inactive = is_our_tip_active_in_tsf() == Some(false);
-
-        if pid != 0 {
             if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
                 let map = g.get_or_insert_with(std::collections::HashMap::new);
                 if map.len() > 512 {
                     map.clear();
                 }
-                if tsf_session_inactive {
-                    map.clear();
-                }
+                // Windows 会话级输入法切换：清理各进程之前缓存的 true，标记当前进程已停用本输入法
+                map.retain(|_, &mut v| !v);
                 map.insert(pid, false);
             }
-        }
-        // 若发起 deactivate 的并非当前可见前台窗口（例如后台进程退出、正在关闭的窗口或弹窗销毁），
-        // 且系统会话仍处于本输入法激活态、也非通过任务栏/Win+Space 切换输入法，则不将全局标记置为停用
-        if pid != 0
-            && (!fg_visible || fg_pid == 0 || pid != fg_pid)
-            && !is_switcher_or_shell
-            && !tsf_session_inactive
-        {
-            return;
         }
         LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
         LAST_DEACTIVATED_PID.store(pid, Ordering::Relaxed);
@@ -360,24 +339,6 @@ unsafe fn status_bar_should_show() -> bool {
     }
     if !TSF_MODE_ACTIVE.load(Ordering::Relaxed) {
         return true; // 全局钩子模式下输入法对所有非全屏窗口生效
-    }
-    // 优先通过 TSF ITfInputProcessorProfileMgr::GetActiveProfile 查询当前会话实时激活的输入法：
-    // 即使在选中 Windows 桌面 (Progman / WorkerW) 无输入框焦点时按 Win+Space 或托盘切到其他输入法，
-    // 也能立即感知并隐藏右下角状态栏！
-    match is_our_tip_active_in_tsf() {
-        Some(false) => {
-            LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
-            if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
-                if let Some(map) = g.as_mut() {
-                    map.clear();
-                }
-            }
-            return false;
-        }
-        Some(true) => {
-            LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
-        }
-        None => {}
     }
     // 若最近一次触发 deactivate 的进程已经退出（说明是关闭软件而非切换输入法），自动恢复激活状态
     if !LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed) {
@@ -410,16 +371,86 @@ unsafe fn status_bar_should_show() -> bool {
         }
     }
     let fg_cls = get_window_class_name(fg);
-    // 当焦点位于 Windows 桌面或任务栏 (Progman / WorkerW / Shell_TrayWnd) 时，直接以 TSF 会话激活状态为准
+    let fg_exe = get_foreground_exe_name().to_ascii_lowercase();
+    // 当焦点位于 Windows 桌面、任务栏或输入法切换飞出面板时，该壳层线程自身通常无输入框焦点，
+    // 优先读取最近交互的应用进程（如 SearchHost.exe / 浏览器 / 编辑器）内 TSF TIP 的实时激活计数与全局事件标记
     if matches!(
         fg_cls.as_str(),
-        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
-    ) {
-        if let Some(active) = is_our_tip_active_in_tsf() {
-            return active;
+        "Progman"
+            | "WorkerW"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "XamlExplorerHostIslandWindow"
+            | "NotifyIconOverflowWindow"
+    ) || fg_exe == "textinputhost.exe"
+    {
+        let last_pid = LAST_TRACKED_APP_PID.load(Ordering::Relaxed);
+        if last_pid != 0 && last_pid != pid {
+            if !is_process_still_alive(last_pid) {
+                LAST_TRACKED_APP_PID.store(0, Ordering::Relaxed);
+            } else {
+                let ipc_explicit_false = TIP_ACTIVE_BY_PID
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|m| m.get(&last_pid).copied()))
+                    == Some(false);
+                if ipc_explicit_false {
+                    LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
+                    return false;
+                }
+                if let Some(cnt) = query_process_active_tip_count(last_pid) {
+                    let active = cnt > 0;
+                    LAST_TIP_EVENT_ACTIVE.store(active, Ordering::Relaxed);
+                    return active;
+                }
+            }
+        }
+        if let Some(cnt) = query_process_active_tip_count(pid) {
+            if cnt > 0 {
+                let ipc_explicit_false = TIP_ACTIVE_BY_PID
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|m| m.get(&pid).copied()))
+                    == Some(false);
+                if !ipc_explicit_false {
+                    LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
+                    return true;
+                }
+            }
         }
         return LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed);
     }
+
+    if pid != 0 {
+        LAST_TRACKED_APP_PID.store(pid, Ordering::Relaxed);
+    }
+
+    // 直接通过 ReadProcessMemory 读取前台进程（含 SearchHost.exe 等 AppContainer 进程）内
+    // ime_tsf_win.dll 的 ACTIVE_TIP_COUNT：
+    // - Some(cnt <= 0)：本输入法在该进程中已停用（例如在 Windows 搜索框或桌面软件中切到了微软拼音），立即隐藏状态栏并放行按键；
+    // - Some(cnt > 0)：本输入法在该进程中处于激活状态（除非同进程多线程通过 IPC 刚上报了显式 deactivate）。
+    if let Some(cnt) = query_process_active_tip_count(pid) {
+        if cnt <= 0 {
+            LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
+            if let Ok(mut g) = TIP_ACTIVE_BY_PID.lock() {
+                if let Some(map) = g.as_mut() {
+                    map.remove(&pid);
+                }
+            }
+            return false;
+        }
+        let ipc_explicit_false = TIP_ACTIVE_BY_PID
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|m| m.get(&pid).copied()))
+            == Some(false);
+        if ipc_explicit_false && !is_shell_appcontainer_host(&fg_exe) {
+            return false;
+        }
+        LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
+        return true;
+    }
+
     if let Some(active) = TIP_ACTIVE_BY_PID
         .lock()
         .ok()
@@ -429,7 +460,7 @@ unsafe fn status_bar_should_show() -> bool {
     }
     // 前台进程中根本没有加载本输入法的 TSF 组件（例如切换到了其他输入法、32 位程序缺少 32 位组件、
     // 或被安全软件阻止注入），说明本输入法在该窗口中不可能处于激活状态，隐藏状态栏
-    if !is_shell_appcontainer_host(&get_foreground_exe_name()) {
+    if !is_shell_appcontainer_host(&fg_exe) {
         if let Some(false) = process_has_our_tsf_dll(pid) {
             return false;
         }
@@ -447,12 +478,22 @@ unsafe fn update_status_bar_visibility(hwnd_status: isize) {
         ShowWindow(hwnd_status, if want { SW_SHOWNOACTIVATE } else { SW_HIDE });
     }
     if !want {
-        // 已切换到其他输入法：同时收起可能残留的候选窗
-        let hwnd_cand = GLOBAL_STATE
-            .try_lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|st| st.hwnd_cand))
-            .unwrap_or(0);
+        // 已切换到其他输入法：同时清空可能残留的预编辑状态并收起候选窗
+        let mut hwnd_cand = 0isize;
+        if let Ok(mut guard) = GLOBAL_STATE.try_lock() {
+            if let Some(st) = guard.as_mut() {
+                if !st.session.input_buffer.is_empty()
+                    || !st.session.current_candidates.is_empty()
+                    || st.session.pending_ghost_text.is_some()
+                {
+                    st.session.input_buffer.clear();
+                    st.session.current_candidates.clear();
+                    st.session.pending_ghost_text = None;
+                    st.eaten_vks = [false; 256];
+                }
+                hwnd_cand = st.hwnd_cand;
+            }
+        }
         if hwnd_cand != 0 && IsWindowVisible(hwnd_cand) != 0 {
             ShowWindow(hwnd_cand, SW_HIDE);
         }
@@ -765,6 +806,12 @@ extern "system" {
     fn ReleaseCapture() -> i32;
     fn KillTimer(h_wnd: isize, id_event: usize) -> i32;
     fn GetKeyboardLayout(id_thread: u32) -> isize;
+    fn ChangeWindowMessageFilterEx(
+        hwnd: isize,
+        message: u32,
+        action: u32,
+        p_change_filter_struct: *mut u8,
+    ) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -772,6 +819,13 @@ extern "system" {
     fn LoadLibraryW(lp_lib_file_name: *const u16) -> isize;
     fn GetProcAddress(h_module: isize, lp_proc_name: *const u8) -> *const usize;
     fn GetExitCodeProcess(h_process: isize, lp_exit_code: *mut u32) -> i32;
+    fn ReadProcessMemory(
+        h_process: isize,
+        lp_base_address: *const u8,
+        lp_buffer: *mut u8,
+        n_size: usize,
+        lp_number_of_bytes_read: *mut usize,
+    ) -> i32;
 }
 
 #[link(name = "advapi32")]
@@ -889,6 +943,7 @@ const WM_APP_OPEN_SETTINGS: u32 = 0x8000 + 45;
 
 const WS_POPUP: u32 = 0x80000000;
 const WS_CHILD: u32 = 0x40000000;
+#[allow(dead_code)]
 const WS_VISIBLE: u32 = 0x10000000;
 const WS_CAPTION: u32 = 0x00C00000;
 const WS_SYSMENU: u32 = 0x00080000;
@@ -1365,6 +1420,381 @@ unsafe fn process_has_our_tsf_dll(pid: u32) -> Option<bool> {
         *g = (pid, result, now);
     }
     result
+}
+
+/// 在目标进程内的 `ime_tsf_win.dll` / `ime_tsf_win_x86.dll` PE 导出表中定位 `ACTIVE_TIP_COUNT` 的 RVA：
+/// 1) 优先查找新版 DLL 直接导出的符号 `"RUST_AI_IME_ACTIVE_TIP_COUNT"`；
+/// 2) 兼容已驻留内存的旧版 x64 DLL：解析导出函数 `"DllCanUnloadNow"` 首条指令 `8B 0D <disp32>` 计算 `DLL_REF_COUNT` RVA，并加上 16 字节偏移定位 `ACTIVE_TIP_COUNT`。
+unsafe fn resolve_active_tip_rva_in_process(h_proc: isize, base: usize) -> Option<u32> {
+    let mut dos = [0u8; 0x40];
+    let mut br = 0usize;
+    if ReadProcessMemory(h_proc, base as *const u8, dos.as_mut_ptr(), dos.len(), &mut br) == 0
+        || br < 0x40
+    {
+        return None;
+    }
+    if u16::from_le_bytes([dos[0], dos[1]]) != 0x5A4D {
+        return None;
+    }
+    let e_lfanew = u32::from_le_bytes([dos[0x3C], dos[0x3D], dos[0x3E], dos[0x3F]]) as usize;
+    if e_lfanew == 0 || e_lfanew > 0x1000 {
+        return None;
+    }
+    let mut nt = [0u8; 0x120];
+    if ReadProcessMemory(
+        h_proc,
+        (base + e_lfanew) as *const u8,
+        nt.as_mut_ptr(),
+        nt.len(),
+        &mut br,
+    ) == 0
+        || br < 0x100
+    {
+        return None;
+    }
+    if &nt[0..4] != b"PE\0\0" {
+        return None;
+    }
+    let opt_off = 24usize;
+    let magic = u16::from_le_bytes([nt[opt_off], nt[opt_off + 1]]);
+    let exp_dir_off = match magic {
+        0x20B => opt_off + 112, // PE32+ (64-bit)
+        0x10B => opt_off + 96,  // PE32 (32-bit)
+        _ => return None,
+    };
+    let exp_rva = u32::from_le_bytes([
+        nt[exp_dir_off],
+        nt[exp_dir_off + 1],
+        nt[exp_dir_off + 2],
+        nt[exp_dir_off + 3],
+    ]) as usize;
+    if exp_rva == 0 {
+        return None;
+    }
+    let mut exp = [0u8; 40];
+    if ReadProcessMemory(
+        h_proc,
+        (base + exp_rva) as *const u8,
+        exp.as_mut_ptr(),
+        exp.len(),
+        &mut br,
+    ) == 0
+        || br < 40
+    {
+        return None;
+    }
+    let num_names = u32::from_le_bytes([exp[24], exp[25], exp[26], exp[27]]) as usize;
+    let addr_funcs = u32::from_le_bytes([exp[28], exp[29], exp[30], exp[31]]) as usize;
+    let addr_names = u32::from_le_bytes([exp[32], exp[33], exp[34], exp[35]]) as usize;
+    let addr_ords = u32::from_le_bytes([exp[36], exp[37], exp[38], exp[39]]) as usize;
+    if num_names == 0 || num_names > 256 {
+        return None;
+    }
+    let mut dll_can_unload_rva: u32 = 0;
+    for i in 0..num_names {
+        let mut name_rva_buf = [0u8; 4];
+        if ReadProcessMemory(
+            h_proc,
+            (base + addr_names + i * 4) as *const u8,
+            name_rva_buf.as_mut_ptr(),
+            4,
+            &mut br,
+        ) == 0
+            || br < 4
+        {
+            continue;
+        }
+        let name_rva = u32::from_le_bytes(name_rva_buf) as usize;
+        let mut ord_buf = [0u8; 2];
+        if ReadProcessMemory(
+            h_proc,
+            (base + addr_ords + i * 2) as *const u8,
+            ord_buf.as_mut_ptr(),
+            2,
+            &mut br,
+        ) == 0
+            || br < 2
+        {
+            continue;
+        }
+        let ord = u16::from_le_bytes(ord_buf) as usize;
+        let mut sym_rva_buf = [0u8; 4];
+        if ReadProcessMemory(
+            h_proc,
+            (base + addr_funcs + ord * 4) as *const u8,
+            sym_rva_buf.as_mut_ptr(),
+            4,
+            &mut br,
+        ) == 0
+            || br < 4
+        {
+            continue;
+        }
+        let sym_rva = u32::from_le_bytes(sym_rva_buf);
+        let mut s_buf = [0u8; 48];
+        if ReadProcessMemory(
+            h_proc,
+            (base + name_rva) as *const u8,
+            s_buf.as_mut_ptr(),
+            s_buf.len(),
+            &mut br,
+        ) == 0
+            || br == 0
+        {
+            continue;
+        }
+        let slen = s_buf.iter().position(|&b| b == 0).unwrap_or(br);
+        let sym_name = &s_buf[..slen];
+        if sym_name == b"RUST_AI_IME_ACTIVE_TIP_COUNT" {
+            return Some(sym_rva);
+        }
+        if sym_name == b"DllCanUnloadNow" {
+            dll_can_unload_rva = sym_rva;
+        }
+    }
+    if magic == 0x20B && dll_can_unload_rva != 0 {
+        let mut code = [0u8; 16];
+        if ReadProcessMemory(
+            h_proc,
+            (base + dll_can_unload_rva as usize) as *const u8,
+            code.as_mut_ptr(),
+            code.len(),
+            &mut br,
+        ) != 0
+            && br >= 6
+            && code[0] == 0x8B
+            && (code[1] == 0x0D || code[1] == 0x05)
+        {
+            let disp = i32::from_le_bytes([code[2], code[3], code[4], code[5]]) as i64;
+            let ref_rva = (dll_can_unload_rva as i64 + 6 + disp) as u32;
+            return Some(ref_rva + 16);
+        }
+    }
+    None
+}
+
+/// 直接读取指定进程内 `ime_tsf_win.dll` 的 `ACTIVE_TIP_COUNT`（`> 0` 表示本输入法在该进程处于激活态，`0` 表示已停用）。
+/// 对 `SearchHost.exe` 等 AppContainer 受限进程同样支持微秒级直读，彻底摆脱网络环回隔离限制。
+unsafe fn query_process_active_tip_count(pid: u32) -> Option<i32> {
+    if pid == 0 {
+        return None;
+    }
+    // (base_addr, rva, cached_at_ms)；base_addr == 0 表示该进程尚未加载 ime_tsf_win.dll
+    static MOD_CACHE: Mutex<Option<std::collections::HashMap<u32, (usize, u32, u64)>>> =
+        Mutex::new(None);
+    let now = mono_ms();
+    let cached = MOD_CACHE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(&pid).copied()));
+
+    const PROCESS_VM_READ: u32 = 0x0010;
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+    if let Some((base, rva, cached_at)) = cached {
+        if base == 0 {
+            if now.saturating_sub(cached_at) < 1200 {
+                return None;
+            }
+        } else if rva != 0 {
+            let mut h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid);
+            if h_proc == 0 {
+                h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            }
+            if h_proc != 0 {
+                let mut val_buf = [0u8; 4];
+                let mut br = 0usize;
+                let ok = ReadProcessMemory(
+                    h_proc,
+                    (base + rva as usize) as *const u8,
+                    val_buf.as_mut_ptr(),
+                    4,
+                    &mut br,
+                );
+                CloseHandle(h_proc);
+                if ok != 0 && br == 4 {
+                    return Some(i32::from_le_bytes(val_buf));
+                }
+            }
+            if let Ok(mut g) = MOD_CACHE.lock() {
+                if let Some(m) = g.as_mut() {
+                    m.remove(&pid);
+                }
+            }
+        }
+    }
+
+    #[repr(C)]
+    struct MODULEENTRY32W {
+        dw_size: u32,
+        th32_module_id: u32,
+        th32_process_id: u32,
+        glblcnt_usage: u32,
+        proccnt_usage: u32,
+        mod_base_addr: *mut u8,
+        mod_base_size: u32,
+        h_module: isize,
+        sz_module: [u16; 256],
+        sz_exe_path: [u16; 260],
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
+        fn Module32FirstW(h: isize, me: *mut MODULEENTRY32W) -> i32;
+        fn Module32NextW(h: isize, me: *mut MODULEENTRY32W) -> i32;
+    }
+    const TH32CS_SNAPMODULE: u32 = 0x8;
+    const TH32CS_SNAPMODULE32: u32 = 0x10;
+    let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if snap == -1 || snap == 0 {
+        return None;
+    }
+    let mut me: MODULEENTRY32W = std::mem::zeroed();
+    me.dw_size = std::mem::size_of::<MODULEENTRY32W>() as u32;
+    let mut found_base: usize = 0;
+    let mut ok = Module32FirstW(snap, &mut me);
+    while ok != 0 {
+        let len = me
+            .sz_module
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(me.sz_module.len());
+        let name = String::from_utf16_lossy(&me.sz_module[..len]).to_ascii_lowercase();
+        if name.starts_with("ime_tsf_win") {
+            found_base = me.mod_base_addr as usize;
+            break;
+        }
+        ok = Module32NextW(snap, &mut me);
+    }
+    CloseHandle(snap);
+
+    if found_base == 0 {
+        if let Ok(mut g) = MOD_CACHE.lock() {
+            let m = g.get_or_insert_with(std::collections::HashMap::new);
+            if m.len() > 256 {
+                m.clear();
+            }
+            m.insert(pid, (0, 0, now));
+        }
+        return None;
+    }
+
+    let mut h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid);
+    if h_proc == 0 {
+        h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    }
+    if h_proc == 0 {
+        return None;
+    }
+    let rva = resolve_active_tip_rva_in_process(h_proc, found_base);
+    let mut out_val: Option<i32> = None;
+    if let Some(rva_val) = rva {
+        let mut val_buf = [0u8; 4];
+        let mut br = 0usize;
+        if ReadProcessMemory(
+            h_proc,
+            (found_base + rva_val as usize) as *const u8,
+            val_buf.as_mut_ptr(),
+            4,
+            &mut br,
+        ) != 0
+            && br == 4
+        {
+            out_val = Some(i32::from_le_bytes(val_buf));
+        }
+        if let Ok(mut g) = MOD_CACHE.lock() {
+            let m = g.get_or_insert_with(std::collections::HashMap::new);
+            if m.len() > 256 {
+                m.clear();
+            }
+            m.insert(pid, (found_base, rva_val, now));
+        }
+    }
+    CloseHandle(h_proc);
+    out_val
+}
+
+/// 服务启动时探测当前会话中已加载 `ime_tsf_win.dll` 的宿主进程（如前台进程、`SearchHost.exe`、`explorer.exe`）
+/// 是否存在处于激活态的 TIP，以准确初始化 `LAST_TIP_EVENT_ACTIVE`。
+unsafe fn detect_initial_tip_active() {
+    #[repr(C)]
+    struct PROCESSENTRY32W {
+        dw_size: u32,
+        cnt_usage: u32,
+        th32_process_id: u32,
+        th32_default_heap_id: usize,
+        th32_module_id: u32,
+        cnt_threads: u32,
+        th32_parent_process_id: u32,
+        pc_pri_class_base: i32,
+        dw_flags: u32,
+        sz_exe_file: [u16; 260],
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
+        fn Process32FirstW(h: isize, pe: *mut PROCESSENTRY32W) -> i32;
+        fn Process32NextW(h: isize, pe: *mut PROCESSENTRY32W) -> i32;
+    }
+    let fg = GetForegroundWindow();
+    if fg != 0 {
+        let mut fg_pid: u32 = 0;
+        GetWindowThreadProcessId(fg, &mut fg_pid);
+        if fg_pid != 0 && fg_pid != std::process::id() {
+            if let Some(cnt) = query_process_active_tip_count(fg_pid) {
+                LAST_TRACKED_APP_PID.store(fg_pid, Ordering::Relaxed);
+                LAST_TIP_EVENT_ACTIVE.store(cnt > 0, Ordering::Relaxed);
+                if cnt > 0 {
+                    return;
+                }
+            }
+        }
+    }
+    let snap = CreateToolhelp32Snapshot(0x2 /* TH32CS_SNAPPROCESS */, 0);
+    if snap == -1 || snap == 0 {
+        return;
+    }
+    let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+    pe.dw_size = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut saw_any_loaded = false;
+    let mut saw_any_active = false;
+    let mut ok = Process32FirstW(snap, &mut pe);
+    while ok != 0 {
+        let len = pe
+            .sz_exe_file
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(pe.sz_exe_file.len());
+        let exe = String::from_utf16_lossy(&pe.sz_exe_file[..len]).to_ascii_lowercase();
+        if matches!(
+            exe.as_str(),
+            "searchhost.exe"
+                | "explorer.exe"
+                | "msedge.exe"
+                | "chrome.exe"
+                | "notepad.exe"
+                | "code.exe"
+                | "antigravity.exe"
+                | "wechat.exe"
+        ) {
+            if let Some(cnt) = query_process_active_tip_count(pe.th32_process_id) {
+                saw_any_loaded = true;
+                if cnt > 0 {
+                    saw_any_active = true;
+                    LAST_TRACKED_APP_PID.store(pe.th32_process_id, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+        ok = Process32NextW(snap, &mut pe);
+    }
+    CloseHandle(snap);
+    if saw_any_active {
+        LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
+    } else if saw_any_loaded {
+        LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
+    }
 }
 
 /// 获取当前焦点窗口的可执行文件名（如 `notepad.exe`, `Code.exe`, `WeChat.exe`）
@@ -2265,6 +2695,27 @@ unsafe extern "system" fn low_level_keyboard_proc(
         }
     }
     if !status_bar_should_show() {
+        let mut hide_wins = (0isize, 0isize);
+        if let Ok(mut guard) = GLOBAL_STATE.try_lock() {
+            if let Some(st) = guard.as_mut() {
+                if !st.session.input_buffer.is_empty()
+                    || !st.session.current_candidates.is_empty()
+                    || st.session.pending_ghost_text.is_some()
+                {
+                    st.session.input_buffer.clear();
+                    st.session.current_candidates.clear();
+                    st.session.pending_ghost_text = None;
+                    st.eaten_vks = [false; 256];
+                }
+                hide_wins = (st.hwnd_status, st.hwnd_cand);
+            }
+        }
+        if hide_wins.0 != 0 && IsWindowVisible(hide_wins.0) != 0 {
+            ShowWindow(hide_wins.0, SW_HIDE);
+        }
+        if hide_wins.1 != 0 && IsWindowVisible(hide_wins.1) != 0 {
+            ShowWindow(hide_wins.1, SW_HIDE);
+        }
         return CallNextHookEx(0, n_code, w_param, l_param);
     }
     // TSF 模式下常规桌面程序由进程内 TSF 接管（且避免捕获 ESET ekbdflt.sys 等安全驱动在进程外混淆的按键码），
@@ -2947,6 +3398,22 @@ unsafe extern "system" fn wnd_proc_status(
         }
         WM_APP_OPEN_SETTINGS => {
             show_settings_window();
+            0
+        }
+        WM_APP_TSF_TIP_STATE => {
+            let active = w_param != 0;
+            let pid = l_param as u32;
+            note_tip_state(pid, active);
+            if !active {
+                if let Ok(mut guard) = GLOBAL_STATE.lock() {
+                    if let Some(st) = guard.as_mut() {
+                        st.session.input_buffer.clear();
+                        st.session.current_candidates.clear();
+                        st.session.pending_ghost_text = None;
+                    }
+                }
+            }
+            update_status_bar_visibility(hwnd);
             0
         }
         0x0113 /* WM_TIMER */ if w_param == STATUS_AUTOHIDE_TIMER_ID => {
@@ -5065,8 +5532,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ensure_appcontainer_dir_acl(&dir);
             let _ = ensure_ime_ico_file(&dir);
         }
-        if tsf_registered {
+        if tsf_registered && args.iter().any(|a| a == "--activate-tsf") {
             let _ = activate_tsf_profile_for_current_user();
+        }
+        if tsf_registered {
+            detect_initial_tip_active();
         }
 
         let init_status_w = current_status_width();
@@ -5184,7 +5654,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
             status_class.as_ptr(),
             to_wide("RustAI拼音状态栏").as_ptr(),
-            WS_POPUP | WS_VISIBLE,
+            WS_POPUP,
             init_status_pos.0,
             init_status_pos.1,
             init_status_w,
@@ -5195,6 +5665,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             null(),
         );
         enable_win11_round_corners(hwnd_status);
+        let _ = ChangeWindowMessageFilterEx(
+            hwnd_status,
+            WM_APP_TSF_TIP_STATE,
+            1, /* MSGFLT_ALLOW */
+            std::ptr::null_mut(),
+        );
 
         let settings_style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
         let mut wr = RECT {
@@ -5237,7 +5713,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        ShowWindow(hwnd_status, SW_SHOWNOACTIVATE);
+        update_status_bar_visibility(hwnd_status);
         SetTimer(hwnd_status, STATUS_VIS_TIMER_ID, 250, null());
         spawn_tsf_ipc_server(hwnd_cand);
         if args.iter().any(|a| a == "--open-settings") {

@@ -388,6 +388,7 @@ impl OnDeviceAiEngine {
 
         let original_top = candidates[0].text.clone();
         let ctx_state = self.prefill_or_get_context(context, scene);
+        let max_len = candidates.iter().map(|c| c.consumed_len).max().unwrap_or(0);
 
         for cand in &mut candidates {
             let mut ai_bonus = 0.0f32;
@@ -494,7 +495,10 @@ impl OnDeviceAiEngine {
             ai_bonus += score_chinese_grammar_coherence(context, cand);
 
             if ai_bonus.abs() > 0.5 {
-                if cand.tag == "[整句备选]" && ai_bonus > 0.5 {
+                if (cand.tag == "[整句备选]"
+                    || (cand.consumed_len == max_len && cand.final_score < 90.0))
+                    && ai_bonus > 0.5
+                {
                     cand.final_score = (100.0 - cand.l1_cost) + ai_bonus;
                 } else {
                     cand.final_score += ai_bonus;
@@ -507,7 +511,6 @@ impl OnDeviceAiEngine {
 
         // 仅对属于「整句/全词顶层竞争池」（`consumed_len == max_len && final_score >= 90.0`）的候选项按 AI 融合得分重排，
         // 保持未提权的递进短语与前缀词组顺序稳定
-        let max_len = candidates.iter().map(|c| c.consumed_len).max().unwrap_or(0);
         candidates.sort_by(|a, b| {
             let a_top = a.consumed_len == max_len && a.final_score >= 90.0;
             let b_top = b.consumed_len == max_len && b.final_score >= 90.0;

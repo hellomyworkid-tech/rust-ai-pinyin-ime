@@ -216,10 +216,27 @@ impl ImeCoreEngine {
         let mut multi_syl_words: Vec<LatticeEdge> = edges
             .iter()
             .filter(|e| {
-                e.end > preferred_end
-                    && (e.kind == EdgeKind::ChineseWord
-                        || (!has_full_pinyin_at_start && e.kind == EdgeKind::AbbrevPinyin)
-                        || (e.end == n && e.kind == EdgeKind::EnglishWord))
+                if e.end <= preferred_end {
+                    return false;
+                }
+                // 过滤把后继完整全拼音节切碎的半音节词（如 `zaijia` 中 `0..5 zai'ji -> 在即` 切碎了 `3..6 jia`）
+                if has_full_pinyin_at_start && e.end < n {
+                    let cuts_full_syl = (start_pos + 1..e.end).any(|s| {
+                        lattice.edges_from.get(s).is_some_and(|es| {
+                            es.iter().any(|ce| {
+                                ce.kind == EdgeKind::ChineseChar
+                                    && !ce.is_fuzzy
+                                    && ce.end > e.end
+                            })
+                        })
+                    });
+                    if cuts_full_syl {
+                        return false;
+                    }
+                }
+                e.kind == EdgeKind::ChineseWord
+                    || (!has_full_pinyin_at_start && e.kind == EdgeKind::AbbrevPinyin)
+                    || (e.end == n && e.kind == EdgeKind::EnglishWord)
             })
             .cloned()
             .collect();
@@ -280,10 +297,22 @@ impl ImeCoreEngine {
         });
 
         let mut ordered_edges = Vec::new();
-        let top_word_take = 12;
-        // 1) 精确匹配的多字词组排在单字之前
-        for e in multi_syl_words.iter().filter(|e| !e.is_fuzzy).take(top_word_take) {
-            ordered_edges.push(e.clone());
+        let mut full_span_taken = 0usize;
+        let mut prefix_word_taken = 0usize;
+        // 1) 精确匹配的多字词组排在单字之前：
+        //    - 若词组覆盖到整句末尾 (`e.end >= n`，如双音节 `zaijia` 下的「在家」「再加」)，最多先取 2 个，
+        //      保证第 1 页立刻展示当前音节的常用单字（如「在」「再」「载」），方便用户直接选前面的字；
+        //    - 若词组是长句中的局部前缀词 (`e.end < n`，如 `nizaifansipaichayixia` 下的「你在」「你再」「拟在」)，最多取 12 个。
+        for e in multi_syl_words.iter().filter(|e| !e.is_fuzzy) {
+            if e.end >= n {
+                if full_span_taken < 2 {
+                    ordered_edges.push(e.clone());
+                    full_span_taken += 1;
+                }
+            } else if prefix_word_taken < 12 {
+                ordered_edges.push(e.clone());
+                prefix_word_taken += 1;
+            }
         }
         // 2) 当前音节精确匹配的同音单字
         for e in exact_syl_edges.iter().filter(|e| !e.is_fuzzy) {
