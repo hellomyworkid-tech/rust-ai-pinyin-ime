@@ -621,6 +621,37 @@ fn score_chinese_grammar_coherence(context: &str, cand: &Candidate) -> f32 {
         }
     }
 
+    // 3. 量词短语（如「这个/那个/一个/每个/哪个/几个」）+ 可数名词（如「词/字/人/事/点/群」） vs 文言代词/虚词（如 `*这个此`、`*一个之`）
+    for pair in segs.windows(2) {
+        let prev = pair[0].as_str();
+        let next = pair[1].as_str();
+        if ime_core::is_classifier_phrase(prev) {
+            if ime_core::is_ungrammatical_after_classifier(next) {
+                bonus -= 3.5;
+            } else if ime_core::is_countable_single_noun(next) {
+                bonus += 2.4;
+            }
+        }
+        if prev == "反" && matches!(next, "重力" | "引力" | "物质" | "粒子" | "作用" | "方向" | "比例" | "垄断" | "腐败" | "欺诈" | "人类" | "直觉" | "常识") {
+            bonus += 2.6;
+        }
+        if matches!(
+            prev,
+            "怎么" | "咋" | "这么" | "那么" | "一" | "两" | "同一" | "另一" | "当" | "不当" | "没当"
+        ) {
+            if matches!(next, "回事" | "一回事") {
+                bonus += 2.8;
+            } else if next == "会是" {
+                bonus -= 2.2;
+            }
+        }
+    }
+    if text.ends_with("怎么回事") || text.ends_with("一回事") || text.ends_with("两回事") || text.ends_with("当回事") {
+        bonus += 1.6;
+    } else if text.ends_with("怎么会是") {
+        bonus -= 1.6;
+    }
+
     bonus
 }
 

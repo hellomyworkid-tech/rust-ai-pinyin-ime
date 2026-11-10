@@ -73,10 +73,21 @@ static LAST_TRACKED_APP_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::A
 /// 管理员权限目标进程（如 Taskmgr.exe）因 UIPI 阻止跨进程 SendInput 时，转交进程内 TSF DLL 轮询上屏的队列
 static PENDING_ELEVATED_COMMITS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// 检查指定 PID 的进程是否以管理员高完整性级别（Elevated / High Integrity）运行
+/// 检查指定 PID 的进程是否以管理员高完整性级别（Elevated / High Integrity）运行（带按 PID 内存缓存，避免高频重复打开进程令牌）
 unsafe fn is_process_elevated(pid: u32) -> bool {
     if pid == 0 {
         return false;
+    }
+    static ELEV_CACHE: Mutex<Option<std::collections::HashMap<u32, (bool, u64)>>> = Mutex::new(None);
+    let now = mono_ms();
+    if let Ok(g) = ELEV_CACHE.try_lock() {
+        if let Some(m) = g.as_ref() {
+            if let Some(&(elev, at)) = m.get(&pid) {
+                if now.saturating_sub(at) < 10_000 {
+                    return elev;
+                }
+            }
+        }
     }
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const TOKEN_QUERY: u32 = 0x0008;
@@ -96,6 +107,13 @@ unsafe fn is_process_elevated(pid: u32) -> bool {
         CloseHandle(h_tok);
     }
     CloseHandle(h_proc);
+    if let Ok(mut g) = ELEV_CACHE.try_lock() {
+        let m = g.get_or_insert_with(std::collections::HashMap::new);
+        if m.len() > 256 {
+            m.clear();
+        }
+        m.insert(pid, (elevated, now));
+    }
     elevated
 }
 
@@ -1361,15 +1379,51 @@ unsafe fn send_unicode_text(text: &str) {
     }
 }
 
-/// 检查进程是否已加载本输入法的 TSF 组件（`ime_tsf_win.dll` / `ime_tsf_win_x86.dll`）。
-/// 返回 `None` 表示无法查询（例如管理员权限进程拒绝访问）。结果按 PID 缓存 1.5 秒。
-unsafe fn process_has_our_tsf_dll(pid: u32) -> Option<bool> {
-    static CACHE: Mutex<(u32, Option<bool>, u64)> = Mutex::new((0, None, 0));
-    let now = mono_ms();
-    if let Ok(g) = CACHE.lock() {
-        if g.0 == pid && now.saturating_sub(g.2) < 1500 {
-            return g.1;
-        }
+/// 跨进程模块与 `ACTIVE_TIP_COUNT` 符号地址缓存：
+/// `pid -> (mod_base_addr, active_tip_rva, has_our_tsf_dll, cached_at_ms)`
+/// 所有涉及 `CreateToolhelp32Snapshot(TH32CS_SNAPMODULE)` 的模块枚举均在独立后台线程异步执行，
+/// 彻底杜绝目标进程正持有 PEB LoaderLock（如睡眠唤醒、正在加载大型 DLL 或挂起）时阻塞本输入法 UI 主线程与键盘钩子（AppHangB1）！
+static MOD_CACHE: Mutex<Option<std::collections::HashMap<u32, (usize, u32, Option<bool>, u64)>>> =
+    Mutex::new(None);
+
+fn enqueue_process_inspection(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    static INSPECT_TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<u32>> =
+        std::sync::OnceLock::new();
+    let tx = INSPECT_TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<u32>(64);
+        std::thread::spawn(move || {
+            while let Ok(target_pid) = rx.recv() {
+                let now = mono_ms();
+                let recently_checked = MOD_CACHE
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|m| m.get(&target_pid).copied()))
+                    .is_some_and(|(base, rva, _, at)| {
+                        if base != 0 && rva != 0 {
+                            now.saturating_sub(at) < 5_000
+                        } else {
+                            now.saturating_sub(at) < 1_000
+                        }
+                    });
+                if !recently_checked {
+                    unsafe {
+                        inspect_process_tsf_module_blocking(target_pid);
+                    }
+                }
+            }
+        });
+        tx
+    });
+    let _ = tx.try_send(pid);
+}
+
+/// 在后台工作线程中枚举 `pid` 的模块并解析 `ime_tsf_win.dll` 基址与 `ACTIVE_TIP_COUNT` RVA（绝不在 UI 主线程调用）
+unsafe fn inspect_process_tsf_module_blocking(pid: u32) -> Option<(usize, u32)> {
+    if pid == 0 {
+        return None;
     }
     #[repr(C)]
     struct MODULEENTRY32W {
@@ -1392,34 +1446,92 @@ unsafe fn process_has_our_tsf_dll(pid: u32) -> Option<bool> {
     }
     const TH32CS_SNAPMODULE: u32 = 0x8;
     const TH32CS_SNAPMODULE32: u32 = 0x10;
-    let mut result: Option<bool> = None;
-    // 进程刚启动或正在加载模块时可能返回 ERROR_BAD_LENGTH，重试几次
-    for _ in 0..3 {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-        if snap == -1 || snap == 0 {
-            continue;
-        }
-        let mut me: MODULEENTRY32W = std::mem::zeroed();
-        me.dw_size = std::mem::size_of::<MODULEENTRY32W>() as u32;
-        let mut found = false;
-        let mut ok = Module32FirstW(snap, &mut me);
-        while ok != 0 {
-            let len = me.sz_module.iter().position(|&c| c == 0).unwrap_or(me.sz_module.len());
-            let name = String::from_utf16_lossy(&me.sz_module[..len]).to_ascii_lowercase();
-            if name.starts_with("ime_tsf_win") {
-                found = true;
-                break;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+    let now = mono_ms();
+    let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if snap == -1 || snap == 0 {
+        if let Ok(mut g) = MOD_CACHE.lock() {
+            let m = g.get_or_insert_with(std::collections::HashMap::new);
+            if m.len() > 256 {
+                m.clear();
             }
-            ok = Module32NextW(snap, &mut me);
+            m.insert(pid, (0, 0, None, now));
         }
-        CloseHandle(snap);
-        result = Some(found);
-        break;
+        return None;
     }
-    if let Ok(mut g) = CACHE.lock() {
-        *g = (pid, result, now);
+    let mut me: MODULEENTRY32W = std::mem::zeroed();
+    me.dw_size = std::mem::size_of::<MODULEENTRY32W>() as u32;
+    let mut found_base: usize = 0;
+    let mut ok = Module32FirstW(snap, &mut me);
+    while ok != 0 {
+        let len = me
+            .sz_module
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(me.sz_module.len());
+        let name = String::from_utf16_lossy(&me.sz_module[..len]).to_ascii_lowercase();
+        if name.starts_with("ime_tsf_win") {
+            found_base = me.mod_base_addr as usize;
+            break;
+        }
+        ok = Module32NextW(snap, &mut me);
     }
-    result
+    CloseHandle(snap);
+
+    if found_base == 0 {
+        if let Ok(mut g) = MOD_CACHE.lock() {
+            let m = g.get_or_insert_with(std::collections::HashMap::new);
+            if m.len() > 256 {
+                m.clear();
+            }
+            m.insert(pid, (0, 0, Some(false), now));
+        }
+        return None;
+    }
+
+    let mut h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid);
+    if h_proc == 0 {
+        h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    }
+    let mut resolved_rva = 0u32;
+    if h_proc != 0 {
+        if let Some(rva) = resolve_active_tip_rva_in_process(h_proc, found_base) {
+            resolved_rva = rva;
+        }
+        CloseHandle(h_proc);
+    }
+    if let Ok(mut g) = MOD_CACHE.lock() {
+        let m = g.get_or_insert_with(std::collections::HashMap::new);
+        if m.len() > 256 {
+            m.clear();
+        }
+        m.insert(pid, (found_base, resolved_rva, Some(true), now));
+    }
+    (resolved_rva != 0).then_some((found_base, resolved_rva))
+}
+
+/// 检查进程是否已加载本输入法的 TSF 组件（`ime_tsf_win.dll` / `ime_tsf_win_x86.dll`）。
+/// 非阻塞查询：直接读取 `MOD_CACHE`，未命中或过期时异步投递给后台检测线程，绝不阻塞 UI 主线程。
+unsafe fn process_has_our_tsf_dll(pid: u32) -> Option<bool> {
+    if pid == 0 {
+        return None;
+    }
+    let now = mono_ms();
+    let cached = MOD_CACHE
+        .try_lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(&pid).copied()));
+    if let Some((_base, _rva, has_dll, cached_at)) = cached {
+        if has_dll != Some(true) && now.saturating_sub(cached_at) >= 1500 {
+            enqueue_process_inspection(pid);
+        }
+        return has_dll;
+    }
+    enqueue_process_inspection(pid);
+    None
 }
 
 /// 在目标进程内的 `ime_tsf_win.dll` / `ime_tsf_win_x86.dll` PE 导出表中定位 `ACTIVE_TIP_COUNT` 的 RVA：
@@ -1574,17 +1686,14 @@ unsafe fn resolve_active_tip_rva_in_process(h_proc: isize, base: usize) -> Optio
 }
 
 /// 直接读取指定进程内 `ime_tsf_win.dll` 的 `ACTIVE_TIP_COUNT`（`> 0` 表示本输入法在该进程处于激活态，`0` 表示已停用）。
-/// 对 `SearchHost.exe` 等 AppContainer 受限进程同样支持微秒级直读，彻底摆脱网络环回隔离限制。
+/// 对 `SearchHost.exe` 等 AppContainer 受限进程同样支持微秒级直读，且未命中缓存时仅投递后台异步解析，绝不在 UI 主线程调用 `CreateToolhelp32Snapshot`。
 unsafe fn query_process_active_tip_count(pid: u32) -> Option<i32> {
     if pid == 0 {
         return None;
     }
-    // (base_addr, rva, cached_at_ms)；base_addr == 0 表示该进程尚未加载 ime_tsf_win.dll
-    static MOD_CACHE: Mutex<Option<std::collections::HashMap<u32, (usize, u32, u64)>>> =
-        Mutex::new(None);
     let now = mono_ms();
     let cached = MOD_CACHE
-        .lock()
+        .try_lock()
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(&pid).copied()));
 
@@ -1592,212 +1701,132 @@ unsafe fn query_process_active_tip_count(pid: u32) -> Option<i32> {
     const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 
-    if let Some((base, rva, cached_at)) = cached {
-        if base == 0 {
-            if now.saturating_sub(cached_at) < 1200 {
-                return None;
+    if let Some((base, rva, _has_dll, cached_at)) = cached {
+        if base == 0 || rva == 0 {
+            if now.saturating_sub(cached_at) >= 1200 {
+                enqueue_process_inspection(pid);
             }
-        } else if rva != 0 {
-            let mut h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid);
-            if h_proc == 0 {
-                h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            }
-            if h_proc != 0 {
-                let mut val_buf = [0u8; 4];
-                let mut br = 0usize;
-                let ok = ReadProcessMemory(
-                    h_proc,
-                    (base + rva as usize) as *const u8,
-                    val_buf.as_mut_ptr(),
-                    4,
-                    &mut br,
-                );
-                CloseHandle(h_proc);
-                if ok != 0 && br == 4 {
-                    return Some(i32::from_le_bytes(val_buf));
-                }
-            }
-            if let Ok(mut g) = MOD_CACHE.lock() {
-                if let Some(m) = g.as_mut() {
-                    m.remove(&pid);
-                }
+            return None;
+        }
+        let mut h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid);
+        if h_proc == 0 {
+            h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        }
+        if h_proc != 0 {
+            let mut val_buf = [0u8; 4];
+            let mut br = 0usize;
+            let ok = ReadProcessMemory(
+                h_proc,
+                (base + rva as usize) as *const u8,
+                val_buf.as_mut_ptr(),
+                4,
+                &mut br,
+            );
+            CloseHandle(h_proc);
+            if ok != 0 && br == 4 {
+                return Some(i32::from_le_bytes(val_buf));
             }
         }
-    }
-
-    #[repr(C)]
-    struct MODULEENTRY32W {
-        dw_size: u32,
-        th32_module_id: u32,
-        th32_process_id: u32,
-        glblcnt_usage: u32,
-        proccnt_usage: u32,
-        mod_base_addr: *mut u8,
-        mod_base_size: u32,
-        h_module: isize,
-        sz_module: [u16; 256],
-        sz_exe_path: [u16; 260],
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
-        fn Module32FirstW(h: isize, me: *mut MODULEENTRY32W) -> i32;
-        fn Module32NextW(h: isize, me: *mut MODULEENTRY32W) -> i32;
-    }
-    const TH32CS_SNAPMODULE: u32 = 0x8;
-    const TH32CS_SNAPMODULE32: u32 = 0x10;
-    let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-    if snap == -1 || snap == 0 {
-        return None;
-    }
-    let mut me: MODULEENTRY32W = std::mem::zeroed();
-    me.dw_size = std::mem::size_of::<MODULEENTRY32W>() as u32;
-    let mut found_base: usize = 0;
-    let mut ok = Module32FirstW(snap, &mut me);
-    while ok != 0 {
-        let len = me
-            .sz_module
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(me.sz_module.len());
-        let name = String::from_utf16_lossy(&me.sz_module[..len]).to_ascii_lowercase();
-        if name.starts_with("ime_tsf_win") {
-            found_base = me.mod_base_addr as usize;
-            break;
-        }
-        ok = Module32NextW(snap, &mut me);
-    }
-    CloseHandle(snap);
-
-    if found_base == 0 {
-        if let Ok(mut g) = MOD_CACHE.lock() {
-            let m = g.get_or_insert_with(std::collections::HashMap::new);
-            if m.len() > 256 {
-                m.clear();
+        if let Ok(mut g) = MOD_CACHE.try_lock() {
+            if let Some(m) = g.as_mut() {
+                m.remove(&pid);
             }
-            m.insert(pid, (0, 0, now));
         }
+        enqueue_process_inspection(pid);
         return None;
     }
 
-    let mut h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid);
-    if h_proc == 0 {
-        h_proc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-    }
-    if h_proc == 0 {
-        return None;
-    }
-    let rva = resolve_active_tip_rva_in_process(h_proc, found_base);
-    let mut out_val: Option<i32> = None;
-    if let Some(rva_val) = rva {
-        let mut val_buf = [0u8; 4];
-        let mut br = 0usize;
-        if ReadProcessMemory(
-            h_proc,
-            (found_base + rva_val as usize) as *const u8,
-            val_buf.as_mut_ptr(),
-            4,
-            &mut br,
-        ) != 0
-            && br == 4
-        {
-            out_val = Some(i32::from_le_bytes(val_buf));
-        }
-        if let Ok(mut g) = MOD_CACHE.lock() {
-            let m = g.get_or_insert_with(std::collections::HashMap::new);
-            if m.len() > 256 {
-                m.clear();
-            }
-            m.insert(pid, (found_base, rva_val, now));
-        }
-    }
-    CloseHandle(h_proc);
-    out_val
+    enqueue_process_inspection(pid);
+    None
 }
 
-/// 服务启动时探测当前会话中已加载 `ime_tsf_win.dll` 的宿主进程（如前台进程、`SearchHost.exe`、`explorer.exe`）
+/// 服务启动时在后台线程探测当前会话中已加载 `ime_tsf_win.dll` 的宿主进程（如前台进程、`SearchHost.exe`、`explorer.exe`）
 /// 是否存在处于激活态的 TIP，以准确初始化 `LAST_TIP_EVENT_ACTIVE`。
 unsafe fn detect_initial_tip_active() {
-    #[repr(C)]
-    struct PROCESSENTRY32W {
-        dw_size: u32,
-        cnt_usage: u32,
-        th32_process_id: u32,
-        th32_default_heap_id: usize,
-        th32_module_id: u32,
-        cnt_threads: u32,
-        th32_parent_process_id: u32,
-        pc_pri_class_base: i32,
-        dw_flags: u32,
-        sz_exe_file: [u16; 260],
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
-        fn Process32FirstW(h: isize, pe: *mut PROCESSENTRY32W) -> i32;
-        fn Process32NextW(h: isize, pe: *mut PROCESSENTRY32W) -> i32;
-    }
-    let fg = GetForegroundWindow();
-    if fg != 0 {
-        let mut fg_pid: u32 = 0;
-        GetWindowThreadProcessId(fg, &mut fg_pid);
-        if fg_pid != 0 && fg_pid != std::process::id() {
-            if let Some(cnt) = query_process_active_tip_count(fg_pid) {
-                LAST_TRACKED_APP_PID.store(fg_pid, Ordering::Relaxed);
-                LAST_TIP_EVENT_ACTIVE.store(cnt > 0, Ordering::Relaxed);
-                if cnt > 0 {
-                    return;
+    std::thread::spawn(|| unsafe {
+        #[repr(C)]
+        struct PROCESSENTRY32W {
+            dw_size: u32,
+            cnt_usage: u32,
+            th32_process_id: u32,
+            th32_default_heap_id: usize,
+            th32_module_id: u32,
+            cnt_threads: u32,
+            th32_parent_process_id: u32,
+            pc_pri_class_base: i32,
+            dw_flags: u32,
+            sz_exe_file: [u16; 260],
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
+            fn Process32FirstW(h: isize, pe: *mut PROCESSENTRY32W) -> i32;
+            fn Process32NextW(h: isize, pe: *mut PROCESSENTRY32W) -> i32;
+        }
+        let fg = GetForegroundWindow();
+        if fg != 0 {
+            let mut fg_pid: u32 = 0;
+            GetWindowThreadProcessId(fg, &mut fg_pid);
+            if fg_pid != 0 && fg_pid != std::process::id() {
+                let _ = inspect_process_tsf_module_blocking(fg_pid);
+                if let Some(cnt) = query_process_active_tip_count(fg_pid) {
+                    LAST_TRACKED_APP_PID.store(fg_pid, Ordering::Relaxed);
+                    LAST_TIP_EVENT_ACTIVE.store(cnt > 0, Ordering::Relaxed);
+                    if cnt > 0 {
+                        return;
+                    }
                 }
             }
         }
-    }
-    let snap = CreateToolhelp32Snapshot(0x2 /* TH32CS_SNAPPROCESS */, 0);
-    if snap == -1 || snap == 0 {
-        return;
-    }
-    let mut pe: PROCESSENTRY32W = std::mem::zeroed();
-    pe.dw_size = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-    let mut saw_any_loaded = false;
-    let mut saw_any_active = false;
-    let mut ok = Process32FirstW(snap, &mut pe);
-    while ok != 0 {
-        let len = pe
-            .sz_exe_file
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(pe.sz_exe_file.len());
-        let exe = String::from_utf16_lossy(&pe.sz_exe_file[..len]).to_ascii_lowercase();
-        if matches!(
-            exe.as_str(),
-            "searchhost.exe"
-                | "explorer.exe"
-                | "msedge.exe"
-                | "chrome.exe"
-                | "notepad.exe"
-                | "code.exe"
-                | "antigravity.exe"
-                | "wechat.exe"
-        ) {
-            if let Some(cnt) = query_process_active_tip_count(pe.th32_process_id) {
-                saw_any_loaded = true;
-                if cnt > 0 {
-                    saw_any_active = true;
-                    LAST_TRACKED_APP_PID.store(pe.th32_process_id, Ordering::Relaxed);
-                    break;
+        let snap = CreateToolhelp32Snapshot(0x2 /* TH32CS_SNAPPROCESS */, 0);
+        if snap == -1 || snap == 0 {
+            return;
+        }
+        let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+        pe.dw_size = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut saw_any_loaded = false;
+        let mut saw_any_active = false;
+        let mut ok = Process32FirstW(snap, &mut pe);
+        while ok != 0 {
+            let len = pe
+                .sz_exe_file
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(pe.sz_exe_file.len());
+            let exe = String::from_utf16_lossy(&pe.sz_exe_file[..len]).to_ascii_lowercase();
+            if matches!(
+                exe.as_str(),
+                "searchhost.exe"
+                    | "explorer.exe"
+                    | "msedge.exe"
+                    | "chrome.exe"
+                    | "notepad.exe"
+                    | "code.exe"
+                    | "antigravity.exe"
+                    | "wechat.exe"
+            ) {
+                let _ = inspect_process_tsf_module_blocking(pe.th32_process_id);
+                if let Some(cnt) = query_process_active_tip_count(pe.th32_process_id) {
+                    saw_any_loaded = true;
+                    if cnt > 0 {
+                        saw_any_active = true;
+                        LAST_TRACKED_APP_PID.store(pe.th32_process_id, Ordering::Relaxed);
+                        break;
+                    }
                 }
             }
+            ok = Process32NextW(snap, &mut pe);
         }
-        ok = Process32NextW(snap, &mut pe);
-    }
-    CloseHandle(snap);
-    if saw_any_active {
-        LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
-    } else if saw_any_loaded {
-        LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
-    }
+        CloseHandle(snap);
+        if saw_any_active {
+            LAST_TIP_EVENT_ACTIVE.store(true, Ordering::Relaxed);
+        } else if saw_any_loaded {
+            LAST_TIP_EVENT_ACTIVE.store(false, Ordering::Relaxed);
+        }
+    });
 }
 
-/// 获取当前焦点窗口的可执行文件名（如 `notepad.exe`, `Code.exe`, `WeChat.exe`）
+/// 获取当前焦点窗口的可执行文件名（如 `notepad.exe`, `Code.exe`, `WeChat.exe`），带 (HWND, PID) 短时缓存
 unsafe fn get_foreground_exe_name() -> String {
     let hwnd = GetForegroundWindow();
     if hwnd == 0 {
@@ -1807,6 +1836,13 @@ unsafe fn get_foreground_exe_name() -> String {
     GetWindowThreadProcessId(hwnd, &mut pid);
     if pid == 0 {
         return String::new();
+    }
+    static FG_EXE_CACHE: Mutex<(isize, u32, String, u64)> = Mutex::new((0, 0, String::new(), 0));
+    let now = mono_ms();
+    if let Ok(g) = FG_EXE_CACHE.try_lock() {
+        if g.0 == hwnd && g.1 == pid && now.saturating_sub(g.3) < 800 && !g.2.is_empty() {
+            return g.2.clone();
+        }
     }
     let h_proc = OpenProcess(0x1000, 0, pid); // PROCESS_QUERY_LIMITED_INFORMATION
     if h_proc == 0 {
@@ -1820,11 +1856,15 @@ unsafe fn get_foreground_exe_name() -> String {
         return String::new();
     }
     let full_path = String::from_utf16_lossy(&buf[..size as usize]);
-    full_path
+    let exe_name = full_path
         .rsplit(['\\', '/'])
         .next()
         .unwrap_or("")
-        .to_string()
+        .to_string();
+    if let Ok(mut g) = FG_EXE_CACHE.try_lock() {
+        *g = (hwnd, pid, exe_name.clone(), now);
+    }
+    exe_name
 }
 
 /// 当前焦点是否是 Win32 密码输入框（`ES_PASSWORD`）。是则输入法完全放行，不拦截、不记忆。
@@ -2413,6 +2453,7 @@ unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
     }
 
     let caps_on = (GetKeyState(0x14) & 0x0001) != 0;
+    let caller_elevated = is_process_elevated(req.pid);
 
     let mut resp = TsfIpcResponse::default();
     let mut need_ui_sync = false;
@@ -2581,7 +2622,7 @@ unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
             // 对常规权限窗口：将待上屏文本排入主线程队列，等 TCP 响应返回后再通过 SendInput(KEYEVENTF_UNICODE) 注入目标窗口；
             // 对管理员高权限窗口（如 Taskmgr.exe）：跨进程 SendInput 会被 Windows UIPI 拦截（返回 0 导致无法落字），
             // 因此直接通过 resp.commit_text 返回给目标进程内的 ime_tsf_win.dll，由其在高权限进程内部完成上屏！
-            if !resp.commit_text.is_empty() && !is_process_elevated(req.pid) {
+            if !resp.commit_text.is_empty() && !caller_elevated {
                 let txt = std::mem::take(&mut resp.commit_text);
                 st.pending_tsf_commits.push(txt);
                 need_ui_sync = true;

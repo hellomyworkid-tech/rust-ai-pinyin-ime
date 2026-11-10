@@ -515,13 +515,16 @@ fn collect_chinese_edges<'a>(
     }
 
     // 多音节词末尾不完整音节/声母补全（如 `keyiyouhuadedif` 中的 `di` + `f` -> `地方`，`zenm` -> `怎么`，`weishenm` -> `为什么`，`zenmy` -> `怎么样`）
-    if depth >= 1 && accum_fuzzy == 0.0 && effective_pos < n {
+    // 注意：若 `input[origin_start..n]` 本身已是单个合法完整音节（如 `qun`、`fan`、`zhuang`），绝不能将其韵尾（如 `qun` 中的 `n`）拆成第 2 个半音节去补全出「去年」等双字词！
+    let whole_slice_lower = input[origin_start..n].to_ascii_lowercase();
+    let whole_slice_is_single_syl = crate::pinyin::is_valid_syllable(&whole_slice_lower);
+    if depth >= 1 && accum_fuzzy == 0.0 && effective_pos < n && !whole_slice_is_single_syl {
         let rem_tail = &input[effective_pos..n];
         if rem_tail.len() <= 5 && rem_tail.bytes().all(|b| b.is_ascii_lowercase()) {
             let tail_is_valid_syl = crate::pinyin::is_valid_syllable(rem_tail);
             let whole_slice_is_en = !lexicon
                 .english_trie
-                .exact_lookup(&input[origin_start..n].to_ascii_lowercase())
+                .exact_lookup(&whole_slice_lower)
                 .is_empty();
             let inc_penalty = if whole_slice_is_en {
                 2.8
@@ -530,8 +533,10 @@ fn collect_chinese_edges<'a>(
             } else {
                 1.55
             };
-            // 句尾已是完整音节（如 `shima` 的 `ma`、`api` 的 `pi`）时，仅保留比精确匹配词更常用的补全词
-            // （如 `zhonggu` -> 中国 强于 中古），避免把「是吗」扩展出「时髦 / 是毛」之类的噪音
+            // 句尾已是完整音节（如 `zhongli` 的 `li`、`shima` 的 `ma`、`api` 的 `pi`）时：
+            // 1) 若该完整音节本身已能与前文构成常用词（`exact_best_cost < 10.2`，如 `zhongli` -> 中立/重力、`shima` -> 是吗），
+            //    绝不再将其当作“未输完的半截音节”去扩展出 `zhong'liang`（重量）、`zhong'liu`（肿瘤）等跨音节干扰项；
+            // 2) 仅当原样完整音节无常用词（如 `zhonggu` 仅有低频词「中古」）且补全音节最多只多 1 个尾字母（如 `gu` -> `guo` 补全「中国」）时才允许补全。
             let exact_best_cost = if tail_is_valid_syl {
                 lexicon
                     .syllable_trie
@@ -541,22 +546,39 @@ fn collect_chinese_edges<'a>(
             } else {
                 None
             };
-            for id in collect_syllable_prefix_entries(lexicon, base_node, rem_tail, false, 8) {
-                if exact_best_cost.is_some_and(|best| lexicon.entries[id as usize].cost >= best) {
-                    continue;
+            let allow_tail_completion = if !tail_is_valid_syl {
+                true
+            } else {
+                exact_best_cost.is_none_or(|best| best >= 10.2)
+            };
+            if allow_tail_completion {
+                for id in collect_syllable_prefix_entries(lexicon, base_node, rem_tail, false, 8) {
+                    let entry = &lexicon.entries[id as usize];
+                    if tail_is_valid_syl {
+                        let last_syl_len = entry
+                            .pinyin_syllables
+                            .last()
+                            .map(|s| s.len())
+                            .unwrap_or(0);
+                        if last_syl_len > rem_tail.len() + 1 {
+                            continue;
+                        }
+                        if exact_best_cost.is_some_and(|best| entry.cost + 0.8 >= best) {
+                            continue;
+                        }
+                    }
+                    out_edges.push(LatticeEdge {
+                        start: origin_start,
+                        end: n,
+                        text: entry.text.clone(),
+                        code_key: entry.syllable_key.clone(),
+                        kind: EdgeKind::ChineseWord,
+                        base_cost: entry.cost + inc_penalty,
+                        domain: entry.domain,
+                        syllable_count: syl_count,
+                        is_fuzzy: false,
+                    });
                 }
-                let entry = &lexicon.entries[id as usize];
-                out_edges.push(LatticeEdge {
-                    start: origin_start,
-                    end: n,
-                    text: entry.text.clone(),
-                    code_key: entry.syllable_key.clone(),
-                    kind: EdgeKind::ChineseWord,
-                    base_cost: entry.cost + inc_penalty,
-                    domain: entry.domain,
-                    syllable_count: syl_count,
-                    is_fuzzy: false,
-                });
             }
             if rem_tail.len() == 2 && !tail_is_valid_syl && !whole_slice_is_en && syl_count + 1 <= 6 {
                 for id in collect_two_initial_tail_entries(

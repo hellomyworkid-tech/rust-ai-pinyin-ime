@@ -5,7 +5,10 @@ pub mod lattice;
 pub mod pinyin;
 pub mod user_dict;
 
-pub use decoder::{AppScene, BilingualDecoder, Candidate, DecoderConfig, SegmentSpan};
+pub use decoder::{
+    is_classifier_phrase, is_countable_single_noun, is_ungrammatical_after_classifier, AppScene,
+    BilingualDecoder, Candidate, DecoderConfig, SegmentSpan,
+};
 pub use lattice::{BilingualLattice, EdgeKind, LatticeEdge};
 pub use pinyin::{FuzzyPinyinConfig, PhonotacticDetector, ShuangpinScheme};
 pub use user_dict::UserDict;
@@ -159,6 +162,17 @@ impl ImeCoreEngine {
         start_pos: usize,
         preferred_end: usize,
     ) -> Vec<Candidate> {
+        self.query_segment_alternatives_with_prev(input, start_pos, preferred_end, None)
+    }
+
+    /// 查询长句中指定起始字节位置 `start_pos` 的所有可选替换词，并结合前序已锁定/已解码词 `prev_word` 进行二元语法与构词搭配消歧
+    pub fn query_segment_alternatives_with_prev(
+        &self,
+        input: &str,
+        start_pos: usize,
+        preferred_end: usize,
+        prev_word: Option<&str>,
+    ) -> Vec<Candidate> {
         if start_pos >= input.len() {
             return Vec::new();
         }
@@ -210,8 +224,19 @@ impl ImeCoreEngine {
         });
         let rank_cost = |e: &LatticeEdge| -> f32 {
             let raw = &input[e.start..e.end.min(n)];
-            e.base_cost - self.user_dict.user_boost(raw, &e.text).min(6.0)
+            let ctx_bonus = if let Some(pw) = prev_word {
+                self.lexicon.bigram_bonus(pw, &e.text)
+                    + self.user_dict.bigram_boost(pw, &e.text)
+                    + crate::decoder::word_pair_collocation_bonus(pw, e)
+            } else {
+                0.0
+            };
+            e.base_cost - self.user_dict.user_boost(raw, &e.text).min(6.0) - ctx_bonus
                 + if e.is_fuzzy { 1.5 } else { 0.0 }
+        };
+        let is_incomplete_tail = |e: &LatticeEdge| -> bool {
+            e.kind == EdgeKind::ChineseWord
+                && e.code_key.bytes().filter(|&b| b != b'\'').count() > e.end.saturating_sub(e.start)
         };
         let mut multi_syl_words: Vec<LatticeEdge> = edges
             .iter()
@@ -243,6 +268,7 @@ impl ImeCoreEngine {
         multi_syl_words.sort_by(|a, b| {
             a.is_fuzzy
                 .cmp(&b.is_fuzzy)
+                .then_with(|| is_incomplete_tail(a).cmp(&is_incomplete_tail(b)))
                 .then_with(|| b.syllable_count.cmp(&a.syllable_count))
                 .then_with(|| b.end.cmp(&a.end))
                 .then_with(|| {
@@ -299,24 +325,37 @@ impl ImeCoreEngine {
         let mut ordered_edges = Vec::new();
         let mut full_span_taken = 0usize;
         let mut prefix_word_taken = 0usize;
+        let mut deferred_full_span = Vec::new();
         // 1) 精确匹配的多字词组排在单字之前：
-        //    - 若词组覆盖到整句末尾 (`e.end >= n`，如双音节 `zaijia` 下的「在家」「再加」)，最多先取 2 个，
-        //      保证第 1 页立刻展示当前音节的常用单字（如「在」「再」「载」），方便用户直接选前面的字；
+        //    - 若词组覆盖到整句末尾 (`e.end >= n`，如 `fan |zhong li` 下的「重力」「中立」「钟离」，或 `|zai jia` 下的「在家」「再加」「宅家」)，
+        //      首屏先取前 3 个，紧接着穿插前 2 个最高频单字（保证第 1 页同时有词组与常用单字），随后立即补齐其余同音多字词；
         //    - 若词组是长句中的局部前缀词 (`e.end < n`，如 `nizaifansipaichayixia` 下的「你在」「你再」「拟在」)，最多取 12 个。
         for e in multi_syl_words.iter().filter(|e| !e.is_fuzzy) {
             if e.end >= n {
-                if full_span_taken < 2 {
+                if full_span_taken < 3 {
                     ordered_edges.push(e.clone());
                     full_span_taken += 1;
+                } else if deferred_full_span.len() < 10 {
+                    deferred_full_span.push(e.clone());
                 }
             } else if prefix_word_taken < 12 {
                 ordered_edges.push(e.clone());
                 prefix_word_taken += 1;
             }
         }
-        // 2) 当前音节精确匹配的同音单字
+        // 2) 当前音节精确匹配的同音单字（在穿插前 2 个常用单字后立即补回延后的同音多字词，避免被几十个生僻单字挤到十几页之后）
+        let mut char_taken = 0usize;
+        let mut deferred_flushed = false;
         for e in exact_syl_edges.iter().filter(|e| !e.is_fuzzy) {
+            if !deferred_flushed && char_taken >= 2 {
+                deferred_flushed = true;
+                ordered_edges.extend(deferred_full_span.drain(..));
+            }
             ordered_edges.push(e.clone());
+            char_taken += 1;
+        }
+        if !deferred_flushed {
+            ordered_edges.extend(deferred_full_span.drain(..));
         }
         // 3) 其余生僻多字词与模糊音候选兜底
         for e in multi_syl_words {
@@ -787,6 +826,125 @@ mod tests {
         println!("shibieba top5 = {:?}", sb_top5);
         assert_eq!(sb_top5[0], "识别吧");
         assert_eq!(sb_top5[1], "识别");
+
+        // 构词前缀 + 词根搭配测试（fanzhongli -> 反重力；锁定「反」后 zhongli 首选「重力」且包含「中立」，绝不被「重量/肿瘤」跨音节劫持）
+        let fzl_out = engine.decode("fanzhongli", AppScene::General, "");
+        let fzl_top5: Vec<String> = fzl_out
+            .candidates
+            .iter()
+            .take(5)
+            .map(|c| c.text.clone())
+            .collect();
+        println!("fanzhongli top5 = {:?}", fzl_top5);
+        assert_eq!(fzl_top5[0], "反重力");
+
+        let mut pins = HashMap::new();
+        pins.insert(0usize, (3usize, "反".to_string()));
+        let fzl_pinned = engine.decode_with_pins("fanzhongli", AppScene::General, "", &pins);
+        assert_eq!(fzl_pinned.candidates[0].text, "反重力");
+        let zl_alts = engine.query_segment_alternatives_with_prev("fanzhongli", 3, 8, Some("反"));
+        let zl_top5: Vec<String> = zl_alts.iter().take(5).map(|c| c.text.clone()).collect();
+        println!("fan |zhong li top5 = {:?}", zl_top5);
+        assert_eq!(zl_top5[0], "重力");
+        assert!(zl_top5.contains(&"中立".to_string()));
+        assert!(!zl_top5.contains(&"重量".to_string()));
+        assert!(!zl_top5.contains(&"肿瘤".to_string()));
+
+        // 量词短语 + 可数名词语法搭配测试（zhegeci -> 这个词，绝不输出「这个此」）
+        let zgc_out = engine.decode("zhegeci", AppScene::General, "");
+        let zgc_top5: Vec<String> = zgc_out
+            .candidates
+            .iter()
+            .take(5)
+            .map(|c| c.text.clone())
+            .collect();
+        println!("zhegeci top5 = {:?}", zgc_top5);
+        assert_eq!(zgc_top5[0], "这个词");
+        assert_eq!(engine.decode("nageci", AppScene::General, "").candidates[0].text, "那个词");
+        assert_eq!(engine.decode("yigeci", AppScene::General, "").candidates[0].text, "一个词");
+        assert_eq!(engine.decode("huangeci", AppScene::General, "").candidates[0].text, "换个词");
+        assert_eq!(engine.decode("zhegezi", AppScene::General, "").candidates[0].text, "这个字");
+        assert_eq!(engine.decode("zhegeren", AppScene::General, "").candidates[0].text, "这个人");
+        assert_eq!(engine.decode("zhegeyue", AppScene::General, "").candidates[0].text, "这个月");
+        assert_eq!(engine.decode("zhegequn", AppScene::General, "").candidates[0].text, "这个群");
+        assert_eq!(engine.decode("zhegeti", AppScene::General, "").candidates[0].text, "这个题");
+        assert_eq!(engine.decode("xiayiye", AppScene::General, "").candidates[0].text, "下一页");
+        assert_eq!(engine.decode("zheyihang", AppScene::General, "").candidates[0].text, "这一行");
+        assert_eq!(engine.decode("zheyibu", AppScene::General, "").candidates[0].text, "这一步");
+        assert_eq!(engine.decode("zheyiceng", AppScene::General, "").candidates[0].text, "这一层");
+        assert_eq!(engine.decode("zheyiduan", AppScene::General, "").candidates[0].text, "这一段");
+
+        // 口语疑问习语与「回事 vs 会是」消歧测试（含模拟子词高频记忆污染场景）
+        let zmhs_out = engine.decode("zenmehuishi", AppScene::General, "");
+        let zmhs_top5: Vec<String> = zmhs_out
+            .candidates
+            .iter()
+            .take(5)
+            .map(|c| c.text.clone())
+            .collect();
+        println!("zenmehuishi top5 = {:?}", zmhs_top5);
+        assert_eq!(zmhs_top5[0], "怎么回事");
+        assert!(zmhs_top5.contains(&"怎么会是".to_string()));
+        assert_eq!(
+            engine.decode("daodizenmehuishi", AppScene::General, "").candidates[0].text,
+            "到底怎么回事"
+        );
+        assert_eq!(
+            engine.decode("zheshizenmehuishi", AppScene::General, "").candidates[0].text,
+            "这是怎么回事"
+        );
+        assert_eq!(
+            engine.decode("shizenmehuishi", AppScene::General, "").candidates[0].text,
+            "是怎么回事"
+        );
+        assert_eq!(
+            engine.decode("yihuishi", AppScene::General, "").candidates[0].text,
+            "一回事"
+        );
+        assert_eq!(
+            engine.decode("lianghuishi", AppScene::General, "").candidates[0].text,
+            "两回事"
+        );
+        assert_eq!(
+            engine.decode("danghuishi", AppScene::General, "").candidates[0].text,
+            "当回事"
+        );
+        assert_eq!(
+            engine.decode("zahuishi", AppScene::General, "").candidates[0].text,
+            "咋回事"
+        );
+        assert_eq!(
+            engine.decode("zenmehuishizheyang", AppScene::General, "").candidates[0].text,
+            "怎么会是这样"
+        );
+
+        // 锁定「怎么」后，余下 `huishi` 候选首选必须是「回事」
+        let mut zm_pins = HashMap::new();
+        zm_pins.insert(0usize, (5usize, "怎么".to_string()));
+        let zm_pinned = engine.decode_with_pins("zenmehuishi", AppScene::General, "", &zm_pins);
+        assert_eq!(zm_pinned.candidates[0].text, "怎么回事");
+        let hs_alts = engine.query_segment_alternatives_with_prev("zenmehuishi", 5, 8, Some("怎么"));
+        assert_eq!(hs_alts[0].text, "回事");
+
+        // 极端压力测试：即使个人词库中 `zenme -> 怎么` 和 `huishi -> 会是` 已累积满额词频与二元记忆，
+        // 4 字整词 `zenmehuishi` 依然必须稳居第 1 位「怎么回事」，且绝不丢失候选！
+        let mut polluted_engine = build_test_engine();
+        for _ in 0..10 {
+            polluted_engine.commit_candidate_ex("zenme", "怎么", None, false);
+        }
+        for _ in 0..5 {
+            polluted_engine.commit_candidate_ex("huishi", "会是", Some("怎么"), true);
+        }
+        let polluted_out = polluted_engine.decode("zenmehuishi", AppScene::General, "");
+        let polluted_top5: Vec<String> = polluted_out
+            .candidates
+            .iter()
+            .take(5)
+            .map(|c| c.text.clone())
+            .collect();
+        println!("polluted zenmehuishi top5 = {:?}", polluted_top5);
+        assert_eq!(polluted_top5[0], "怎么回事");
+        assert!(polluted_top5.contains(&"怎么会是".to_string()));
     }
 
     /// 打印常用输入的前 6 个候选（回归抽查用）：`cargo test -p ime-core dump_top_candidates -- --ignored --nocapture`

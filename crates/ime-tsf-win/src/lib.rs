@@ -922,10 +922,27 @@ impl TsfKeySession {
         // 若光标移动到了某个拼音音节上，则候选词列表自动联动为该音节起始的候选词（与主流输入法一致）
         if let Some(syl_idx) = self.active_syllable_index() {
             if let Some(syl_span) = self.last_syllable_spans.get(syl_idx).cloned() {
-                let mut local_cands = self.core.query_segment_alternatives(
+                let prev_word: Option<String> = if syl_span.start > 0 {
+                    self.pinned_segments
+                        .iter()
+                        .filter(|(_, (end, _))| *end <= syl_span.start)
+                        .max_by_key(|(_, (end, _))| *end)
+                        .map(|(_, (_, txt))| txt.clone())
+                        .or_else(|| {
+                            self.last_full_segments
+                                .iter()
+                                .filter(|s| s.end <= syl_span.start)
+                                .max_by_key(|s| s.end)
+                                .map(|s| s.text.clone())
+                        })
+                } else {
+                    None
+                };
+                let mut local_cands = self.core.query_segment_alternatives_with_prev(
                     &self.input_buffer,
                     syl_span.start,
                     syl_span.end,
+                    prev_word.as_deref(),
                 );
                 if !self.pinned_segments.is_empty() {
                     local_cands.retain(|c| {
@@ -1149,18 +1166,9 @@ impl TsfKeySession {
             }
         }
         for seg in &full_segments {
-            let seg_chars = seg.text.chars().count();
-            let is_particle_compound =
-                seg_chars >= 3 && seg.text.ends_with(['的', '了', '着', '过']);
-            if (2..=4).contains(&seg_chars)
-                && !is_particle_compound
-                && seg.start < seg.end
-                && seg.end <= full_code.len()
-            {
+            if seg.start < seg.end && seg.end <= full_code.len() {
                 let seg_code = &full_code[seg.start..seg.end];
                 if seg_code != full_code {
-                    self.core
-                        .commit_candidate_ex(seg_code, &seg.text, None, false);
                     self.ai.invalidate_cache_for_pinyin(seg_code);
                 }
             }
@@ -1294,11 +1302,9 @@ impl TsfKeySession {
             self.core
                 .commit_candidate_ex(&consumed_code, &chosen.text, None, is_explicit);
         }
-        if chosen.segment_spans.len() > 1 {
-            if is_explicit {
-                for pair in chosen.segment_spans.windows(2) {
-                    self.core.learn_bigram(&pair[0].text, &pair[1].text);
-                }
+        if chosen.segment_spans.len() > 1 && is_explicit {
+            for pair in chosen.segment_spans.windows(2) {
+                self.core.learn_bigram(&pair[0].text, &pair[1].text);
             }
             for span in &chosen.segment_spans {
                 let seg_chars = span.text.chars().count();
@@ -2038,6 +2044,32 @@ mod tests {
                 .map(|c| (&c.text, &c.tag))
                 .collect::<Vec<_>>()
         );
+        session.process_key(VirtualKey::Escape);
+
+        // (d) 构词前缀「反」+「重力」与「这个词」会话级分步选词验证：
+        for ch in "fanzhongli".chars() {
+            session.process_key(VirtualKey::Char(ch));
+        }
+        let vm_fzl = session.build_view_model();
+        assert_eq!(vm_fzl.visible_candidates[0].text, "反重力");
+        // 用户主动选定首音节单字「反」，光标自动推进到 `|zhong li`，此时第 1 候选必须为「重力」且包含「中立」
+        let fan_idx = vm_fzl
+            .visible_candidates
+            .iter()
+            .position(|c| c.text == "反")
+            .expect("Expected '反' on first page of fanzhongli");
+        session.process_key(VirtualKey::Digit((fan_idx + 1) as u8));
+        let vm_after_fan = session.build_view_model();
+        assert_eq!(vm_after_fan.visible_candidates[0].text, "重力");
+        assert!(vm_after_fan.visible_candidates.iter().any(|c| c.text == "中立"));
+        session.process_key(VirtualKey::Escape);
+
+        for ch in "zhegeci".chars() {
+            session.process_key(VirtualKey::Char(ch));
+        }
+        let vm_zgc = session.build_view_model();
+        assert_eq!(vm_zgc.visible_candidates[0].text, "这个词");
+        session.process_key(VirtualKey::Escape);
     }
 
     #[test]
