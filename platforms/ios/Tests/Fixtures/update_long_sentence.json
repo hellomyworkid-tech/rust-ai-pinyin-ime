@@ -1,0 +1,1083 @@
+{
+  "action": "update",
+  "view": {
+    "active_scene_label": "通用日常",
+    "active_syllable_index": null,
+    "ai_semantic_hint": "通用语境",
+    "composed_full_sentence": "我想去公园完",
+    "cursor_byte_pos": 20,
+    "full_sentence_parts": [
+      [
+        "我想去公园完",
+        false
+      ]
+    ],
+    "full_sentence_selected": false,
+    "ghost_text_preview": null,
+    "page_index": 0,
+    "page_size": 30,
+    "preedit_text": "wo'xiang'qu'gong'yuan'wan",
+    "selected_candidate_index": 0,
+    "syllable_spans": [
+      {
+        "code_key": "wo",
+        "end": 2,
+        "start": 0,
+        "text": "我"
+      },
+      {
+        "code_key": "xiang",
+        "end": 7,
+        "start": 2,
+        "text": "想"
+      },
+      {
+        "code_key": "qu",
+        "end": 9,
+        "start": 7,
+        "text": "去"
+      },
+      {
+        "code_key": "gong",
+        "end": 13,
+        "start": 9,
+        "text": "公"
+      },
+      {
+        "code_key": "yuan",
+        "end": 17,
+        "start": 13,
+        "text": "园"
+      },
+      {
+        "code_key": "wan",
+        "end": 20,
+        "start": 17,
+        "text": "完"
+      }
+    ],
+    "top_segments": [
+      {
+        "code_key": "wo'xiang'qu",
+        "end": 9,
+        "start": 0,
+        "text": "我想去"
+      },
+      {
+        "code_key": "gong'yuan",
+        "end": 17,
+        "start": 9,
+        "text": "公园"
+      },
+      {
+        "code_key": "wan",
+        "end": 20,
+        "start": 17,
+        "text": "完"
+      }
+    ],
+    "total_candidates": 35,
+    "visible": true,
+    "visible_candidates": [
+      {
+        "ai_boosted": false,
+        "consumed_len": 20,
+        "final_score": 67.66596221923828,
+        "l1_cost": 32.33403778076172,
+        "preedit": "wo'xiang'qu gong'yuan wan",
+        "segment_spans": [
+          {
+            "code_key": "wo'xiang'qu",
+            "end": 9,
+            "start": 0,
+            "text": "我想去"
+          },
+          {
+            "code_key": "gong'yuan",
+            "end": 17,
+            "start": 9,
+            "text": "公园"
+          },
+          {
+            "code_key": "wan",
+            "end": 20,
+            "start": 17,
+            "text": "完"
+          }
+        ],
+        "segments": [
+          "我想去",
+          "公园",
+          "完"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xiang",
+            "end": 7,
+            "start": 2,
+            "text": "想"
+          },
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "去"
+          },
+          {
+            "code_key": "gong",
+            "end": 13,
+            "start": 9,
+            "text": "公"
+          },
+          {
+            "code_key": "yuan",
+            "end": 17,
+            "start": 13,
+            "text": "园"
+          },
+          {
+            "code_key": "wan",
+            "end": 20,
+            "start": 17,
+            "text": "完"
+          }
+        ],
+        "tag": "[整句]",
+        "text": "我想去公园完"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 17,
+        "final_score": 66.66596221923828,
+        "l1_cost": 32.634037017822266,
+        "preedit": "wo'xiang'qu'gong'yuan",
+        "segment_spans": [
+          {
+            "code_key": "wo'xiang'qu",
+            "end": 9,
+            "start": 0,
+            "text": "我想去"
+          },
+          {
+            "code_key": "gong'yuan",
+            "end": 17,
+            "start": 9,
+            "text": "公园"
+          }
+        ],
+        "segments": [
+          "我想去",
+          "公园"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xiang",
+            "end": 7,
+            "start": 2,
+            "text": "想"
+          },
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "去"
+          },
+          {
+            "code_key": "gong",
+            "end": 13,
+            "start": 9,
+            "text": "公"
+          },
+          {
+            "code_key": "yuan",
+            "end": 17,
+            "start": 13,
+            "text": "园"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我想去公园"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 9,
+        "final_score": 66.65596008300781,
+        "l1_cost": 32.884037017822266,
+        "preedit": "wo'xiang'qu",
+        "segment_spans": [
+          {
+            "code_key": "wo'xiang'qu",
+            "end": 9,
+            "start": 0,
+            "text": "我想去"
+          }
+        ],
+        "segments": [
+          "我想去"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xiang",
+            "end": 7,
+            "start": 2,
+            "text": "想"
+          },
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "去"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我想去"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 7,
+        "final_score": 66.64596557617188,
+        "l1_cost": 32.93403625488281,
+        "preedit": "wo'xiang",
+        "segment_spans": [
+          {
+            "code_key": "wo'xiang",
+            "end": 7,
+            "start": 0,
+            "text": "我想"
+          }
+        ],
+        "segments": [
+          "我想"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xiang",
+            "end": 7,
+            "start": 2,
+            "text": "想"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我想"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 7,
+        "final_score": 66.6359634399414,
+        "l1_cost": 32.984039306640625,
+        "preedit": "wo'xiang",
+        "segment_spans": [
+          {
+            "code_key": "wo'xiang",
+            "end": 7,
+            "start": 0,
+            "text": "我向"
+          }
+        ],
+        "segments": [
+          "我向"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xiang",
+            "end": 7,
+            "start": 2,
+            "text": "向"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我向"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 7,
+        "final_score": 66.62596130371094,
+        "l1_cost": 33.03403854370117,
+        "preedit": "wo'xiang",
+        "segment_spans": [
+          {
+            "code_key": "wo'xiang",
+            "end": 7,
+            "start": 0,
+            "text": "我像"
+          }
+        ],
+        "segments": [
+          "我像"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xiang",
+            "end": 7,
+            "start": 2,
+            "text": "像"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我像"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 7,
+        "final_score": 66.61595916748047,
+        "l1_cost": 33.08403778076172,
+        "preedit": "wo'xiang",
+        "segment_spans": [
+          {
+            "code_key": "wo'xiang",
+            "end": 7,
+            "start": 0,
+            "text": "我乡"
+          }
+        ],
+        "segments": [
+          "我乡"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xiang",
+            "end": 7,
+            "start": 2,
+            "text": "乡"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我乡"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 66.60596466064453,
+        "l1_cost": 33.134037017822266,
+        "preedit": "wo'xian",
+        "segment_spans": [
+          {
+            "code_key": "wo'xian",
+            "end": 6,
+            "start": 0,
+            "text": "我先"
+          }
+        ],
+        "segments": [
+          "我先"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xian",
+            "end": 6,
+            "start": 2,
+            "text": "先"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我先"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 66.59596252441406,
+        "l1_cost": 33.18403625488281,
+        "preedit": "wo'xian",
+        "segment_spans": [
+          {
+            "code_key": "wo'xian",
+            "end": 6,
+            "start": 0,
+            "text": "我县"
+          }
+        ],
+        "segments": [
+          "我县"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xian",
+            "end": 6,
+            "start": 2,
+            "text": "县"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我县"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 66.5859603881836,
+        "l1_cost": 33.234039306640625,
+        "preedit": "wo'xia",
+        "segment_spans": [
+          {
+            "code_key": "wo'xia",
+            "end": 5,
+            "start": 0,
+            "text": "我下"
+          }
+        ],
+        "segments": [
+          "我下"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xia",
+            "end": 5,
+            "start": 2,
+            "text": "下"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我下"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 66.57596588134766,
+        "l1_cost": 33.28403854370117,
+        "preedit": "wo'xia",
+        "segment_spans": [
+          {
+            "code_key": "wo'xia",
+            "end": 5,
+            "start": 0,
+            "text": "卧下"
+          }
+        ],
+        "segments": [
+          "卧下"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "卧"
+          },
+          {
+            "code_key": "xia",
+            "end": 5,
+            "start": 2,
+            "text": "下"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "卧下"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 66.56596374511719,
+        "l1_cost": 33.33403778076172,
+        "preedit": "wo'xia",
+        "segment_spans": [
+          {
+            "code_key": "wo'xia",
+            "end": 5,
+            "start": 0,
+            "text": "握下"
+          }
+        ],
+        "segments": [
+          "握下"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "握"
+          },
+          {
+            "code_key": "xia",
+            "end": 5,
+            "start": 2,
+            "text": "下"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "握下"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 4,
+        "final_score": 66.55596160888672,
+        "l1_cost": 33.384037017822266,
+        "preedit": "wo'xi",
+        "segment_spans": [
+          {
+            "code_key": "wo'xi",
+            "end": 4,
+            "start": 0,
+            "text": "我系"
+          }
+        ],
+        "segments": [
+          "我系"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xi",
+            "end": 4,
+            "start": 2,
+            "text": "系"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我系"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 4,
+        "final_score": 66.54595947265625,
+        "l1_cost": 33.43403625488281,
+        "preedit": "wo'xi",
+        "segment_spans": [
+          {
+            "code_key": "wo'xi",
+            "end": 4,
+            "start": 0,
+            "text": "我洗"
+          }
+        ],
+        "segments": [
+          "我洗"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xi",
+            "end": 4,
+            "start": 2,
+            "text": "洗"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我洗"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 4,
+        "final_score": 66.53596496582031,
+        "l1_cost": 33.484039306640625,
+        "preedit": "wo'xi",
+        "segment_spans": [
+          {
+            "code_key": "wo'xi",
+            "end": 4,
+            "start": 0,
+            "text": "我喜"
+          }
+        ],
+        "segments": [
+          "我喜"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          },
+          {
+            "code_key": "xi",
+            "end": 4,
+            "start": 2,
+            "text": "喜"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我喜"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.52596282958984,
+        "l1_cost": 33.53403854370117,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          }
+        ],
+        "segments": [
+          "我"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "我"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "我"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.51596069335938,
+        "l1_cost": 33.58403778076172,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "握"
+          }
+        ],
+        "segments": [
+          "握"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "握"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "握"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.5059585571289,
+        "l1_cost": 33.634037017822266,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "窝"
+          }
+        ],
+        "segments": [
+          "窝"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "窝"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "窝"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.49596405029297,
+        "l1_cost": 33.68403625488281,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "卧"
+          }
+        ],
+        "segments": [
+          "卧"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "卧"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "卧"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.4859619140625,
+        "l1_cost": 33.734039306640625,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "沃"
+          }
+        ],
+        "segments": [
+          "沃"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "沃"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "沃"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.47595977783203,
+        "l1_cost": 33.78403854370117,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "喔"
+          }
+        ],
+        "segments": [
+          "喔"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "喔"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "喔"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.4659652709961,
+        "l1_cost": 33.83403778076172,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "倭"
+          }
+        ],
+        "segments": [
+          "倭"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "倭"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "倭"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.45596313476562,
+        "l1_cost": 33.884037017822266,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "涡"
+          }
+        ],
+        "segments": [
+          "涡"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "涡"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "涡"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.44596099853516,
+        "l1_cost": 33.93403625488281,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "龌"
+          }
+        ],
+        "segments": [
+          "龌"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "龌"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "龌"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.43595886230469,
+        "l1_cost": 33.984039306640625,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "蜗"
+          }
+        ],
+        "segments": [
+          "蜗"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "蜗"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "蜗"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.42596435546875,
+        "l1_cost": 34.03403854370117,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "渥"
+          }
+        ],
+        "segments": [
+          "渥"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "渥"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "渥"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.41596221923828,
+        "l1_cost": 34.08403778076172,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "斡"
+          }
+        ],
+        "segments": [
+          "斡"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "斡"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "斡"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.40596008300781,
+        "l1_cost": 34.134037017822266,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "幄"
+          }
+        ],
+        "segments": [
+          "幄"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "幄"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "幄"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.39596557617188,
+        "l1_cost": 34.18403625488281,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "挝"
+          }
+        ],
+        "segments": [
+          "挝"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "挝"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "挝"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 66.3859634399414,
+        "l1_cost": 34.234039306640625,
+        "preedit": "wo",
+        "segment_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "莴"
+          }
+        ],
+        "segments": [
+          "莴"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "wo",
+            "end": 2,
+            "start": 0,
+            "text": "莴"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "莴"
+      }
+    ]
+  }
+}

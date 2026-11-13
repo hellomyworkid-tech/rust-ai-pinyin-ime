@@ -1,0 +1,25 @@
+[package]
+name = "ime-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ime-session 的 C ABI 封装，供非 Rust 宿主使用（iOS 键盘扩展）"
+
+[lib]
+# staticlib 给 Xcode 链接；rlib 给本仓库里的测试和工具用
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = []
+# 把进程内 llama.cpp 打分器编进来（需要 scripts/build_llama.sh 先产出静态库）。
+# 不启用时接口不变，ime_engine_load_llm 返回「不支持」
+llama = ["ime-llm/llama"]
+
+[dependencies]
+ime-lexicon = { path = "../ime-lexicon" }
+ime-core = { path = "../ime-core" }
+ime-ai = { path = "../ime-ai" }
+ime-llm = { path = "../ime-llm" }
+ime-session = { path = "../ime-session" }
+serde.workspace = true
+serde_json.workspace = true

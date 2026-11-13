@@ -1,5 +1,6 @@
 # Rust 构建产物
 /target/
+/tools/*/target/
 **/*.rs.bk
 *.pdb
 
@@ -12,6 +13,9 @@
 /*.exe
 /*.dll
 /*.zip
+
+# 第三方源码与构建产物（llama.cpp 静态库由 scripts/build_llama.sh 生成）
+/third_party/
 
 # 体积较大的词库：原始词表由 scripts/sync_open_lexicons.ps1 下载，二进制词库由 lexicon-builder 生成
 /data/raw/

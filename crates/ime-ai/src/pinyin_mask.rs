@@ -26,13 +26,15 @@ impl PinyinLogitsMask {
     pub fn from_lexicon(lexicon: &CompiledLexicon) -> Self {
         let mut map: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
-        for entry in &lexicon.entries {
-            let list = map.entry(entry.text.clone()).or_default();
-            if !list.contains(&entry.flat_key) {
-                list.push(entry.flat_key.clone());
+        for entry in lexicon.entries() {
+            let list = map.entry(entry.text().to_string()).or_default();
+            let flat_key = entry.flat_key();
+            if !list.iter().any(|k| k.as_str() == flat_key) {
+                list.push(flat_key.into_owned());
             }
-            if !entry.abbrev_key.is_empty() && !list.contains(&entry.abbrev_key) {
-                list.push(entry.abbrev_key.clone());
+            let abbrev_key = entry.abbrev_key();
+            if !abbrev_key.is_empty() && !list.contains(&abbrev_key) {
+                list.push(abbrev_key);
             }
         }
 

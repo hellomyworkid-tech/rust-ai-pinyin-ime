@@ -12,6 +12,7 @@
 //!    在 Windows 下直接调用系统级 `WinHTTP` TLS 1.3 栈访问云端 HTTPS API，无需额外部署代理。
 
 use ime_core::{AppScene, Candidate};
+use crate::lm_text::{normalize_for_lm_scoring, LM_SCORE_CONTEXT_TAIL_CHARS, LM_SCORE_PROMPT_PREFIX};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -554,7 +555,7 @@ impl OpenAiCompatibleClient {
         let budget = Duration::from_millis(timeout_ms.clamp(400, 4000));
         let ctx_tail: String = {
             let chars: Vec<char> = surrounding_context.trim().chars().collect();
-            let start = chars.len().saturating_sub(48);
+            let start = chars.len().saturating_sub(LM_SCORE_CONTEXT_TAIL_CHARS);
             chars[start..].iter().collect()
         };
         let prefix_text = format!("{LM_SCORE_PROMPT_PREFIX}{ctx_tail}");
@@ -862,18 +863,8 @@ impl OpenAiCompatibleClient {
     }
 }
 
-/// 语言模型似然打分时置于上文之前的引导语（让模型处于「书写规范中文」的分布中）
-const LM_SCORE_PROMPT_PREFIX: &str = "下面是一句通顺自然、没有错别字的中文：";
-
-/// 打分前的文本规范化：中英混输候选（如 `AI 选词`）去掉显示用空格，使其与自然书写形式 `AI选词` 一致
-fn normalize_for_lm_scoring(text: &str) -> String {
-    let has_cjk = text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
-    if has_cjk {
-        text.chars().filter(|c| *c != ' ').collect()
-    } else {
-        text.to_string()
-    }
-}
+// 打分引导语 `LM_SCORE_PROMPT_PREFIX`、上文截取长度与 `normalize_for_lm_scoring` 定义在 `crate::lm_text`，
+// 与进程内打分器（iOS 键盘使用）共用同一份，保证两条路径构造的打分文本完全一致。
 
 /// 根据各候选对数似然（索引 0 为 L1 首选）决定最终首选：
 /// 只有当最佳候选比 L1 首选的概率高出足够倍数时才替换，避免模型在两可情况下来回抖动。

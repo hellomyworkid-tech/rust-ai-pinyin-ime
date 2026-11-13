@@ -644,31 +644,32 @@ impl BilingualDecoder {
         if let Some(syl_end) = first_syl_end {
             if syl_end > unpinned_start && syl_end <= n {
                 let lower_syl = lattice.input[unpinned_start..syl_end].to_ascii_lowercase();
-                let exact = lexicon.syllable_trie.exact_lookup(&lower_syl);
+                let exact = lexicon.syllable_trie().exact_lookup(&lower_syl);
                 let (lookup_ids, is_abbrev_initial) = if exact.is_empty() && lower_syl.len() == 1 {
-                    (lexicon.abbrev_trie.exact_lookup(&lower_syl), true)
+                    (lexicon.abbrev_trie().exact_lookup(&lower_syl), true)
                 } else {
                     (exact, false)
                 };
-                for &id in lookup_ids {
-                    let entry = &lexicon.entries[id as usize];
-                    if entry.pinyin_syllables.len() == 1
+                for id in lookup_ids {
+                    let entry = lexicon.entry(id);
+                    let entry_text = entry.text();
+                    if entry.syllable_count() == 1
                         && !prefix_edges
                             .iter()
-                            .any(|e| e.end == syl_end && e.text == entry.text)
+                            .any(|e| e.end == syl_end && e.text == entry_text)
                     {
                         extra_char_edges.push(LatticeEdge {
                             start: unpinned_start,
                             end: syl_end,
-                            text: entry.text.clone(),
+                            text: entry_text.to_string(),
                             code_key: if is_abbrev_initial {
                                 lower_syl.clone()
                             } else {
-                                entry.syllable_key.clone()
+                                entry.syllable_key().to_string()
                             },
                             kind: EdgeKind::ChineseChar,
-                            base_cost: entry.cost,
-                            domain: entry.domain,
+                            base_cost: entry.cost(),
+                            domain: entry.domain(),
                             syllable_count: 1,
                             is_fuzzy: false,
                         });
@@ -1183,11 +1184,11 @@ impl BilingualDecoder {
         // 且第一候选为中文，则强制将该英文词提升至至多第 2 候选位（下标 1）
         if config.golden_second_slot_english && (3..=10).contains(&n) && candidates.len() >= 2 {
             let lower_key = lattice.input.to_ascii_lowercase();
-            let eng_ids = lexicon.english_trie.exact_lookup(&lower_key);
-            if let Some(&top_eng_id) = eng_ids.first() {
-                let eng_word = &lexicon.entries[top_eng_id as usize].text;
-                if candidates[0].text != *eng_word {
-                    if let Some(pos) = candidates.iter().position(|c| c.text == *eng_word) {
+            let eng_ids = lexicon.english_trie().exact_lookup(&lower_key);
+            if let Some(top_eng_id) = eng_ids.first() {
+                let eng_word = lexicon.entry(top_eng_id).text();
+                if candidates[0].text != eng_word {
+                    if let Some(pos) = candidates.iter().position(|c| c.text == eng_word) {
                         if pos > 1 {
                             let top_score = candidates[0].final_score;
                             let mut item = candidates.remove(pos);

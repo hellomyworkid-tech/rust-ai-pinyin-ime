@@ -1,0 +1,8 @@
+# XcodeGen 生成物与构建产物
+*.xcodeproj
+Generated/
+build/
+# 由脚本生成或下载的大文件
+Frameworks/
+Resources/merged_lexicon.bin
+Resources/fallback_lexicon.bin

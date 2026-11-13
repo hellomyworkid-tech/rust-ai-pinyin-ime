@@ -1,0 +1,22 @@
+{
+  "action": "update",
+  "view": {
+    "active_scene_label": "",
+    "active_syllable_index": null,
+    "ai_semantic_hint": "",
+    "composed_full_sentence": "",
+    "cursor_byte_pos": 0,
+    "full_sentence_parts": [],
+    "full_sentence_selected": false,
+    "ghost_text_preview": null,
+    "page_index": 0,
+    "page_size": 0,
+    "preedit_text": "",
+    "selected_candidate_index": 0,
+    "syllable_spans": [],
+    "top_segments": [],
+    "total_candidates": 0,
+    "visible": false,
+    "visible_candidates": []
+  }
+}

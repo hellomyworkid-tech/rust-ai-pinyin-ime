@@ -1,0 +1,4 @@
+module ImeFFI {
+    header "ime_ffi.h"
+    export *
+}

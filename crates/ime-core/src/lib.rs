@@ -11,11 +11,99 @@ pub use decoder::{
 };
 pub use lattice::{BilingualLattice, EdgeKind, LatticeEdge};
 pub use pinyin::{FuzzyPinyinConfig, PhonotacticDetector, ShuangpinScheme};
-pub use user_dict::UserDict;
+pub use user_dict::{FileStamp, UserDict};
 
 use ime_lexicon::CompiledLexicon;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// 交给个人词库写盘线程的消息
+enum PersistMessage {
+    /// 一份待写的词库快照。积压多份时只写最新的一份
+    Save(UserDict),
+    /// 在它之前排队的快照都处理完之后回一声
+    Sync(mpsc::Sender<()>),
+}
+
+/// 个人词库的持久化状态（见 [`ImeCoreEngine::enable_persistence`]）
+struct UserDictPersistence {
+    path: PathBuf,
+    tx: mpsc::Sender<PersistMessage>,
+    /// 本引擎上次读入或写出的那份词库文件的修改时间与长度（`None` = 当时文件不存在）。
+    /// 写盘线程每写成功一次就更新；与文件现状不一致说明别的进程改过它
+    stamp: Arc<Mutex<Option<FileStamp>>>,
+    /// 内存里的词库有还没交给写盘线程的改动
+    dirty: bool,
+}
+
+impl UserDictPersistence {
+    /// 等写盘线程处理完已经排队的快照（最多等 `timeout`）。线程已经退出时立刻返回
+    fn wait_for_writer(&self, timeout: Duration) {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if self.tx.send(PersistMessage::Sync(ack_tx)).is_ok() {
+            let _ = ack_rx.recv_timeout(timeout);
+        }
+    }
+
+    fn known_stamp(&self) -> Option<FileStamp> {
+        *self.stamp.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_known_stamp(&self, stamp: Option<FileStamp>) {
+        *self.stamp.lock().unwrap_or_else(|e| e.into_inner()) = stamp;
+    }
+}
+
+/// 写盘线程的主循环：合并积压的快照只写最新的一份；失败只报告一次，直到下一次写成功
+fn run_user_dict_writer(
+    path: PathBuf,
+    rx: mpsc::Receiver<PersistMessage>,
+    stamp: Arc<Mutex<Option<FileStamp>>>,
+) {
+    // 以前写到一半被杀掉的进程留下的临时文件（留 10 分钟余量，不碰别的进程正在写的）
+    user_dict::remove_stale_tmp_files(&path, Duration::from_secs(600));
+    let mut failure_reported = false;
+    while let Ok(first) = rx.recv() {
+        let mut latest: Option<UserDict> = None;
+        let mut waiters: Vec<mpsc::Sender<()>> = Vec::new();
+        let mut next = Some(first);
+        while let Some(message) = next {
+            match message {
+                PersistMessage::Save(snapshot) => latest = Some(snapshot),
+                PersistMessage::Sync(ack) => waiters.push(ack),
+            }
+            next = rx.try_recv().ok();
+        }
+        if let Some(snapshot) = latest {
+            let written = snapshot
+                .to_json_bytes()
+                .and_then(|json| user_dict::write_file_atomically(&path, &json));
+            match written {
+                Ok(written) => {
+                    *stamp.lock().unwrap_or_else(|e| e.into_inner()) = Some(written);
+                    failure_reported = false;
+                }
+                Err(error) => {
+                    if !failure_reported {
+                        failure_reported = true;
+                        use std::io::Write;
+                        // 不用 eprintln!：标准错误不可写时它会 panic，写盘线程就没了
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[ime-core] 个人词库写入失败（{}）：{error}。之后每次上屏仍会重试，写成功之前不再重复报告",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+        for ack in waiters {
+            let _ = ack.send(());
+        }
+    }
+}
 
 /// 单次解码的完整诊断与结果输出
 #[derive(Debug, Clone)]
@@ -33,8 +121,8 @@ pub struct ImeCoreEngine {
     pub fuzzy_config: FuzzyPinyinConfig,
     pub shuangpin: ShuangpinScheme,
     pub decoder_config: DecoderConfig,
-    /// 个人词库后台写盘通道（`None` 表示不持久化，单元测试与体验台默认如此）
-    persist_tx: Option<std::sync::mpsc::Sender<UserDict>>,
+    /// 个人词库的持久化状态（`None` 表示不持久化，单元测试与体验台默认如此）
+    persistence: Option<UserDictPersistence>,
     /// 最近一次输入串对应的晶格图缓存（避免 `decode_with_pins` 与 `query_segment_alternatives` 及左右移动光标时重复构图）
     lattice_cache: std::sync::Mutex<Option<(String, u32, BilingualLattice)>>,
 }
@@ -48,7 +136,7 @@ impl ImeCoreEngine {
             fuzzy_config: FuzzyPinyinConfig::default(),
             shuangpin: ShuangpinScheme::None,
             decoder_config: DecoderConfig::default(),
-            persist_tx: None,
+            persistence: None,
             lattice_cache: std::sync::Mutex::new(None),
         }
     }
@@ -94,26 +182,92 @@ impl ImeCoreEngine {
     }
 
     /// 启用个人词库持久化：从 `path` 加载已有记忆，并启动后台写盘线程。
-    /// 每次选词只把快照发给后台线程（多次快速提交会自动合并为一次写入），
+    ///
+    /// 学习（`commit_candidate*` / `learn_*`）只在内存里改词库并记下「有改动」；调用
+    /// [`Self::flush_user_dict`] 时才取一份快照交给写盘线程（`KeySession` 在每次输入结束时调用一次，
+    /// 所以一次上屏至多取一份快照；引擎销毁时也会补交一次并等它写完）。写盘线程把积压的快照合并为一次写入。
     /// 键盘钩子线程本身绝不做磁盘 I/O，避免触发 Windows 低级钩子超时被系统摘除。
-    pub fn enable_persistence(&mut self, path: std::path::PathBuf) {
-        self.user_dict = UserDict::load_or_new(&path);
-        let (tx, rx) = std::sync::mpsc::channel::<UserDict>();
-        std::thread::spawn(move || {
-            while let Ok(mut latest) = rx.recv() {
-                // 合并积压的快照，只写最新的一份
-                while let Ok(newer) = rx.try_recv() {
-                    latest = newer;
-                }
-                let _ = latest.save_to_file(&path);
-            }
+    /// 写入失败在标准错误上报告一次（之后每次上屏仍会重试，写成功后再失败才会再次报告）。
+    pub fn enable_persistence(&mut self, path: PathBuf) {
+        // 换路径时，旧路径上还没交出去的改动先交出去
+        self.flush_user_dict();
+        // 先取文件的修改时间与长度再读内容：两步之间文件若被换掉，下次检查会发现不一致并重读，不会漏掉
+        let stamp = FileStamp::probe(&path).ok().flatten();
+        let (dict, cleaned) = match stamp {
+            Some(_) => UserDict::read_from_file(&path).unwrap_or_else(|_| (UserDict::new(), false)),
+            None => (UserDict::new(), false),
+        };
+        self.user_dict = dict;
+        let stamp = Arc::new(Mutex::new(stamp));
+        let (tx, rx) = mpsc::channel::<PersistMessage>();
+        let writer_path = path.clone();
+        let writer_stamp = Arc::clone(&stamp);
+        std::thread::spawn(move || run_user_dict_writer(writer_path, rx, writer_stamp));
+        self.persistence = Some(UserDictPersistence {
+            path,
+            tx,
+            stamp,
+            // 读入时清掉了历史残片：把清理后的结果写回去（经写盘线程，不在调用线程上做 I/O）
+            dirty: cleaned,
         });
-        self.persist_tx = Some(tx);
+        self.flush_user_dict();
     }
 
-    fn schedule_save(&self) {
-        if let Some(tx) = &self.persist_tx {
-            let _ = tx.send(self.user_dict.clone());
+    fn mark_user_dict_dirty(&mut self) {
+        if let Some(persistence) = self.persistence.as_mut() {
+            persistence.dirty = true;
+        }
+    }
+
+    /// 把个人词库自上次以来的改动交给写盘线程：取一份快照（克隆整个词库），由写盘线程序列化并写入文件。
+    /// 没有改动或没有启用持久化时什么也不做。直接使用本引擎学习接口的调用方在一批学习结束后调用它
+    /// （`KeySession` 会在每次输入结束时自动调用）
+    pub fn flush_user_dict(&mut self) {
+        let Some(persistence) = self.persistence.as_mut() else {
+            return;
+        };
+        if !persistence.dirty {
+            return;
+        }
+        persistence.dirty = false;
+        // 快照是整个词库的克隆，序列化留给写盘线程。实测 20,000 条记录的词库克隆一次约 1.8 ms，
+        // 在调用线程上直接序列化反而要约 3 ms
+        let _ = persistence
+            .tx
+            .send(PersistMessage::Save(self.user_dict.clone()));
+    }
+
+    /// 词库文件若被别的进程改过（修改时间或长度与本引擎上次读入 / 写出时不同）就重新读入，
+    /// 返回是否重新读入了；没有启用持久化时返回 `Ok(false)`。读取或解析失败时返回错误，内存里的词库保持不变。
+    ///
+    /// 已经交给写盘线程的快照会先写完再比较（否则它稍后会盖掉刚读入的内容）。
+    /// 文件被删掉（别的进程清空了个人词库）按「变成了空词库」处理。
+    /// 重新读入时，内存里还没交出去的改动（只可能是当前这次输入中途学到的）被丢弃
+    pub fn reload_user_dict_if_changed(&mut self) -> std::io::Result<bool> {
+        let Some(persistence) = self.persistence.as_mut() else {
+            return Ok(false);
+        };
+        persistence.wait_for_writer(Duration::from_secs(2));
+        // 先取修改时间与长度再读内容，理由同 `enable_persistence`
+        let current = FileStamp::probe(&persistence.path)?;
+        if current == persistence.known_stamp() {
+            return Ok(false);
+        }
+        let (dict, cleaned) = match current {
+            Some(_) => UserDict::read_from_file(&persistence.path)?,
+            None => (UserDict::new(), false),
+        };
+        self.user_dict = dict;
+        persistence.set_known_stamp(current);
+        persistence.dirty = cleaned;
+        self.flush_user_dict();
+        Ok(true)
+    }
+
+    /// 等写盘线程把已经交给它的快照写完（最多等 `timeout`）。测试和工具用；正常使用不需要
+    pub fn wait_for_user_dict_writes(&self, timeout: Duration) {
+        if let Some(persistence) = &self.persistence {
+            persistence.wait_for_writer(timeout);
         }
     }
 
@@ -182,29 +336,30 @@ impl ImeCoreEngine {
         let end_clamped = preferred_end.min(input.len()).max(start_pos + 1);
         let raw_slice = &input[start_pos..end_clamped];
         let lower_slice = raw_slice.to_ascii_lowercase();
-        let exact_ids = self.lexicon.syllable_trie.exact_lookup(&lower_slice);
+        let exact_ids = self.lexicon.syllable_trie().exact_lookup(&lower_slice);
         let (lookup_ids, is_abbrev_initial) = if exact_ids.is_empty() && lower_slice.len() == 1 {
-            (self.lexicon.abbrev_trie.exact_lookup(&lower_slice), true)
+            (self.lexicon.abbrev_trie().exact_lookup(&lower_slice), true)
         } else {
             (exact_ids, false)
         };
-        for &id in lookup_ids {
-            let entry = &self.lexicon.entries[id as usize];
-            if entry.pinyin_syllables.len() == 1
-                && !edges.iter().any(|e| e.end == end_clamped && e.text == entry.text)
+        for id in lookup_ids {
+            let entry = self.lexicon.entry(id);
+            let entry_text = entry.text();
+            if entry.syllable_count() == 1
+                && !edges.iter().any(|e| e.end == end_clamped && e.text == entry_text)
             {
                 edges.push(LatticeEdge {
                     start: start_pos,
                     end: end_clamped,
-                    text: entry.text.clone(),
+                    text: entry_text.to_string(),
                     code_key: if is_abbrev_initial {
                         lower_slice.clone()
                     } else {
-                        entry.syllable_key.clone()
+                        entry.syllable_key().to_string()
                     },
                     kind: EdgeKind::ChineseChar,
-                    base_cost: entry.cost,
-                    domain: entry.domain,
+                    base_cost: entry.cost(),
+                    domain: entry.domain(),
                     syllable_count: 1,
                     is_fuzzy: false,
                 });
@@ -476,7 +631,7 @@ impl ImeCoreEngine {
         out
     }
 
-    /// 记录用户最终选词上屏，更新个人动态词频与二元习惯并持久化
+    /// 记录用户最终选词上屏，更新个人动态词频与二元习惯（写盘见 [`Self::flush_user_dict`]）
     pub fn commit_candidate(&mut self, input_code: &str, text: &str, prev_word: Option<&str>) {
         self.commit_candidate_ex(input_code, text, prev_word, true);
     }
@@ -491,13 +646,30 @@ impl ImeCoreEngine {
     ) {
         self.user_dict
             .record_commit_ex(input_code, text, prev_word, is_explicit_override);
-        self.schedule_save();
+        self.mark_user_dict_dirty();
+    }
+
+    /// 记住用户在这段上文下为 `input_code` 主动改选了 `text`（上文相关的纠正记忆，见 `UserDict::record_context_choice`）
+    pub fn learn_context_choice(&mut self, context: &str, input_code: &str, text: &str) {
+        self.user_dict.record_context_choice(context, input_code, text);
+        self.mark_user_dict_dirty();
     }
 
     /// 仅学习「上一个词 -> 本词」的个人搭配习惯（句中单字改选时使用）
     pub fn learn_bigram(&mut self, prev_word: &str, text: &str) {
         self.user_dict.record_bigram(prev_word, text);
-        self.schedule_save();
+        self.mark_user_dict_dirty();
+    }
+}
+
+impl Drop for ImeCoreEngine {
+    /// 销毁前把还没交出去的个人词库改动交给写盘线程，并等它写完（最多 2 秒），
+    /// 这样紧接着打开同一个词库文件的引擎读到的就是最新内容
+    fn drop(&mut self) {
+        if self.persistence.is_some() {
+            self.flush_user_dict();
+            self.wait_for_user_dict_writes(Duration::from_secs(2));
+        }
     }
 }
 
@@ -515,6 +687,154 @@ mod tests {
             .to_path_buf();
         let lexicon = CompiledLexicon::load_or_build_default(root).expect("load seed lexicon");
         ImeCoreEngine::new(lexicon)
+    }
+
+    /// 个人词库持久化测试用的临时目录，结束时删掉
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("ime-core-persist-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const WRITE_WAIT: Duration = Duration::from_secs(5);
+
+    fn persistent_engine(path: &std::path::Path) -> ImeCoreEngine {
+        let mut engine = build_test_engine();
+        engine.enable_persistence(path.to_path_buf());
+        engine
+    }
+
+    #[test]
+    fn test_learning_is_written_at_flush_not_at_every_learn_call() {
+        let dir = TempDir::new("flush");
+        let path = dir.0.join("user_dict.json");
+        let mut engine = persistent_engine(&path);
+
+        // 学习只改内存：不管学了几条，没有 flush 就不取快照、不写盘
+        engine.commit_candidate_ex("shiyan", "誓言", None, true);
+        engine.learn_bigram("我的", "誓言");
+        engine.learn_context_choice("我对天发誓这是我的", "shiyan", "誓言");
+        engine.wait_for_user_dict_writes(WRITE_WAIT);
+        assert!(!path.exists(), "nothing is written before the flush");
+
+        // 一次 flush 把全部改动写出去
+        engine.flush_user_dict();
+        engine.wait_for_user_dict_writes(WRITE_WAIT);
+        let saved = UserDict::load_from_file(&path).expect("saved");
+        assert!(saved.user_boost("shiyan", "誓言") > 0.0);
+        assert!(saved.bigram_boost("我的", "誓言") > 0.0);
+        assert_eq!(saved.context_choice("我对天发誓这是我的", "shiyan"), Some("誓言"));
+
+        // 没有新改动时 flush 不再写：文件的修改时间不变
+        let before = FileStamp::probe(&path).unwrap();
+        engine.flush_user_dict();
+        engine.wait_for_user_dict_writes(WRITE_WAIT);
+        assert_eq!(FileStamp::probe(&path).unwrap(), before);
+
+        // 没来得及 flush 的改动在引擎销毁时写出，并且销毁返回时已经写完
+        engine.commit_candidate_ex("jishu", "级数", None, true);
+        drop(engine);
+        let saved = UserDict::load_from_file(&path).expect("saved");
+        assert!(saved.user_boost("jishu", "级数") > 0.0);
+        assert!(saved.user_boost("shiyan", "誓言") > 0.0);
+    }
+
+    #[test]
+    fn test_reload_picks_up_what_another_engine_wrote() {
+        let dir = TempDir::new("reload");
+        let path = dir.0.join("user_dict.json");
+        // B 先打开（此时词库文件还不存在），A 后学习
+        let mut b = persistent_engine(&path);
+        let mut a = persistent_engine(&path);
+        assert!(!b.reload_user_dict_if_changed().unwrap(), "nothing changed yet");
+
+        a.commit_candidate_ex("shiyan", "誓言", None, true);
+        a.flush_user_dict();
+        a.wait_for_user_dict_writes(WRITE_WAIT);
+
+        // B 还是旧的；重新读入之后看到 A 学的
+        assert_eq!(b.user_dict.user_boost("shiyan", "誓言"), 0.0);
+        assert!(b.reload_user_dict_if_changed().unwrap());
+        assert!(b.user_dict.user_boost("shiyan", "誓言") > 0.0);
+        assert!(!b.reload_user_dict_if_changed().unwrap(), "unchanged since the reload");
+
+        // B 接着学别的并写盘：A 学的还在（以前 B 会用自己的旧快照盖掉它）
+        b.commit_candidate_ex("jishu", "级数", None, true);
+        b.flush_user_dict();
+        b.wait_for_user_dict_writes(WRITE_WAIT);
+        assert!(!b.reload_user_dict_if_changed().unwrap(), "own writes are not a change");
+
+        let c = persistent_engine(&path);
+        assert!(c.user_dict.user_boost("shiyan", "誓言") > 0.0);
+        assert!(c.user_dict.user_boost("jishu", "级数") > 0.0);
+
+        // A 这边也能跟上 B
+        assert!(a.reload_user_dict_if_changed().unwrap());
+        assert!(a.user_dict.user_boost("jishu", "级数") > 0.0);
+    }
+
+    #[test]
+    fn test_reload_waits_for_a_queued_snapshot_and_keeps_memory_on_a_bad_file() {
+        let dir = TempDir::new("reload-edge");
+        let path = dir.0.join("user_dict.json");
+        let mut engine = persistent_engine(&path);
+
+        // 刚交给写盘线程的快照先写完再比较：自己写的不算「被别人改过」，内容也不会丢
+        engine.commit_candidate_ex("shiyan", "誓言", None, true);
+        engine.flush_user_dict();
+        assert!(!engine.reload_user_dict_if_changed().unwrap());
+        assert!(path.exists(), "the queued snapshot was written before comparing");
+        assert!(engine.user_dict.user_boost("shiyan", "誓言") > 0.0);
+
+        // 文件被写坏：报错，内存里的词库保持不变
+        std::fs::write(&path, b"{ not json").unwrap();
+        assert!(engine.reload_user_dict_if_changed().is_err());
+        assert!(engine.user_dict.user_boost("shiyan", "誓言") > 0.0);
+
+        // 文件被删掉（别的进程清空了个人词库）：按空词库重新读入
+        std::fs::remove_file(&path).unwrap();
+        assert!(engine.reload_user_dict_if_changed().unwrap());
+        assert!(engine.user_dict.records.is_empty());
+        assert!(!engine.reload_user_dict_if_changed().unwrap());
+
+        // 没有启用持久化的引擎：什么也不做
+        let mut plain = build_test_engine();
+        plain.commit_candidate_ex("shiyan", "誓言", None, true);
+        plain.flush_user_dict();
+        assert!(!plain.reload_user_dict_if_changed().unwrap());
+        assert!(plain.user_dict.user_boost("shiyan", "誓言") > 0.0);
+    }
+
+    #[test]
+    fn test_a_failed_write_does_not_stop_later_writes() {
+        let dir = TempDir::new("retry");
+        // 上级目录还不存在：第一次写失败（在标准错误上报告一次）
+        let path = dir.0.join("later").join("user_dict.json");
+        let mut engine = persistent_engine(&path);
+        engine.commit_candidate_ex("shiyan", "誓言", None, true);
+        engine.flush_user_dict();
+        engine.wait_for_user_dict_writes(WRITE_WAIT);
+        assert!(!path.exists());
+
+        // 目录出现之后，下一次上屏照常写出最新的词库（包括上次没写成的内容）
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        engine.commit_candidate_ex("jishu", "级数", None, true);
+        engine.flush_user_dict();
+        engine.wait_for_user_dict_writes(WRITE_WAIT);
+        let saved = UserDict::load_from_file(&path).expect("saved");
+        assert!(saved.user_boost("shiyan", "誓言") > 0.0);
+        assert!(saved.user_boost("jishu", "级数") > 0.0);
     }
 
     #[test]

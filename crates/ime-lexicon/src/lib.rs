@@ -1,19 +1,30 @@
-//! `ime-lexicon` (v2): 多源开源词库融合编译器、紧凑二进制格式 (`AIMELX02`) 与 `mmap` 零拷贝高速检索存储层
+//! `ime-lexicon` (v3): 多源开源词库融合编译器、零拷贝二进制格式 (`AIMELX03`) 与 `mmap` 只读视图检索存储层
 //!
 //! 升级特性：
-//! 1. 自定义紧凑 Little-Endian 二进制序列化格式 (`AIMELX02`)，比 JSON 体积缩小 70%、加载速度提升 15~25 倍
+//! 1. 自定义 Little-Endian 分区式二进制格式 (`AIMELX03`)：定长记录 + 字符串池 + 并列数组，
+//!    加载后 [`CompiledLexicon`] 只是映射字节上的一层视图，不为任何词条或 Trie 节点分配堆内存
+//!    （只读文件映射页不计入 iOS 键盘扩展的内存上限），加载耗时为微秒级
 //! 2. 支持直接融合百万级完整版 `rime-ice` (`8105` + `base` + `ext`)、`rime-frost`、万象 Bigram 与 `melt_eng`
 //! 3. 智能简拼剪枝（仅对高频 2~5 字词建立首字母简拼索引），保持微秒级检索性能
+//!
+//! 结构分工：[`MultiSourceBuilder`] 在堆上融合词条并构建 [`FlatTrie`]（[`LexiconParts`]），
+//! 再由 `format` 模块编码为 `AIMELX03` 字节；运行期只通过 [`CompiledLexicon`] 的访问器读取。
+
+mod format;
+mod legacy;
+
+pub use format::{
+    CommonPrefixSearch, CompiledLexicon, EntryRef, IdIter, IdList, Syllables, TrieChildren,
+    TrieNodeRef, TrieView, LEGACY_MAGIC_V2, LEXICON_MAGIC,
+};
 
 use memmap2::MmapOptions;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
-
-pub const LEXICON_MAGIC: &[u8; 8] = b"AIMELX02";
 
 #[derive(Debug, Error)]
 pub enum LexiconError {
@@ -23,6 +34,20 @@ pub enum LexiconError {
     InvalidMagic,
     #[error("Corrupted binary lexicon data at offset {0}")]
     CorruptedBinary(usize),
+    #[error("Outdated lexicon binary format {0} (this build reads AIMELX03); migrate it with `lexicon-builder --migrate-v2 <file>` or rebuild it with lexicon-builder")]
+    OutdatedFormat(String),
+    #[error("Lexicon binary is truncated or has trailing data: header says {expected} bytes, found {actual}")]
+    SizeMismatch { expected: u64, actual: u64 },
+    #[error("Lexicon cannot be encoded: {0}")]
+    Unencodable(&'static str),
+    #[error("Lexicon entry #{index} cannot be encoded: {reason}")]
+    UnencodableEntry { index: usize, reason: &'static str },
+    #[error("Lexicon file {} cannot be replaced, most likely because a running IME process (service, workbench or playground) still has it memory-mapped; close it and retry: {source}", .path.display())]
+    TargetInUse {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// 词条所属的垂直领域标签，用于配合 L3 应用焦点场景感知动态调权
@@ -55,7 +80,7 @@ impl DomainTag {
     }
 }
 
-/// 编译并归一化后的统一词条结构
+/// 编译并归一化后的统一词条结构（构建期的堆上表示；运行期请通过 [`EntryRef`] 访问映射中的词条）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LexiconEntry {
     /// 最终上屏文本（如 `"不在意了"`, `"傅里叶级数"`, `"TypeScript"`, `"GitHub"`）
@@ -109,7 +134,7 @@ impl FlatTrieNode {
     }
 }
 
-/// 高性能扁平化前缀树索引
+/// 高性能扁平化前缀树索引（构建期的堆上表示；运行期请通过 [`TrieView`] 访问映射中的前缀树）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlatTrie {
     pub nodes: Vec<FlatTrieNode>,
@@ -227,10 +252,13 @@ impl FlatTrie {
     }
 }
 
-/// 编译完成的多源融合词库镜像
+/// 构建期的词库堆上表示：全部词条、三棵前缀树与二元语法表。
+///
+/// 由 [`MultiSourceBuilder::build_parts`] 产出，经 [`CompiledLexicon::from_parts`] 编码为 `AIMELX03`；
+/// 运行期不再持有该结构（全量词库下它要占用四百多 MB 堆内存）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompiledLexicon {
-    /// 全部词条池（已按 cost 升序排列）
+pub struct LexiconParts {
+    /// 全部词条池（已按 cost 升序排列；[`MultiSourceBuilder::build_parts`] 同分时先放不含 ASCII 大写字母的，再按 text、syllable_key 排）
     pub entries: Vec<LexiconEntry>,
     /// 精确音节序列索引（键格式：`"bu'zai'yi'le"` 或 `"xi'an"`）
     pub syllable_trie: FlatTrie,
@@ -242,134 +270,78 @@ pub struct CompiledLexicon {
     pub bigrams: HashMap<String, f32>,
 }
 
-impl CompiledLexicon {
-    /// 查询二元语法转移加成（支持中文-中文、中文-英文、英文-中文跨语种转移）
-    #[inline]
-    pub fn bigram_bonus(&self, prev_word: &str, next_word: &str) -> f32 {
-        if prev_word.is_empty() {
-            return 0.0;
-        }
-        let mut key = String::with_capacity(prev_word.len() + 1 + next_word.len());
-        key.push_str(prev_word);
-        key.push('\t');
-        key.push_str(next_word);
-        self.bigrams.get(&key).copied().unwrap_or(0.0)
+impl LexiconParts {
+    /// 读取旧版 `AIMELX02` 镜像并还原为堆上结构，仅用于一次性迁移（`lexicon-builder --migrate-v2`）。
+    /// 迁移会原样保留词条顺序与前缀树内容，因此解码结果与旧镜像逐字节一致。
+    pub fn load_legacy_v2(path: impl AsRef<Path>) -> Result<Self, LexiconError> {
+        legacy::read_v2(&std::fs::read(path)?)
     }
+}
 
-    /// 使用紧凑 Little-Endian 二进制格式 (`AIMELX02`) 写入磁盘
+/// 临时文件名序号（同一进程内并发写盘时避免互相覆盖）
+static SAVE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+impl CompiledLexicon {
+    /// 把 `AIMELX03` 字节镜像写入磁盘。
+    ///
+    /// 先写同目录下的临时文件（落盘后）再原子改名：目标文件可能正被其他进程映射着，
+    /// 就地截断重写会让对方读到半截文件（Unix 下甚至触发 SIGBUS）。
+    ///
+    /// Windows 上被映射着的文件不允许被替换：只要还有进程加载着目标词库，改名就会失败，
+    /// 此时返回 [`LexiconError::TargetInUse`]，需要先退出占用它的输入法进程再重试。
     pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<(), LexiconError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = File::create(path)?;
-        let mut w = BufWriter::with_capacity(4 * 1024 * 1024, file);
-
-        w.write_all(LEXICON_MAGIC)?;
-        write_u32(&mut w, self.entries.len() as u32)?;
-        for e in &self.entries {
-            write_str(&mut w, &e.text)?;
-            write_u8(&mut w, e.pinyin_syllables.len() as u8)?;
-            for s in &e.pinyin_syllables {
-                write_str(&mut w, s)?;
-            }
-            write_str(&mut w, &e.syllable_key)?;
-            write_str(&mut w, &e.flat_key)?;
-            write_str(&mut w, &e.abbrev_key)?;
-            write_f32(&mut w, e.cost)?;
-            write_f64(&mut w, e.raw_weight)?;
-            write_u8(&mut w, if e.is_english { 1 } else { 0 })?;
-            write_u8(&mut w, e.domain as u8)?;
-            match &e.tones {
-                Some(t) => {
-                    write_u8(&mut w, t.len() as u8)?;
-                    w.write_all(t)?;
-                }
-                None => write_u8(&mut w, 0)?,
-            }
+        let mut tmp_name = path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        tmp_name.push(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let tmp_path = path.with_file_name(tmp_name);
+        // 改名前先 fsync：否则断电后可能留下一份改了名却没写完的目标文件
+        let written = File::create(&tmp_path).and_then(|mut f| {
+            f.write_all(self.as_bytes())?;
+            f.sync_all()
+        });
+        if let Err(err) = written {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err.into());
         }
-
-        write_trie(&mut w, &self.syllable_trie)?;
-        write_trie(&mut w, &self.abbrev_trie)?;
-        write_trie(&mut w, &self.english_trie)?;
-
-        write_u32(&mut w, self.bigrams.len() as u32)?;
-        for (k, &v) in &self.bigrams {
-            write_str(&mut w, k)?;
-            write_f32(&mut w, v)?;
+        if let Err(err) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(replace_error(err, path, cfg!(windows) && path.exists()));
         }
-        w.flush()?;
         Ok(())
     }
 
-    /// 使用 `memmap2` 零拷贝映射方式从磁盘极速反序列化 `AIMELX02` 二进制镜像
+    /// 以只读 `mmap` 方式打开 `AIMELX03` 二进制镜像：只校验文件头与分区表，不读取正文、不分配堆内存。
+    /// 旧版 `AIMELX02` 文件返回 [`LexiconError::OutdatedFormat`]，被截断的文件返回 [`LexiconError::SizeMismatch`]。
+    ///
+    /// 映射会一直保持到返回值及其全部 `clone()` 都被释放为止（通常就是整个进程的生命周期），因此：
+    /// - 词库文件只允许“写新文件再改名覆盖”（[`CompiledLexicon::save_to_file`] 即如此），绝不能就地改写或截断：
+    ///   映射期间文件内容被改动时，读取方在 Unix 下可能收到 SIGBUS，或读到中途变化的字节；
+    ///   iOS 上宿主 App 更新 App Group 共享目录里的词库时同样必须遵守；
+    /// - Windows 上被映射的文件无法被覆盖、截断或删除（可以先改名挪开），
+    ///   安装器更新词库前要先结束加载着它的进程，或把旧文件改名挪开后再写入新文件。
+    ///
+    /// 加载不检查正文：词库文件刚安装/更新之后应调用一次 [`CompiledLexicon::verify`]，校验失败就不要使用该文件。
     pub fn load_mmap(path: impl AsRef<Path>) -> Result<Self, LexiconError> {
         let file = File::open(path)?;
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
-        let buf: &[u8] = &mmap;
-        if buf.len() < 8 || &buf[..8] != LEXICON_MAGIC {
+        if file.metadata()?.len() == 0 {
             return Err(LexiconError::InvalidMagic);
         }
-        let mut cursor = BinCursor { buf, pos: 8 };
-
-        let entry_count = cursor.read_u32()? as usize;
-        let mut entries = Vec::with_capacity(entry_count);
-        for _ in 0..entry_count {
-            let text = cursor.read_str()?;
-            let syl_len = cursor.read_u8()? as usize;
-            let mut pinyin_syllables = Vec::with_capacity(syl_len);
-            for _ in 0..syl_len {
-                pinyin_syllables.push(cursor.read_str()?);
-            }
-            let syllable_key = cursor.read_str()?;
-            let flat_key = cursor.read_str()?;
-            let abbrev_key = cursor.read_str()?;
-            let cost = cursor.read_f32()?;
-            let raw_weight = cursor.read_f64()?;
-            let is_english = cursor.read_u8()? != 0;
-            let domain = DomainTag::from_u8(cursor.read_u8()?);
-            let tone_len = cursor.read_u8()? as usize;
-            let tones = if tone_len > 0 {
-                Some(cursor.read_bytes(tone_len)?.to_vec())
-            } else {
-                None
-            };
-            entries.push(LexiconEntry {
-                text,
-                pinyin_syllables,
-                syllable_key,
-                flat_key,
-                abbrev_key,
-                cost,
-                raw_weight,
-                is_english,
-                domain,
-                tones,
-            });
-        }
-
-        let syllable_trie = cursor.read_trie()?;
-        let abbrev_trie = cursor.read_trie()?;
-        let english_trie = cursor.read_trie()?;
-
-        let bg_count = cursor.read_u32()? as usize;
-        let mut bigrams = HashMap::with_capacity(bg_count);
-        for _ in 0..bg_count {
-            let k = cursor.read_str()?;
-            let v = cursor.read_f32()?;
-            bigrams.insert(k, v);
-        }
-
-        Ok(CompiledLexicon {
-            entries,
-            syllable_trie,
-            abbrev_trie,
-            english_trie,
-            bigrams,
-        })
+        let mmap = unsafe { MmapOptions::new().map(&file)? };
+        Self::from_mmap(mmap)
     }
 
-    /// 直接从内置/种子三源词库目录编译构建（如果磁盘已有 `AIMELX02` 编译镜像则优先 mmap 加载）
+    /// 直接从内置/种子三源词库目录编译构建（如果磁盘已有 `AIMELX03` 编译镜像则优先 mmap 加载；
+    /// 旧版 `AIMELX02` 镜像或损坏的文件一律视同不存在，回退到种子词库现场编译，并向 stderr 说明原因）
     pub fn load_or_build_default(workspace_root: impl AsRef<Path>) -> Result<Self, LexiconError> {
         let root = workspace_root.as_ref();
         let mut candidate_roots = vec![root.to_path_buf()];
@@ -385,27 +357,47 @@ impl CompiledLexicon {
             candidate_roots.push(cwd);
         }
         if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            candidate_roots.push(std::path::PathBuf::from(local_app_data).join("RustAiPinyinIME"));
+            candidate_roots.push(PathBuf::from(local_app_data).join("RustAiPinyinIME"));
         }
+        Self::load_or_build_from(&candidate_roots, root)
+    }
 
-        for cand_root in &candidate_roots {
+    /// [`CompiledLexicon::load_or_build_default`] 的实际逻辑：只在给定的 `candidate_roots` 中依次查找编译镜像与种子词库，
+    /// 找不到可用镜像时把现场编译的结果回写到 `write_root`（查找范围由调用方显式给出，便于测试不受本机环境影响）。
+    fn load_or_build_from(candidate_roots: &[PathBuf], write_root: &Path) -> Result<Self, LexiconError> {
+        let compiled_path = write_root.join("data/compiled/merged_lexicon.bin");
+        // 回写位置上若躺着一份旧版格式的镜像，回退编译后不去覆盖它：
+        // 那多半是尚未迁移的全量词库，用种子词库顶掉它会让用户丢失数据（可用 `lexicon-builder --migrate-v2` 迁移）
+        let mut keep_outdated_image = false;
+        let mut rejected_images = 0usize;
+        for cand_root in candidate_roots {
             for rel in ["data/compiled/merged_lexicon.bin", "merged_lexicon.bin"] {
                 let bin_path = cand_root.join(rel);
                 if bin_path.exists() {
-                    if let Ok(lex) = Self::load_mmap(&bin_path) {
-                        return Ok(lex);
+                    match Self::load_mmap(&bin_path) {
+                        Ok(lex) => return Ok(lex),
+                        Err(err) => {
+                            // 静默回退会让 57 万词条的词库悄悄变成几百条的种子词库，这里至少留下一行原因
+                            rejected_images += 1;
+                            log_stderr(format_args!(
+                                "[ime-lexicon] 跳过无法加载的词库镜像 {}: {err}",
+                                bin_path.display()
+                            ));
+                            if matches!(err, LexiconError::OutdatedFormat(_)) && bin_path == compiled_path {
+                                keep_outdated_image = true;
+                            }
+                        }
                     }
                 }
             }
         }
 
-        let compiled_path = root.join("data/compiled/merged_lexicon.bin");
         let mut builder = MultiSourceBuilder::new();
         let seed_dir = candidate_roots
             .iter()
             .map(|r| r.join("data/seed"))
             .find(|p| p.exists())
-            .unwrap_or_else(|| root.join("data/seed"));
+            .unwrap_or_else(|| write_root.join("data/seed"));
         let base_path = seed_dir.join("rime_ice.base.dict.yaml");
         let eng_path = seed_dir.join("melt_eng.dict.yaml");
         let bigram_path = seed_dir.join("wanxiang.bigram.tsv");
@@ -420,151 +412,43 @@ impl CompiledLexicon {
             builder.load_bigram_file(&bigram_path)?;
         }
         let compiled = builder.build();
-        let _ = compiled.save_to_file(&compiled_path);
+        if rejected_images > 0 {
+            log_stderr(format_args!(
+                "[ime-lexicon] 没有可用的编译词库，已回退为种子词库现场编译（仅 {} 个词条）",
+                compiled.entry_count()
+            ));
+        }
+        if !keep_outdated_image {
+            let _ = compiled.save_to_file(&compiled_path);
+        }
         Ok(compiled)
     }
 }
 
-// === 紧凑二进制读写辅助函数 ===
-
-#[inline]
-fn write_u8(w: &mut impl Write, v: u8) -> std::io::Result<()> {
-    w.write_all(&[v])
+/// 向 stderr 写一行诊断信息；写失败（例如 stderr 已关闭）时直接忽略，绝不因此 panic
+fn log_stderr(line: std::fmt::Arguments<'_>) {
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
-#[inline]
-fn write_u16(w: &mut impl Write, v: u16) -> std::io::Result<()> {
-    w.write_all(&v.to_le_bytes())
-}
-
-#[inline]
-fn write_u32(w: &mut impl Write, v: u32) -> std::io::Result<()> {
-    w.write_all(&v.to_le_bytes())
-}
-
-#[inline]
-fn write_f32(w: &mut impl Write, v: f32) -> std::io::Result<()> {
-    w.write_all(&v.to_le_bytes())
-}
-
-#[inline]
-fn write_f64(w: &mut impl Write, v: f64) -> std::io::Result<()> {
-    w.write_all(&v.to_le_bytes())
-}
-
-#[inline]
-fn write_str(w: &mut impl Write, s: &str) -> std::io::Result<()> {
-    let bytes = s.as_bytes();
-    write_u16(w, bytes.len() as u16)?;
-    w.write_all(bytes)
-}
-
-fn write_trie(w: &mut impl Write, trie: &FlatTrie) -> std::io::Result<()> {
-    write_u32(w, trie.nodes.len() as u32)?;
-    for node in &trie.nodes {
-        write_u8(w, node.transitions.len() as u8)?;
-        for &(ch, child) in &node.transitions {
-            write_u8(w, ch)?;
-            write_u32(w, child)?;
+/// 把“改名覆盖目标词库失败”的 IO 错误转换成更易懂的错误。
+/// `target_is_mapped_candidate` 为真（Windows 且目标文件已存在）并且错误属于“拒绝访问 / 共享冲突 / 文件被映射”时，
+/// 几乎可以肯定是目标词库正被某个输入法进程映射着，返回 [`LexiconError::TargetInUse`]。
+fn replace_error(err: std::io::Error, path: &Path, target_is_mapped_candidate: bool) -> LexiconError {
+    // ERROR_ACCESS_DENIED = 5, ERROR_SHARING_VIOLATION = 32, ERROR_USER_MAPPED_FILE = 1224
+    let looks_in_use = err.kind() == std::io::ErrorKind::PermissionDenied
+        || matches!(err.raw_os_error(), Some(5 | 32 | 1224));
+    if target_is_mapped_candidate && looks_in_use {
+        LexiconError::TargetInUse {
+            path: path.to_path_buf(),
+            source: err,
         }
-        write_u8(w, node.exact_entries.len().min(255) as u8)?;
-        for &id in node.exact_entries.iter().take(255) {
-            write_u32(w, id)?;
-        }
-        write_u8(w, node.top_prefix_entries.len().min(255) as u8)?;
-        for &id in node.top_prefix_entries.iter().take(255) {
-            write_u32(w, id)?;
-        }
-    }
-    Ok(())
-}
-
-struct BinCursor<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> BinCursor<'a> {
-    #[inline]
-    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], LexiconError> {
-        if self.pos + len > self.buf.len() {
-            return Err(LexiconError::CorruptedBinary(self.pos));
-        }
-        let slice = &self.buf[self.pos..self.pos + len];
-        self.pos += len;
-        Ok(slice)
-    }
-
-    #[inline]
-    fn read_u8(&mut self) -> Result<u8, LexiconError> {
-        Ok(self.read_bytes(1)?[0])
-    }
-
-    #[inline]
-    fn read_u16(&mut self) -> Result<u16, LexiconError> {
-        let b = self.read_bytes(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
-    }
-
-    #[inline]
-    fn read_u32(&mut self) -> Result<u32, LexiconError> {
-        let b = self.read_bytes(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    #[inline]
-    fn read_f32(&mut self) -> Result<f32, LexiconError> {
-        let b = self.read_bytes(4)?;
-        Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    #[inline]
-    fn read_f64(&mut self) -> Result<f64, LexiconError> {
-        let b = self.read_bytes(8)?;
-        Ok(f64::from_le_bytes([
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        ]))
-    }
-
-    #[inline]
-    fn read_str(&mut self) -> Result<String, LexiconError> {
-        let len = self.read_u16()? as usize;
-        let b = self.read_bytes(len)?;
-        std::str::from_utf8(b)
-            .map(|s| s.to_string())
-            .map_err(|_| LexiconError::CorruptedBinary(self.pos))
-    }
-
-    fn read_trie(&mut self) -> Result<FlatTrie, LexiconError> {
-        let node_count = self.read_u32()? as usize;
-        let mut nodes = Vec::with_capacity(node_count);
-        for _ in 0..node_count {
-            let t_len = self.read_u8()? as usize;
-            let mut transitions = Vec::with_capacity(t_len);
-            for _ in 0..t_len {
-                let ch = self.read_u8()?;
-                let child = self.read_u32()?;
-                transitions.push((ch, child));
-            }
-            let e_len = self.read_u8()? as usize;
-            let mut exact_entries = Vec::with_capacity(e_len);
-            for _ in 0..e_len {
-                exact_entries.push(self.read_u32()?);
-            }
-            let p_len = self.read_u8()? as usize;
-            let mut top_prefix_entries = Vec::with_capacity(p_len);
-            for _ in 0..p_len {
-                top_prefix_entries.push(self.read_u32()?);
-            }
-            nodes.push(FlatTrieNode {
-                transitions,
-                exact_entries,
-                top_prefix_entries,
-            });
-        }
-        Ok(FlatTrie { nodes })
+    } else {
+        LexiconError::Io(err)
     }
 }
+
+/// 词条文本与检索键的字节长度上限（`AIMELX03` 词条记录中以 `u16` 保存长度）
+const MAX_FIELD_BYTES: usize = u16::MAX as usize;
 
 /// 多源开源词库（雾凇 + 白霜 + 万象 + melt_eng + THUOCL）融合构建器
 pub struct MultiSourceBuilder {
@@ -661,6 +545,10 @@ impl MultiSourceBuilder {
             }
 
             let syllable_key = syllables.join("'");
+            // 二进制格式用 u16 记录文本与检索键的字节长度：超长的（必然是坏数据的）行直接跳过，保证 `build()` 一定能编码
+            if text.len() > MAX_FIELD_BYTES || syllable_key.len() > MAX_FIELD_BYTES {
+                continue;
+            }
             let flat_key = syllables.join("");
             let abbrev_key: String = syllables
                 .iter()
@@ -744,7 +632,7 @@ impl MultiSourceBuilder {
                 .get(1)
                 .map(|s| s.trim().to_ascii_lowercase())
                 .unwrap_or_else(|| canonical_text.to_ascii_lowercase());
-            if !lower_key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            if !lower_key.bytes().all(|b| b.is_ascii_alphanumeric()) || lower_key.len() > MAX_FIELD_BYTES {
                 continue;
             }
             let weight: f64 = parts
@@ -811,9 +699,28 @@ impl MultiSourceBuilder {
         Ok(())
     }
 
-    /// 完成词频对数平滑归一化并构建全部前缀树索引
+    /// 完成词频对数平滑归一化并构建全部前缀树索引，直接得到 `AIMELX03` 视图（自有内存，不落盘）
     pub fn build(self) -> CompiledLexicon {
+        let parts = self.build_parts();
+        // 不会失败：两个 `load_*_dict_str` 已跳过超长的文本/检索键，音节数不超过 12，
+        // 派生键与前缀树都由本构建器自己生成，必然自洽
+        CompiledLexicon::from_parts(&parts)
+            .expect("MultiSourceBuilder 产出的词条与前缀树必然可以编码为 AIMELX03")
+    }
+
+    /// 完成词频对数平滑归一化并构建全部前缀树索引，返回构建期的堆上结构。
+    ///
+    /// 结果与 `HashMap` 的遍历顺序无关：同样的词表按同样的顺序加载，每次都编译出逐字节相同的词库
+    /// （发布的词库要能由源码包重新编译、按 SHA-256 核对）。
+    pub fn build_parts(self) -> LexiconParts {
         let mut entries: Vec<LexiconEntry> = self.merged_entries.into_values().collect();
+        // `HashMap` 每次运行的遍历顺序都不同，先按聚合键 `(text, syllable_key)` 排好：
+        // 下面的权重求和（浮点加法不满足结合律）从此与它无关
+        entries.sort_unstable_by(|a, b| {
+            a.text
+                .cmp(&b.text)
+                .then_with(|| a.syllable_key.cmp(&b.syllable_key))
+        });
         let total_weight: f64 = entries.iter().map(|e| e.raw_weight).sum::<f64>().max(1.0);
         let vocab_size = entries.len() as f64;
 
@@ -828,8 +735,17 @@ impl MultiSourceBuilder {
             entry.cost = base_cost;
         }
 
-        // 按 cost 升序排序
-        entries.sort_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(std::cmp::Ordering::Equal));
+        // 按 cost 升序；同分时不含 ASCII 大写字母的在前（见 [`has_ascii_uppercase`]），
+        // 再按 text、syllable_key（二者合起来就是聚合键，所以这是全序）。
+        // 同分的词条很多（光 rime_ice_base 里权重为 1 的就有约 6 万条），只按 cost 排时它们的先后、
+        // 词条编号，以及下面各前缀树的每键上限截掉哪些词条，都会随遍历顺序变化
+        entries.sort_unstable_by(|a, b| {
+            a.cost
+                .total_cmp(&b.cost)
+                .then_with(|| has_ascii_uppercase(&a.text).cmp(&has_ascii_uppercase(&b.text)))
+                .then_with(|| a.text.cmp(&b.text))
+                .then_with(|| a.syllable_key.cmp(&b.syllable_key))
+        });
 
         let mut syllable_trie = FlatTrie::new();
         let mut abbrev_trie = FlatTrie::new();
@@ -859,7 +775,7 @@ impl MultiSourceBuilder {
             }
         }
 
-        CompiledLexicon {
+        LexiconParts {
             entries,
             syllable_trie,
             abbrev_trie,
@@ -867,6 +783,15 @@ impl MultiSourceBuilder {
             bigrams: self.bigrams,
         }
     }
+}
+
+/// 同分排序用：文本里有没有 ASCII 大写字母。
+///
+/// 英文词表（melt_eng_full）没有词频，两万多个词全是同一个默认权重；直接按字节序比较时大写字母排在小写前面，
+/// `Polish` 会排在 `polish` 前面，前缀补全也偏向人名、地名（`water` 补出 Waterford、Waterloo）。
+/// 同分时先放不含大写字母的词条，再按文本排
+fn has_ascii_uppercase(text: &str) -> bool {
+    text.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 fn is_tech_keyword(text: &str) -> bool {
@@ -915,19 +840,129 @@ mod tests {
         builder.load_bigram_str("傅里叶\t级数\t5.5\n");
 
         let lex = builder.build();
-        let hits = lex.syllable_trie.exact_lookup("ji'shu");
+        let hits = lex.syllable_trie().exact_lookup("ji'shu");
         assert_eq!(hits.len(), 2);
-        assert_eq!(lex.entries[hits[0] as usize].text, "技术");
-        assert_eq!(lex.entries[hits[1] as usize].text, "级数");
+        assert_eq!(lex.entry(hits.get(0).unwrap()).text(), "技术");
+        assert_eq!(lex.entry(hits.get(1).unwrap()).text(), "级数");
 
-        let abbrev_hits = lex.abbrev_trie.exact_lookup("jsj");
+        let abbrev_hits = lex.abbrev_trie().exact_lookup("jsj");
         assert_eq!(abbrev_hits.len(), 1);
-        assert_eq!(lex.entries[abbrev_hits[0] as usize].text, "计算机");
+        assert_eq!(lex.entry(abbrev_hits.first().unwrap()).text(), "计算机");
 
-        let eng_prefix = lex.english_trie.prefix_lookup("typesc");
+        let eng_prefix = lex.english_trie().prefix_lookup("typesc");
         assert_eq!(eng_prefix.len(), 1);
-        assert_eq!(lex.entries[eng_prefix[0] as usize].text, "TypeScript");
+        assert_eq!(lex.entry(eng_prefix.first().unwrap()).text(), "TypeScript");
 
         assert!((lex.bigram_bonus("傅里叶", "级数") - 5.5).abs() < 1e-5);
+
+        // 经由字节镜像再走一遍，结果不变
+        let reloaded = CompiledLexicon::from_bytes(lex.as_bytes().to_vec()).unwrap();
+        assert_eq!(reloaded.entry_count(), 4);
+        assert_eq!(reloaded.syllable_trie().exact_lookup("ji'shu").to_vec(), hits.to_vec());
+        assert!((reloaded.bigram_bonus("傅里叶", "级数") - 5.5).abs() < 1e-5);
+    }
+
+    fn texts_of(lex: &CompiledLexicon, ids: IdList<'_>) -> Vec<String> {
+        ids.iter().map(|id| lex.entry(id).text().to_string()).collect()
+    }
+
+    /// 按同分规则（先放不含 ASCII 大写字母的，再按字节序）排好后取前 `n` 个
+    fn first_by_tie_rule(mut texts: Vec<String>, n: usize) -> Vec<String> {
+        texts.sort_by(|a, b| has_ascii_uppercase(a).cmp(&has_ascii_uppercase(b)).then_with(|| a.cmp(b)));
+        texts.truncate(n);
+        texts
+    }
+
+    /// 每个 `HashMap` 的哈希种子都不同，同一进程里编译两次，遍历词条的顺序也不同。
+    /// 大量同分词条时编译结果仍要逐字节相同；同分规则（先放不含 ASCII 大写字母的，再按文本）
+    /// 决定先后，也决定每键上限截掉哪些词条
+    #[test]
+    fn test_build_is_byte_identical_with_cost_ties() {
+        let han = |i: u32| char::from_u32(0x4E00 + i).unwrap();
+        let mut rime = String::from("---\nname: ties\n...\n");
+        // 130 个同音、同权重的单字：音节树 `zi` 全部保留（上限 255），单字简拼 `z` 只留 120 个
+        for i in 0..130 {
+            rime.push_str(&format!("{}\tzi\t1\n", han(i)));
+        }
+        // 100 个同音、同权重的双音节词，外加 10 个带大写拉丁字母的（A子…J子）：音节树 `zi'zi` 只留 64 个。
+        // 只按字节序的话 A子…J子 会排在最前面；按同分规则它们排在最后，全被截掉
+        for i in 0..100 {
+            rime.push_str(&format!("{}子\tzi zi\t1\n", han(i)));
+        }
+        for c in 'A'..='J' {
+            rime.push_str(&format!("{c}子\tzi zi\t1\n"));
+        }
+        // 60 个同音、同权重的常用双音节词：简拼 `dm` 只留 48 个
+        for i in 0..60 {
+            rime.push_str(&format!("{}马\tda ma\t500\n", han(i)));
+        }
+        // 15 个大写开头、15 个全小写的英文词，检索键都是 foo、权重相同：英文树精确命中只留 24 个
+        // （15 个小写的在前，再 9 个大写开头的），前缀 Top 缓存只留 6 个（全是小写的）
+        let mut eng = String::new();
+        for i in 0..15 {
+            eng.push_str(&format!("Foo{i}\tfoo\t2500\nfoo{i}\tfoo\t2500\n"));
+        }
+
+        let build = |english_first: bool| {
+            let mut builder = MultiSourceBuilder::new();
+            if english_first {
+                builder.load_english_dict_str(&eng, 1.0);
+            }
+            builder.load_rime_dict_str(&rime, 1.0, DomainTag::General);
+            if !english_first {
+                builder.load_english_dict_str(&eng, 1.0);
+            }
+            builder.build()
+        };
+        let lex = build(false);
+        for round in 0..4 {
+            // 两份词表没有相同的词条，谁先加载也不影响结果
+            assert_eq!(build(round % 2 == 0).as_bytes(), lex.as_bytes(), "第 {round} 次重新编译");
+        }
+
+        let singles: Vec<String> = (0..130).map(|i| han(i).to_string()).collect();
+        let zizi: Vec<String> = (0..100)
+            .map(|i| format!("{}子", han(i)))
+            .chain(('A'..='J').map(|c| format!("{c}子")))
+            .collect();
+        let dama: Vec<String> = (0..60).map(|i| format!("{}马", han(i))).collect();
+        let foos: Vec<String> = (0..15).flat_map(|i| [format!("Foo{i}"), format!("foo{i}")]).collect();
+        let syllable = lex.syllable_trie();
+        let abbrev = lex.abbrev_trie();
+        let english = lex.english_trie();
+        assert_eq!(texts_of(&lex, syllable.exact_lookup("zi")), first_by_tie_rule(singles.clone(), 255));
+        assert_eq!(texts_of(&lex, abbrev.exact_lookup("z")), first_by_tie_rule(singles, 120));
+        let kept_zizi = texts_of(&lex, syllable.exact_lookup("zi'zi"));
+        assert_eq!(kept_zizi, first_by_tie_rule(zizi, 64));
+        assert!(kept_zizi.iter().all(|t| !has_ascii_uppercase(t)), "带大写字母的同分词条应在上限处被截掉");
+        assert_eq!(texts_of(&lex, syllable.exact_lookup("da'ma")), first_by_tie_rule(dama.clone(), 64));
+        assert_eq!(texts_of(&lex, abbrev.exact_lookup("dm")), first_by_tie_rule(dama, 48));
+        let kept_foo = texts_of(&lex, english.exact_lookup("foo"));
+        assert_eq!(kept_foo, first_by_tie_rule(foos.clone(), 24));
+        assert!(kept_foo[..15].iter().all(|t| t.starts_with("foo")), "15 个小写的应全部留下并排在前面");
+        assert!(kept_foo[15..].iter().all(|t| t.starts_with("Foo")));
+        let top_prefix = texts_of(&lex, english.prefix_lookup("fo"));
+        assert_eq!(top_prefix, first_by_tie_rule(foos, 6));
+        assert!(top_prefix.iter().all(|t| t.starts_with("foo")));
+    }
+
+    /// 同分时不含大写字母的排前面：英文词表没有词频，直接按字节序比较会让 Polish 排在 polish 前面，
+    /// 前缀补全也偏向人名、地名
+    #[test]
+    fn test_ties_put_entries_without_uppercase_first() {
+        let mut builder = MultiSourceBuilder::new();
+        builder.load_english_dict_str(
+            "Polish\tpolish\t2500\npolish\tpolish\t2500\nPolk\tpolk\t2500\npolka\tpolka\t2500\n\
+             polishing\tpolishing\t2500\npolished\tpolished\t2500\n",
+            1.0,
+        );
+        builder.load_rime_dict_str("---\nname: t\n...\nT恤\tti xu\t300\n体恤\tti xu\t300\n", 1.0, DomainTag::General);
+        let lex = builder.build();
+        assert_eq!(texts_of(&lex, lex.english_trie().exact_lookup("polish")), ["polish", "Polish"]);
+        assert_eq!(
+            texts_of(&lex, lex.english_trie().prefix_lookup("pol")),
+            ["polish", "polished", "polishing", "polka", "Polish", "Polk"]
+        );
+        assert_eq!(texts_of(&lex, lex.syllable_trie().exact_lookup("ti'xu")), ["体恤", "T恤"]);
     }
 }

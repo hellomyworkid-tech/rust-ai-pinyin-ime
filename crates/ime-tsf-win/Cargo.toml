@@ -24,5 +24,6 @@ path = "src/bin/ime_installer.rs"
 ime-lexicon = { path = "../ime-lexicon" }
 ime-core = { path = "../ime-core" }
 ime-ai = { path = "../ime-ai" }
+ime-session = { path = "../ime-session" }
 serde.workspace = true
 serde_json.workspace = true

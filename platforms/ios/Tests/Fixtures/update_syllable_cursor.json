@@ -1,0 +1,924 @@
+{
+  "action": "update",
+  "view": {
+    "active_scene_label": "通用日常",
+    "active_syllable_index": 2,
+    "ai_semantic_hint": "光标位于音节 'qu' (第 3/6 音节) —— 可继续向后选词，或按退格撤销锁定/修改拼音",
+    "composed_full_sentence": "我想去公园完",
+    "cursor_byte_pos": 7,
+    "full_sentence_parts": [
+      [
+        "我想去公园完",
+        false
+      ]
+    ],
+    "full_sentence_selected": false,
+    "ghost_text_preview": null,
+    "page_index": 0,
+    "page_size": 30,
+    "preedit_text": "wo'xiang'qu'gong'yuan'wan",
+    "selected_candidate_index": 0,
+    "syllable_spans": [
+      {
+        "code_key": "wo",
+        "end": 2,
+        "start": 0,
+        "text": "我"
+      },
+      {
+        "code_key": "xiang",
+        "end": 7,
+        "start": 2,
+        "text": "想"
+      },
+      {
+        "code_key": "qu",
+        "end": 9,
+        "start": 7,
+        "text": "去"
+      },
+      {
+        "code_key": "gong",
+        "end": 13,
+        "start": 9,
+        "text": "公"
+      },
+      {
+        "code_key": "yuan",
+        "end": 17,
+        "start": 13,
+        "text": "园"
+      },
+      {
+        "code_key": "wan",
+        "end": 20,
+        "start": 17,
+        "text": "完"
+      }
+    ],
+    "top_segments": [
+      {
+        "code_key": "wo'xiang'qu",
+        "end": 9,
+        "start": 0,
+        "text": "我想去"
+      },
+      {
+        "code_key": "gong'yuan",
+        "end": 17,
+        "start": 9,
+        "text": "公园"
+      },
+      {
+        "code_key": "wan",
+        "end": 20,
+        "start": 17,
+        "text": "完"
+      }
+    ],
+    "total_candidates": 49,
+    "visible": true,
+    "visible_candidates": [
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 93.07144927978516,
+        "l1_cost": 6.928549766540527,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "去"
+          }
+        ],
+        "segments": [
+          "去"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "去"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "去"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 90.51912689208984,
+        "l1_cost": 9.480871200561523,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "取"
+          }
+        ],
+        "segments": [
+          "取"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "取"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "取"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 90.488037109375,
+        "l1_cost": 9.511964797973633,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "区"
+          }
+        ],
+        "segments": [
+          "区"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "区"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "区"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 89.71238708496094,
+        "l1_cost": 10.287614822387695,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "趣"
+          }
+        ],
+        "segments": [
+          "趣"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "趣"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "趣"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 89.60477447509766,
+        "l1_cost": 10.39522647857666,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "曲"
+          }
+        ],
+        "segments": [
+          "曲"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "曲"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "曲"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 88.94464874267578,
+        "l1_cost": 11.055353164672852,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "屈"
+          }
+        ],
+        "segments": [
+          "屈"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "屈"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "屈"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 88.62022399902344,
+        "l1_cost": 11.379772186279297,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "躯"
+          }
+        ],
+        "segments": [
+          "躯"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "躯"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "躯"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 88.38250732421875,
+        "l1_cost": 11.617496490478516,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "驱"
+          }
+        ],
+        "segments": [
+          "驱"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "驱"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "驱"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 88.22796630859375,
+        "l1_cost": 11.772035598754883,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "娶"
+          }
+        ],
+        "segments": [
+          "娶"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "娶"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "娶"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 87.78598022460938,
+        "l1_cost": 12.214019775390625,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "趋"
+          }
+        ],
+        "segments": [
+          "趋"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "趋"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "趋"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 87.32196807861328,
+        "l1_cost": 12.67802906036377,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "渠"
+          }
+        ],
+        "segments": [
+          "渠"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "渠"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "渠"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 87.17401885986328,
+        "l1_cost": 12.825980186462402,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "觑"
+          }
+        ],
+        "segments": [
+          "觑"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "觑"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "觑"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 86.15625,
+        "l1_cost": 13.843746185302734,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "瞿"
+          }
+        ],
+        "segments": [
+          "瞿"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "瞿"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "瞿"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 85.64777374267578,
+        "l1_cost": 14.352227210998535,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "岖"
+          }
+        ],
+        "segments": [
+          "岖"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "岖"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "岖"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 85.60025024414062,
+        "l1_cost": 14.39975357055664,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "蛐"
+          }
+        ],
+        "segments": [
+          "蛐"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "蛐"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "蛐"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 85.54061889648438,
+        "l1_cost": 14.459378242492676,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "蛆"
+          }
+        ],
+        "segments": [
+          "蛆"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "蛆"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "蛆"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.78182983398438,
+        "l1_cost": 15.21816635131836,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "衢"
+          }
+        ],
+        "segments": [
+          "衢"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "衢"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "衢"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.72980499267578,
+        "l1_cost": 15.27019214630127,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "祛"
+          }
+        ],
+        "segments": [
+          "祛"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "祛"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "祛"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.728759765625,
+        "l1_cost": 15.271240234375,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "黢"
+          }
+        ],
+        "segments": [
+          "黢"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "黢"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "黢"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 83.7720947265625,
+        "l1_cost": 16.2279052734375,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "癯"
+          }
+        ],
+        "segments": [
+          "癯"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "癯"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "癯"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 83.60627746582031,
+        "l1_cost": 16.393718719482422,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "苣"
+          }
+        ],
+        "segments": [
+          "苣"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "苣"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "苣"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 83.37139129638672,
+        "l1_cost": 16.62860679626465,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "阒"
+          }
+        ],
+        "segments": [
+          "阒"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "阒"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "阒"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 83.19839477539062,
+        "l1_cost": 16.801603317260742,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "龋"
+          }
+        ],
+        "segments": [
+          "龋"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "龋"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "龋"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 83.11511993408203,
+        "l1_cost": 16.88488006591797,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "蕖"
+          }
+        ],
+        "segments": [
+          "蕖"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "蕖"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "蕖"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 82.895263671875,
+        "l1_cost": 17.104738235473633,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "蘧"
+          }
+        ],
+        "segments": [
+          "蘧"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "蘧"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "蘧"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 82.84827423095703,
+        "l1_cost": 17.1517276763916,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "朐"
+          }
+        ],
+        "segments": [
+          "朐"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "朐"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "朐"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 82.68028259277344,
+        "l1_cost": 17.319719314575195,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "璩"
+          }
+        ],
+        "segments": [
+          "璩"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "璩"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "璩"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 82.43763732910156,
+        "l1_cost": 17.562360763549805,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "劬"
+          }
+        ],
+        "segments": [
+          "劬"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "劬"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "劬"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 82.37344360351562,
+        "l1_cost": 17.626554489135742,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "磲"
+          }
+        ],
+        "segments": [
+          "磲"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "磲"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "磲"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 82.17216491699219,
+        "l1_cost": 17.827838897705078,
+        "preedit": "qu",
+        "segment_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "诎"
+          }
+        ],
+        "segments": [
+          "诎"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "qu",
+            "end": 9,
+            "start": 7,
+            "text": "诎"
+          }
+        ],
+        "tag": "(qu)",
+        "text": "诎"
+      }
+    ]
+  }
+}

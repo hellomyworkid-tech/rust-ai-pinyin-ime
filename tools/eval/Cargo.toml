@@ -1,0 +1,18 @@
+# 端到端评测：真实引擎 + 调度器 + 进程内 llama.cpp 打分器在上下文用例上的首选准确率。
+# 位于 <仓库>/tools/eval，不是工作区成员（与 tools/golden 相同）。
+# 需要 ime-llm 的 `llama` 特性：先运行 scripts/build_llama.sh macos 构建 llama.cpp 静态库。
+[package]
+name = "eval"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+ime-lexicon = { path = "../../crates/ime-lexicon" }
+ime-core = { path = "../../crates/ime-core" }
+ime-ai = { path = "../../crates/ime-ai" }
+ime-llm = { path = "../../crates/ime-llm", features = ["llama"] }
+
+[profile.release]
+opt-level = 3

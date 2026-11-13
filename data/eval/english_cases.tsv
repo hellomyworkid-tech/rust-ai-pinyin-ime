@@ -1,0 +1,72 @@
+# context	target	pinyin
+# 英文词、缩写与中英混输：规则重排的首选本来就是对的，大模型不应该把它换掉（修复前会把 CPU 换成「菜谱」、Docker 换成 docker，
+# 见 crates/ime-ai/src/inprocess.rs 的 select_scoring_pool 第 5 条）。上文分两类：与目标无关的（查一下、这个、帮我看一下……）和相关的。
+# 目标都取自解码器实际给出的首选（tools/eval --pools 可查看候选与候选池）。
+查一下	CPU	cpu
+帮我看一下	CPU	cpu
+这台电脑的	CPU	cpu
+我最近在学	GPU	gpu
+这块显卡的	GPU	gpu
+这个	SQL	sql
+数据库查询用的是	SQL	sql
+这个	CSS	css
+网页的样式用	CSS	css
+帮我看一下	CD	cd
+这张	CD	cd
+这个	PDF	pdf
+请把文件导出成	PDF	pdf
+这个	PPT	ppt
+明天开会要用的	PPT	ppt
+这个	AMD	amd
+这个	BMW	bmw
+他开的是	BMW	bmw
+这个	HTTP	http
+查一下	API	api
+后端提供的	API	api
+这个	Intel	intel
+处理器是	Intel	intel
+我们公司用的是	Docker	docker
+这个	Docker	docker
+这个	React	react
+前端框架用的是	React	react
+这个	App	app
+手机上的	App	app
+帮我看一下	Python	python
+我最近在学	Python	python
+我最近在学	Rust	rust
+这个项目是用	Rust	rust
+这个	Excel	excel
+把数据导入	Excel	excel
+这个	Word	word
+这个	bug	bug
+代码里有一个	bug	bug
+帮我看一下	demo	demo
+这个	email	email
+缓存用的是	Redis	redis
+这个	office	office
+这个	switch	switch
+这个	zoom	zoom
+这个	ok	ok
+我觉得	ok	ok
+这个功能用	AI	ai
+人工智能的英文缩写是	AI	ai
+做一个	PPT 演示	pptyanshi
+打开	Excel 表格	excelbiaoge
+我在学	Python 编程	pythonbiancheng
+这个	bug 很难修	bughennanxiu
+今天	学了一下 Python	xueleyixiapython
+先	打开 WiFi	dakaiwifi
+先	打开 WiFi 设置	dakaiwifishezhi
+读取	JSON 文件	jsonwenjian
+插到	USB 接口	usbjiekou
+写一个	HTML 页面	htmlyemian
+这块显卡的	GPU 性能	gpuxingneng
+调用	API 接口	apijiekou
+开通	VIP 用户	vipyonghu
+去做	DNA 检测	dnajiance
+给他	发一个 email	fayigeemail
+我们	用 zoom 开会	yongzoomkaihui
+这段	Python 代码	pythondaima
+请把	PDF 发给我	pdffageiwo
+这个	App 很好用	apphenhaoyong
+新买的	Mac 电脑	macdiannao

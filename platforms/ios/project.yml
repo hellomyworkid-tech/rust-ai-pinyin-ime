@@ -1,0 +1,205 @@
+# iOS 工程由 XcodeGen 生成：cd platforms/ios && xcodegen generate
+# Bundle ID、App Group、团队 ID 只在这里定义，改名时改这一处（以及 Shared/AppGroup.swift 里的 group 标识）。
+name: AIPinyin
+options:
+  bundleIdPrefix: com.zengji
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: 83KV7ZY77L
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # ImeFFI.xcframework 只有 arm64（真机、Apple 芯片模拟器）。不排除 x86_64 的话，
+    # 不指定具体模拟器的 Release 构建（generic/platform=iOS Simulator）会因为缺 x86_64 的库而链接失败
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+targets:
+  AIPinyin:
+    type: application
+    platform: iOS
+    # App/ 里还有 Assets.xcassets（AppIcon，目前是占位图）和 PrivacyInfo.xcprivacy（隐私清单）
+    sources: [App, Shared]
+    scheme:
+      testTargets: [AIPinyinTests, AIPinyinUITests]
+    info:
+      path: Generated/App-Info.plist
+      properties:
+        CFBundleDisplayName: AI 拼音
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        # 宿主界面暂时允许横屏，键盘的横屏布局要靠它来测（正式 App 可改回只竖屏）
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+    entitlements:
+      path: Generated/App.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.zengji.aipinyin]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zengji.aipinyin
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # 只上 iPhone。XcodeGen 给每个 iOS target 预设了 "1,2"，会盖掉上面工程级的 "1"，所以 target 里再写一遍
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      - target: AIPinyinKeyboard
+  AIPinyinKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      # Keyboard/ 里有 PrivacyInfo.xcprivacy（键盘扩展的隐私清单）
+      - Keyboard
+      - Shared
+      # 完整词库由 scripts/build-rust.sh 拷到这里（不进版本库）；键盘用只读 mmap 打开它。
+      # 只打进调试构建：词库来自雾凇拼音（GPL-3.0-only），Release 构建不打（见下面 configs 里的
+      # EXCLUDED_SOURCE_FILE_NAMES），由 App 第一次打开时下载（Shared/LexiconCatalog.swift）。
+      # optional 只是让 xcodegen generate 在词库还没生成时也能出工程；调试构建没有它会失败（见下面的检查）
+      - path: Resources/merged_lexicon.bin
+        optional: true
+        buildPhase: resources
+      # 基础词库：AOSP 拼音输入法的词库（Apache-2.0，6.5 万词）编译成的小词库，完整词库下完之前先能打中文。
+      # 由 scripts/build-fallback-lexicon.sh 生成（scripts/build-rust.sh 也会生成），不进版本库
+      - path: Resources/fallback_lexicon.bin
+        buildPhase: resources
+    preBuildScripts:
+      # 两样都由 scripts/build-rust.sh 生成。缺了给一句看得懂的错误，而不是链接或拷贝资源时的报错
+      - name: 检查 Rust 引擎和词库
+        basedOnDependencyAnalysis: false
+        script: |
+          missing=""
+          [ -f "$SRCROOT/Frameworks/ImeFFI.xcframework/Info.plist" ] || missing="$missing Frameworks/ImeFFI.xcframework"
+          # Release 不打完整词库（App 下载），只有调试构建要它；基础词库都要
+          if [ "$CONFIGURATION" != "Release" ]; then
+            [ -s "$SRCROOT/Resources/merged_lexicon.bin" ] || missing="$missing Resources/merged_lexicon.bin"
+          fi
+          [ -s "$SRCROOT/Resources/fallback_lexicon.bin" ] || missing="$missing Resources/fallback_lexicon.bin"
+          if [ -n "$missing" ]; then
+            echo "error: 缺少$missing。先在 platforms/ios 下运行 scripts/build-rust.sh，再 xcodegen generate"
+            exit 1
+          fi
+    postBuildScripts:
+      # Release 构建再查一次产物：雾凇拼音的完整词库（GPL-3.0-only）不能进安装包；
+      # 基础词库必须在（不然完整词库下完之前键盘只能打英文）
+      - name: 检查词库打包
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "$CONFIGURATION" = "Release" ]; then
+            resources="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
+            if [ -e "$resources/merged_lexicon.bin" ]; then
+              echo "error: Release 的键盘扩展里打进了完整词库 merged_lexicon.bin（应由 App 下载）"
+              exit 1
+            fi
+            if [ ! -s "$resources/fallback_lexicon.bin" ]; then
+              echo "error: 键盘扩展里没有基础词库 fallback_lexicon.bin：完整词库下完之前只能打英文"
+              exit 1
+            fi
+          fi
+    dependencies:
+      # Rust 引擎的静态库和 C 头文件，同样由 scripts/build-rust.sh 生成
+      - framework: Frameworks/ImeFFI.xcframework
+        embed: false
+    info:
+      path: Generated/Keyboard-Info.plist
+      properties:
+        CFBundleDisplayName: AI 拼音
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            IsASCIICapable: true
+            PrefersRightToLeft: false
+            PrimaryLanguage: zh-Hans
+            RequestsOpenAccess: true
+    entitlements:
+      path: Generated/Keyboard.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.zengji.aipinyin]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zengji.aipinyin.keyboard
+        TARGETED_DEVICE_FAMILY: "1"
+        # Rust 标准库需要 libiconv；库里的 llama.cpp 是 C++，打分时的 log-softmax 用 Accelerate
+        OTHER_LDFLAGS: ["-liconv", "-lc++", "-framework", "Accelerate"]
+      configs:
+        # 完整词库只打进调试构建（见上面 sources 的说明）
+        Release:
+          EXCLUDED_SOURCE_FILE_NAMES: merged_lexicon.bin
+  # 单元测试不挂宿主 App：键盘里的纯逻辑（引擎边界、按键规则、AI 调度）直接编进测试包。
+  # 界面代码（Keyboard/UI、KeyboardViewController）不编进来，靠 UI 测试覆盖。
+  AIPinyinTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+        excludes: ["Fixtures/**"]
+      - path: Tests/Fixtures
+        type: folder
+        buildPhase: resources
+      - Keyboard/Engine
+      - Keyboard/Logic
+      - Keyboard/AI
+      - Shared
+      # 宿主 App 里不依赖界面的部分（设置存取、下载状态机）
+      - App/Core
+    dependencies:
+      # RustEngineTests 直接对真引擎测；词库从源码目录读
+      - framework: Frameworks/ImeFFI.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zengji.aipinyin.tests
+        GENERATE_INFOPLIST_FILE: YES
+        OTHER_LDFLAGS: ["-liconv", "-lc++", "-framework", "Accelerate"]
+  # 真机评测：挂在宿主 App 里跑（能读 App Group 里下载好的模型，词库取自 App 包里的键盘扩展），
+  # 用真引擎和真模型量准确率、等待时间和内存。只在单独的 AIPinyinDeviceEval scheme 里，平时的测试不跑它
+  AIPinyinDeviceEval:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - DeviceEval
+      # 评测用例：仓库根目录的 data/eval，作为 eval 文件夹拷进测试包
+      - path: ../../data/eval
+        name: eval
+        type: folder
+        buildPhase: resources
+      - Keyboard/Engine
+      - Keyboard/Logic
+      - Keyboard/AI
+      - Shared
+    dependencies:
+      - target: AIPinyin
+      - framework: Frameworks/ImeFFI.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zengji.aipinyin.deviceeval
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/AIPinyin.app/AIPinyin"
+        OTHER_LDFLAGS: ["-liconv", "-lc++", "-framework", "Accelerate"]
+  # 冒烟测试：在宿主 App 的输入框里用 AI 拼音键盘打字（需要先在模拟器里启用键盘，见 README）
+  AIPinyinUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: AIPinyin
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zengji.aipinyin.uitests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  # 真机评测单独一个 scheme：xcodebuild -scheme AIPinyinDeviceEval -destination 'platform=iOS,id=<UDID>' test
+  AIPinyinDeviceEval:
+    build:
+      targets:
+        AIPinyin: all
+        AIPinyinDeviceEval: [test]
+    test:
+      config: Debug
+      targets: [AIPinyinDeviceEval]

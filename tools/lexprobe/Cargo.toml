@@ -1,0 +1,15 @@
+# 词库内存与解码延迟探针（独立工程，不属于 workspace）。用法：
+#   cargo run --release --manifest-path tools/lexprobe/Cargo.toml -- data/compiled/merged_lexicon.bin
+[package]
+name = "lexprobe"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+ime-lexicon = { path = "../../crates/ime-lexicon" }
+ime-core = { path = "../../crates/ime-core" }
+
+[profile.release]
+opt-level = 3

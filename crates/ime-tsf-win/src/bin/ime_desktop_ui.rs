@@ -1098,7 +1098,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "--self-test") {
         let vm = session.build_view_model();
         println!("=== [ime-desktop-ui Self-Test] ===");
-        println!("  - 词库加载词条数 : {}", session.core.lexicon.entries.len());
+        println!("  - 词库加载词条数 : {}", session.core.lexicon.entry_count());
         println!("  - 预编辑音节数量 : {}", vm.syllable_spans.len());
         println!(
             "  - 预编辑音节列表 : {:?}",

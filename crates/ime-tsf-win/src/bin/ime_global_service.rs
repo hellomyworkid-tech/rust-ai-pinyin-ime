@@ -5532,7 +5532,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| PathBuf::from("."));
 
     let lexicon = CompiledLexicon::load_or_build_default(&fallback_root)?;
-    let entry_count = lexicon.entries.len();
+    let entry_count = lexicon.entry_count();
     LEXICON_ENTRY_COUNT.store(entry_count, Ordering::Relaxed);
     let persistent_cfg = ImePersistentConfig::load_or_default();
     let mut core = ImeCoreEngine::new(lexicon);

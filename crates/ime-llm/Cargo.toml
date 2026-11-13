@@ -1,0 +1,24 @@
+[package]
+name = "ime-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+# 启用进程内 llama.cpp 打分（需先运行 scripts/build_llama.sh，或通过环境变量指向已有的 llama.cpp 静态库）
+llama = ["dep:cc"]
+
+[dependencies]
+# 打分文本构造规则（`ime_ai::lm_text`）与打分器接口（`ime_ai::CandidateScorer`）定义在 ime-ai；
+# 依赖方向是 ime-llm → ime-ai，ime-ai 本身不依赖 llama.cpp
+ime-ai = { path = "../ime-ai" }
+thiserror.workspace = true
+
+[build-dependencies]
+cc = { version = "1", optional = true }
+
+[[example]]
+name = "lmscore_bench"
+required-features = ["llama"]

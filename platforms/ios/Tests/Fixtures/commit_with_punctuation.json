@@ -1,0 +1,1015 @@
+{
+  "action": "update",
+  "view": {
+    "active_scene_label": "通用日常",
+    "active_syllable_index": null,
+    "ai_semantic_hint": "通用语境",
+    "composed_full_sentence": "实验 ,",
+    "cursor_byte_pos": 7,
+    "full_sentence_parts": [
+      [
+        "实验 ,",
+        false
+      ]
+    ],
+    "full_sentence_selected": false,
+    "ghost_text_preview": null,
+    "page_index": 0,
+    "page_size": 30,
+    "preedit_text": "shi'yan',",
+    "selected_candidate_index": 0,
+    "syllable_spans": [
+      {
+        "code_key": "shi",
+        "end": 3,
+        "start": 0,
+        "text": "实"
+      },
+      {
+        "code_key": "yan",
+        "end": 6,
+        "start": 3,
+        "text": "验"
+      },
+      {
+        "code_key": ",",
+        "end": 7,
+        "start": 6,
+        "text": ","
+      }
+    ],
+    "top_segments": [
+      {
+        "code_key": "shi'yan",
+        "end": 6,
+        "start": 0,
+        "text": "实验"
+      },
+      {
+        "code_key": ",",
+        "end": 7,
+        "start": 6,
+        "text": ","
+      }
+    ],
+    "total_candidates": 114,
+    "visible": true,
+    "visible_candidates": [
+      {
+        "ai_boosted": false,
+        "consumed_len": 7,
+        "final_score": 75.29814147949219,
+        "l1_cost": 24.701860427856445,
+        "preedit": "shi'yan ,",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "实验"
+          },
+          {
+            "code_key": ",",
+            "end": 7,
+            "start": 6,
+            "text": ","
+          }
+        ],
+        "segments": [
+          "实验",
+          ","
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "实"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "验"
+          },
+          {
+            "code_key": ",",
+            "end": 7,
+            "start": 6,
+            "text": ","
+          }
+        ],
+        "tag": "[中英混输]",
+        "text": "实验 ,"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.29814147949219,
+        "l1_cost": 25.201860427856445,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "实验"
+          }
+        ],
+        "segments": [
+          "实验"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "实"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "验"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "实验"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.28813934326172,
+        "l1_cost": 25.251859664916992,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "试验"
+          }
+        ],
+        "segments": [
+          "试验"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "试"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "验"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "试验"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.27814483642578,
+        "l1_cost": 25.301860809326172,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "饰演"
+          }
+        ],
+        "segments": [
+          "饰演"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "饰"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "演"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "饰演"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.26814270019531,
+        "l1_cost": 25.35186004638672,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "食盐"
+          }
+        ],
+        "segments": [
+          "食盐"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "食"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "盐"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "食盐"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.25814056396484,
+        "l1_cost": 25.4018611907959,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "誓言"
+          }
+        ],
+        "segments": [
+          "誓言"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "誓"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "言"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "誓言"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.24813842773438,
+        "l1_cost": 25.451860427856445,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "失言"
+          }
+        ],
+        "segments": [
+          "失言"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "失"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "言"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "失言"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.23814392089844,
+        "l1_cost": 25.501859664916992,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "食言"
+          }
+        ],
+        "segments": [
+          "食言"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "食"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "言"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "食言"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.22814178466797,
+        "l1_cost": 25.551860809326172,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "嗜烟"
+          }
+        ],
+        "segments": [
+          "嗜烟"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "嗜"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "烟"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "嗜烟"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.2181396484375,
+        "l1_cost": 25.60186004638672,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "试演"
+          }
+        ],
+        "segments": [
+          "试演"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "试"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "演"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "试演"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.20814514160156,
+        "l1_cost": 25.6518611907959,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "时延"
+          }
+        ],
+        "segments": [
+          "时延"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "时"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "延"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "时延"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.1981430053711,
+        "l1_cost": 25.701860427856445,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "时谚"
+          }
+        ],
+        "segments": [
+          "时谚"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "时"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "谚"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "时谚"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 6,
+        "final_score": 74.18814086914062,
+        "l1_cost": 25.751859664916992,
+        "preedit": "shi'yan",
+        "segment_spans": [
+          {
+            "code_key": "shi'yan",
+            "end": 6,
+            "start": 0,
+            "text": "石砚"
+          }
+        ],
+        "segments": [
+          "石砚"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "石"
+          },
+          {
+            "code_key": "yan",
+            "end": 6,
+            "start": 3,
+            "text": "砚"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "石砚"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 74.17813873291016,
+        "l1_cost": 25.801860809326172,
+        "preedit": "shi'ya",
+        "segment_spans": [
+          {
+            "code_key": "shi'ya",
+            "end": 5,
+            "start": 0,
+            "text": "是呀"
+          }
+        ],
+        "segments": [
+          "是呀"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "是"
+          },
+          {
+            "code_key": "ya",
+            "end": 5,
+            "start": 3,
+            "text": "呀"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "是呀"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 74.16814422607422,
+        "l1_cost": 25.85186004638672,
+        "preedit": "shi'ya",
+        "segment_spans": [
+          {
+            "code_key": "shi'ya",
+            "end": 5,
+            "start": 0,
+            "text": "施压"
+          }
+        ],
+        "segments": [
+          "施压"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "施"
+          },
+          {
+            "code_key": "ya",
+            "end": 5,
+            "start": 3,
+            "text": "压"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "施压"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 74.15814208984375,
+        "l1_cost": 25.9018611907959,
+        "preedit": "shi'ya",
+        "segment_spans": [
+          {
+            "code_key": "shi'ya",
+            "end": 5,
+            "start": 0,
+            "text": "石崖"
+          }
+        ],
+        "segments": [
+          "石崖"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "石"
+          },
+          {
+            "code_key": "ya",
+            "end": 5,
+            "start": 3,
+            "text": "崖"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "石崖"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 74.14813995361328,
+        "l1_cost": 25.951860427856445,
+        "preedit": "shi'ya",
+        "segment_spans": [
+          {
+            "code_key": "shi'ya",
+            "end": 5,
+            "start": 0,
+            "text": "试压"
+          }
+        ],
+        "segments": [
+          "试压"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "试"
+          },
+          {
+            "code_key": "ya",
+            "end": 5,
+            "start": 3,
+            "text": "压"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "试压"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.13813781738281,
+        "l1_cost": 26.001859664916992,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "是"
+          }
+        ],
+        "segments": [
+          "是"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "是"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "是"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.12814331054688,
+        "l1_cost": 26.051860809326172,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "时"
+          }
+        ],
+        "segments": [
+          "时"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "时"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "时"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.1181411743164,
+        "l1_cost": 26.10186004638672,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "事"
+          }
+        ],
+        "segments": [
+          "事"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "事"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "事"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.10813903808594,
+        "l1_cost": 26.1518611907959,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "实"
+          }
+        ],
+        "segments": [
+          "实"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "实"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "实"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.09814453125,
+        "l1_cost": 26.201860427856445,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "十"
+          }
+        ],
+        "segments": [
+          "十"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "十"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "十"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.08814239501953,
+        "l1_cost": 26.251859664916992,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "使"
+          }
+        ],
+        "segments": [
+          "使"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "使"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "使"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.07814025878906,
+        "l1_cost": 26.301860809326172,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "师"
+          }
+        ],
+        "segments": [
+          "师"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "师"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "师"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.0681381225586,
+        "l1_cost": 26.35186004638672,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "世"
+          }
+        ],
+        "segments": [
+          "世"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "世"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "世"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.05814361572266,
+        "l1_cost": 26.4018611907959,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "屎"
+          }
+        ],
+        "segments": [
+          "屎"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "屎"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "屎"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.04814147949219,
+        "l1_cost": 26.451860427856445,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "始"
+          }
+        ],
+        "segments": [
+          "始"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "始"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "始"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.03813934326172,
+        "l1_cost": 26.501859664916992,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "失"
+          }
+        ],
+        "segments": [
+          "失"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "失"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "失"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.02814483642578,
+        "l1_cost": 26.551860809326172,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "士"
+          }
+        ],
+        "segments": [
+          "士"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "士"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "士"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 3,
+        "final_score": 74.01814270019531,
+        "l1_cost": 26.60186004638672,
+        "preedit": "shi",
+        "segment_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "湿"
+          }
+        ],
+        "segments": [
+          "湿"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "shi",
+            "end": 3,
+            "start": 0,
+            "text": "湿"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "湿"
+      }
+    ]
+  }
+}

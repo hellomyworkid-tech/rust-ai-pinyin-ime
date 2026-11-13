@@ -326,6 +326,10 @@ mod win32_installer {
             let _ = Command::new("taskkill")
                 .args(["/F", "/IM", "llama-server.exe"])
                 .output();
+            // 桌面体验台同样加载着词库：词库在进程存活期间一直保持映射，而 Windows 不允许覆盖被映射的文件
+            for image in ["AI拼音输入法桌面体验台.exe", "ime-desktop-ui.exe"] {
+                let _ = Command::new("taskkill").args(["/F", "/IM", image]).output();
+            }
 
             // 1. Copy global service executable
             let global_src = self
@@ -398,8 +402,26 @@ mod win32_installer {
                 "merged_lexicon.bin",
             ]) {
                 let lex_dst = data_dir.join("merged_lexicon.bin");
-                fs::copy(&lex_src, &lex_dst)
-                    .map_err(|e| format!("复制 57.1 万词库失败: {e}"))?;
+                // 清理以往更新时挪开的旧词库（仍被某个进程映射着的删不掉，留给下一次安装）
+                if let Ok(dir_entries) = fs::read_dir(&data_dir) {
+                    for entry in dir_entries.flatten() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with("merged_lexicon.") && name.ends_with(".old") {
+                            let _ = fs::remove_file(entry.path());
+                        }
+                    }
+                }
+                // 词库被加载后在该进程里一直保持映射（零拷贝格式）；Windows 不允许覆盖被映射的文件，但允许改名。
+                // 若仍有进程占用（例如从别处启动的开发版服务 / 体验台），就像上面的 DLL 一样把旧文件改名挪开再写入新词库，
+                // 占用它的进程继续读旧文件，重启后即加载新词库
+                if fs::copy(&lex_src, &lex_dst).is_err() {
+                    let old_bak = data_dir.join(format!("merged_lexicon.{}.old", std::process::id()));
+                    let _ = fs::remove_file(&old_bak);
+                    let _ = fs::rename(&lex_dst, &old_bak);
+                    fs::copy(&lex_src, &lex_dst)
+                        .map_err(|e| format!("复制 57.1 万词库失败: {e}"))?;
+                }
                 self.status_logs
                     .push("✔ 已安装 571,673 词条融合词库: data\\compiled\\merged_lexicon.bin".to_string());
             }
@@ -493,6 +515,10 @@ mod win32_installer {
             let _ = Command::new("taskkill")
                 .args(["/F", "/IM", "llama-server.exe"])
                 .output();
+            // 桌面体验台同样映射着词库：不先结束它，下面删除 data 目录时词库文件删不掉
+            for image in ["AI拼音输入法桌面体验台.exe", "ime-desktop-ui.exe"] {
+                let _ = Command::new("taskkill").args(["/F", "/IM", image]).output();
+            }
             if let Some(userprofile) = env::var_os("USERPROFILE") {
                 let lnk = PathBuf::from(userprofile)
                     .join("Desktop")

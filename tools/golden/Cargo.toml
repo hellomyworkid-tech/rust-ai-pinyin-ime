@@ -1,0 +1,17 @@
+# Regression harness: dumps decoder + rule-rerank output for a fixed input list.
+# Lives at <repo>/tools/golden and is not a workspace member.
+[package]
+name = "golden"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+ime-lexicon = { path = "../../crates/ime-lexicon" }
+ime-core = { path = "../../crates/ime-core" }
+ime-ai = { path = "../../crates/ime-ai" }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = 3

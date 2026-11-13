@@ -124,7 +124,7 @@ impl BilingualLattice {
                 continue;
             }
             let no_full_syl_at_start = spans_at[start_pos].is_empty();
-            for (matched_len, entry_ids) in lexicon.abbrev_trie.common_prefix_search(suffix) {
+            for (matched_len, entry_ids) in lexicon.abbrev_trie().common_prefix_search(suffix) {
                 let end_pos = start_pos + matched_len;
                 let span_str = &input[start_pos..end_pos];
                 let is_whole_input = start_pos == 0 && end_pos == n;
@@ -132,10 +132,11 @@ impl BilingualLattice {
                 // 3.1 单字母声母简拼单字（如输入 `w`、`wzj` 中的 `w`/`z`/`j`、或句首/句中/句尾未成音节的孤立声母 `z`/`w`/`f`）：
                 // 当该位置无完整全拼音节（`no_full_syl_at_start`）且句中不构成词典英文词前缀时，允许匹配高频声母单字，杜绝退化为原样英文字母
                 if matched_len == 1 {
-                    let has_eng_word_at_start = !lexicon
-                        .english_trie
+                    let has_eng_word_at_start = lexicon
+                        .english_trie()
                         .common_prefix_search(&lower_input[start_pos..])
-                        .is_empty();
+                        .next()
+                        .is_some();
                     if !no_full_syl_at_start
                         || (n > 6 && end_pos < n && has_eng_word_at_start)
                     {
@@ -157,17 +158,17 @@ impl BilingualLattice {
                     } else {
                         4.2
                     };
-                    for &id in entry_ids.iter().take(take_chars) {
-                        let entry = &lexicon.entries[id as usize];
-                        if entry.pinyin_syllables.len() == 1 {
+                    for id in entry_ids.iter().take(take_chars) {
+                        let entry = lexicon.entry(id);
+                        if entry.syllable_count() == 1 {
                             edges_from[start_pos].push(LatticeEdge {
                                 start: start_pos,
                                 end: end_pos,
-                                text: entry.text.clone(),
+                                text: entry.text().to_string(),
                                 code_key: span_str.to_string(),
                                 kind: EdgeKind::ChineseChar,
-                                base_cost: entry.cost + char_penalty,
-                                domain: entry.domain,
+                                base_cost: entry.cost() + char_penalty,
+                                domain: entry.domain(),
                                 syllable_count: 1,
                                 is_fuzzy: false,
                             });
@@ -190,7 +191,7 @@ impl BilingualLattice {
                     && no_full_syl_at_start
                     && matched_len <= 4
                     && lexicon
-                        .english_trie
+                        .english_trie()
                         .exact_lookup(&lower_input[start_pos..end_pos])
                         .is_empty();
 
@@ -210,20 +211,20 @@ impl BilingualLattice {
                     (6.8 + (matched_len as f32) * 1.8, 6)
                 };
 
-                for &id in entry_ids.iter().take(take_limit) {
-                    let entry = &lexicon.entries[id as usize];
-                    if entry.pinyin_syllables.len() < 2 {
+                for id in entry_ids.iter().take(take_limit) {
+                    let entry = lexicon.entry(id);
+                    if entry.syllable_count() < 2 {
                         continue;
                     }
                     edges_from[start_pos].push(LatticeEdge {
                         start: start_pos,
                         end: end_pos,
-                        text: entry.text.clone(),
-                        code_key: entry.syllable_key.clone(),
+                        text: entry.text().to_string(),
+                        code_key: entry.syllable_key().to_string(),
                         kind: EdgeKind::AbbrevPinyin,
-                        base_cost: entry.cost + abbrev_penalty,
-                        domain: entry.domain,
-                        syllable_count: entry.pinyin_syllables.len(),
+                        base_cost: entry.cost() + abbrev_penalty,
+                        domain: entry.domain(),
+                        syllable_count: entry.syllable_count(),
                         is_fuzzy: false,
                     });
                 }
@@ -235,23 +236,23 @@ impl BilingualLattice {
                 && suffix.bytes().all(|b| b.is_ascii_lowercase())
                 && !crate::pinyin::is_valid_syllable(suffix)
                 && lexicon
-                    .english_trie
+                    .english_trie()
                     .exact_lookup(&lower_input[start_pos..n])
                     .is_empty()
             {
                 let take_inc = if start_pos == 0 { 24 } else { 6 };
                 let inc_char_penalty = if start_pos == 0 { 1.25 } else { 2.85 };
                 for id in collect_syllable_prefix_entries(lexicon, 0, suffix, false, take_inc) {
-                    let entry = &lexicon.entries[id as usize];
-                    if entry.pinyin_syllables.len() == 1 && entry.text.chars().count() == 1 {
+                    let entry = lexicon.entry(id);
+                    if entry.syllable_count() == 1 && entry.text().chars().count() == 1 {
                         edges_from[start_pos].push(LatticeEdge {
                             start: start_pos,
                             end: n,
-                            text: entry.text.clone(),
+                            text: entry.text().to_string(),
                             code_key: suffix.to_string(),
                             kind: EdgeKind::ChineseChar,
-                            base_cost: entry.cost + inc_char_penalty,
-                            domain: entry.domain,
+                            base_cost: entry.cost() + inc_char_penalty,
+                            domain: entry.domain(),
                             syllable_count: 1,
                             is_fuzzy: false,
                         });
@@ -273,7 +274,7 @@ impl BilingualLattice {
             let starts_with_upper = orig_suffix.as_bytes()[0].is_ascii_uppercase();
 
             // 4.1 精确前缀匹配词典中的英文词（如 `rust`, `api`, `github`, `open`, `source`, `bug`）
-            for (matched_len, entry_ids) in lexicon.english_trie.common_prefix_search(lower_suffix) {
+            for (matched_len, entry_ids) in lexicon.english_trie().common_prefix_search(lower_suffix) {
                 let end_pos = start_pos + matched_len;
                 let raw_slice = &input[start_pos..end_pos];
                 let cluster_score = detector.english_cluster_score(raw_slice);
@@ -292,16 +293,16 @@ impl BilingualLattice {
                     0.0
                 };
 
-                for &id in entry_ids.iter().take(4) {
-                    let entry = &lexicon.entries[id as usize];
+                for id in entry_ids.iter().take(4) {
+                    let entry = lexicon.entry(id);
                     edges_from[start_pos].push(LatticeEdge {
                         start: start_pos,
                         end: end_pos,
-                        text: entry.text.clone(),
-                        code_key: entry.flat_key.clone(),
+                        text: entry.text().to_string(),
+                        code_key: entry.flat_key().into_owned(),
                         kind: EdgeKind::EnglishWord,
-                        base_cost: (entry.cost - phonotactic_bonus + short_overlap_penalty).max(0.2),
-                        domain: entry.domain,
+                        base_cost: (entry.cost() - phonotactic_bonus + short_overlap_penalty).max(0.2),
+                        domain: entry.domain(),
                         syllable_count: 1,
                         is_fuzzy: false,
                     });
@@ -310,18 +311,18 @@ impl BilingualLattice {
 
             // 4.2 句尾长英文前缀自动补全（如输入 `typesc` 自动补全 `TypeScript`）
             if start_pos == 0 && n >= 4 {
-                let prefix_ids = lexicon.english_trie.prefix_lookup(lower_suffix);
-                for &id in prefix_ids.iter().take(3) {
-                    let entry = &lexicon.entries[id as usize];
-                    if entry.flat_key.len() > n {
+                let prefix_ids = lexicon.english_trie().prefix_lookup(lower_suffix);
+                for id in prefix_ids.iter().take(3) {
+                    let entry = lexicon.entry(id);
+                    if entry.flat_key().len() > n {
                         edges_from[0].push(LatticeEdge {
                             start: 0,
                             end: n,
-                            text: entry.text.clone(),
-                            code_key: entry.flat_key.clone(),
+                            text: entry.text().to_string(),
+                            code_key: entry.flat_key().into_owned(),
                             kind: EdgeKind::EnglishPrefixCompletion,
-                            base_cost: entry.cost + 1.5,
-                            domain: entry.domain,
+                            base_cost: entry.cost() + 1.5,
+                            domain: entry.domain(),
                             syllable_count: 1,
                             is_fuzzy: false,
                         });
@@ -423,7 +424,7 @@ fn collect_chinese_edges<'a>(
     let base_node = if depth == 0 {
         curr_trie_node
     } else {
-        match lexicon.syllable_trie.advance_node(curr_trie_node, "'") {
+        match lexicon.syllable_trie().advance_node(curr_trie_node, "'") {
             Some(node) => node,
             None => return,
         }
@@ -442,11 +443,11 @@ fn collect_chinese_edges<'a>(
         }
 
         // 在 Trie 上直接推进一个音节，若词库中根本不存在以该音节序列为前缀的词条，立即剪枝！
-        let Some(next_node) = lexicon.syllable_trie.advance_node(base_node, &sp.syllable) else {
+        let Some(next_node) = lexicon.syllable_trie().advance_node(base_node, &sp.syllable) else {
             continue;
         };
 
-        let hit_ids = &lexicon.syllable_trie.nodes[next_node as usize].exact_entries;
+        let hit_ids = lexicon.syllable_trie().exact_entries(next_node);
         if !hit_ids.is_empty() {
             let take_limit = if syl_count == 1 {
                 if new_fuzzy > 0.0 {
@@ -481,20 +482,20 @@ fn collect_chinese_edges<'a>(
                 new_fuzzy
             };
 
-            for &id in hit_ids.iter().take(take_limit) {
-                let entry = &lexicon.entries[id as usize];
+            for id in hit_ids.iter().take(take_limit) {
+                let entry = lexicon.entry(id);
                 out_edges.push(LatticeEdge {
                     start: origin_start,
                     end: sp.end,
-                    text: entry.text.clone(),
-                    code_key: entry.syllable_key.clone(),
+                    text: entry.text().to_string(),
+                    code_key: entry.syllable_key().to_string(),
                     kind: if syl_count >= 2 {
                         EdgeKind::ChineseWord
                     } else {
                         EdgeKind::ChineseChar
                     },
-                    base_cost: entry.cost + effective_fuzzy,
-                    domain: entry.domain,
+                    base_cost: entry.cost() + effective_fuzzy,
+                    domain: entry.domain(),
                     syllable_count: syl_count,
                     is_fuzzy: new_fuzzy > 0.0,
                 });
@@ -523,7 +524,7 @@ fn collect_chinese_edges<'a>(
         if rem_tail.len() <= 5 && rem_tail.bytes().all(|b| b.is_ascii_lowercase()) {
             let tail_is_valid_syl = crate::pinyin::is_valid_syllable(rem_tail);
             let whole_slice_is_en = !lexicon
-                .english_trie
+                .english_trie()
                 .exact_lookup(&whole_slice_lower)
                 .is_empty();
             let inc_penalty = if whole_slice_is_en {
@@ -539,10 +540,10 @@ fn collect_chinese_edges<'a>(
             // 2) 仅当原样完整音节无常用词（如 `zhonggu` 仅有低频词「中古」）且补全音节最多只多 1 个尾字母（如 `gu` -> `guo` 补全「中国」）时才允许补全。
             let exact_best_cost = if tail_is_valid_syl {
                 lexicon
-                    .syllable_trie
+                    .syllable_trie()
                     .advance_node(base_node, rem_tail)
-                    .and_then(|nd| lexicon.syllable_trie.nodes[nd as usize].exact_entries.first().copied())
-                    .map(|id| lexicon.entries[id as usize].cost)
+                    .and_then(|nd| lexicon.syllable_trie().exact_entries(nd).first())
+                    .map(|id| lexicon.entry(id).cost())
             } else {
                 None
             };
@@ -553,28 +554,28 @@ fn collect_chinese_edges<'a>(
             };
             if allow_tail_completion {
                 for id in collect_syllable_prefix_entries(lexicon, base_node, rem_tail, false, 8) {
-                    let entry = &lexicon.entries[id as usize];
+                    let entry = lexicon.entry(id);
                     if tail_is_valid_syl {
                         let last_syl_len = entry
-                            .pinyin_syllables
-                            .last()
+                            .syllables()
+                            .next_back()
                             .map(|s| s.len())
                             .unwrap_or(0);
                         if last_syl_len > rem_tail.len() + 1 {
                             continue;
                         }
-                        if exact_best_cost.is_some_and(|best| entry.cost + 0.8 >= best) {
+                        if exact_best_cost.is_some_and(|best| entry.cost() + 0.8 >= best) {
                             continue;
                         }
                     }
                     out_edges.push(LatticeEdge {
                         start: origin_start,
                         end: n,
-                        text: entry.text.clone(),
-                        code_key: entry.syllable_key.clone(),
+                        text: entry.text().to_string(),
+                        code_key: entry.syllable_key().to_string(),
                         kind: EdgeKind::ChineseWord,
-                        base_cost: entry.cost + inc_penalty,
-                        domain: entry.domain,
+                        base_cost: entry.cost() + inc_penalty,
+                        domain: entry.domain(),
                         syllable_count: syl_count,
                         is_fuzzy: false,
                     });
@@ -588,15 +589,15 @@ fn collect_chinese_edges<'a>(
                     &rem_tail[1..2],
                     6,
                 ) {
-                    let entry = &lexicon.entries[id as usize];
+                    let entry = lexicon.entry(id);
                     out_edges.push(LatticeEdge {
                         start: origin_start,
                         end: n,
-                        text: entry.text.clone(),
-                        code_key: entry.syllable_key.clone(),
+                        text: entry.text().to_string(),
+                        code_key: entry.syllable_key().to_string(),
                         kind: EdgeKind::ChineseWord,
-                        base_cost: entry.cost + 1.35,
-                        domain: entry.domain,
+                        base_cost: entry.cost() + 1.35,
+                        domain: entry.domain(),
                         syllable_count: syl_count + 1,
                         is_fuzzy: false,
                     });
@@ -615,21 +616,22 @@ fn collect_syllable_prefix_entries(
     include_self: bool,
     limit: usize,
 ) -> Vec<u32> {
-    let Some(p_node) = lexicon.syllable_trie.advance_node(start_node, prefix_slice) else {
+    let syllable_trie = lexicon.syllable_trie();
+    let Some(p_node) = syllable_trie.advance_node(start_node, prefix_slice) else {
         return Vec::new();
     };
     let mut stack = vec![(p_node, 0u8)];
     let mut cands: Vec<(f32, u32)> = Vec::new();
     while let Some((node_idx, depth)) = stack.pop() {
-        let node = &lexicon.syllable_trie.nodes[node_idx as usize];
+        let node = syllable_trie.node(node_idx);
         if depth > 0 || include_self {
-            for &id in &node.exact_entries {
-                let cost = lexicon.entries[id as usize].cost;
+            for id in node.exact_entries() {
+                let cost = lexicon.entry(id).cost();
                 cands.push((cost, id));
             }
         }
         if depth < 5 {
-            for &(ch, child_idx) in &node.transitions {
+            for (ch, child_idx) in node.transitions() {
                 if ch.is_ascii_lowercase() {
                     stack.push((child_idx, depth + 1));
                 }
@@ -649,18 +651,19 @@ fn collect_two_initial_tail_entries(
     c2: &str,
     limit: usize,
 ) -> Vec<u32> {
-    let Some(p1) = lexicon.syllable_trie.advance_node(start_node, c1) else {
+    let syllable_trie = lexicon.syllable_trie();
+    let Some(p1) = syllable_trie.advance_node(start_node, c1) else {
         return Vec::new();
     };
     let mut stack1 = vec![(p1, 0u8)];
     let mut after_sep_nodes = Vec::new();
     while let Some((node_idx, d)) = stack1.pop() {
-        let node = &lexicon.syllable_trie.nodes[node_idx as usize];
+        let node = syllable_trie.node(node_idx);
         if let Some(sep_child) = node.find_child(b'\'') {
             after_sep_nodes.push(sep_child);
         }
         if d < 5 {
-            for &(ch, child_idx) in &node.transitions {
+            for (ch, child_idx) in node.transitions() {
                 if ch.is_ascii_lowercase() {
                     stack1.push((child_idx, d + 1));
                 }
@@ -670,7 +673,7 @@ fn collect_two_initial_tail_entries(
     let mut cands: Vec<(f32, u32)> = Vec::new();
     for sep_node in after_sep_nodes {
         for id in collect_syllable_prefix_entries(lexicon, sep_node, c2, true, limit) {
-            cands.push((lexicon.entries[id as usize].cost, id));
+            cands.push((lexicon.entry(id).cost(), id));
         }
     }
     cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -684,18 +687,19 @@ fn collect_first_initial_sep_nodes(
     start_node: u32,
     first_c: &str,
 ) -> Vec<u32> {
-    let Some(p0) = lexicon.syllable_trie.advance_node(start_node, first_c) else {
+    let syllable_trie = lexicon.syllable_trie();
+    let Some(p0) = syllable_trie.advance_node(start_node, first_c) else {
         return Vec::new();
     };
     let mut stack = vec![(p0, 0u8)];
     let mut sep_nodes = Vec::new();
     while let Some((node_idx, d)) = stack.pop() {
-        let node = &lexicon.syllable_trie.nodes[node_idx as usize];
+        let node = syllable_trie.node(node_idx);
         if let Some(sep_child) = node.find_child(b'\'') {
             sep_nodes.push(sep_child);
         }
         if d < 5 {
-            for &(ch, child_idx) in &node.transitions {
+            for (ch, child_idx) in node.transitions() {
                 if ch.is_ascii_lowercase() {
                     stack.push((child_idx, d + 1));
                 }
@@ -722,20 +726,20 @@ fn collect_chinese_edges_from_sep<'a>(
         if sp.fuzzy_penalty > 0.0 {
             continue;
         }
-        let Some(next_node) = lexicon.syllable_trie.advance_node(sep_node, &sp.syllable) else {
+        let Some(next_node) = lexicon.syllable_trie().advance_node(sep_node, &sp.syllable) else {
             continue;
         };
-        let hit_ids = &lexicon.syllable_trie.nodes[next_node as usize].exact_entries;
-        for &id in hit_ids.iter().take(6) {
-            let entry = &lexicon.entries[id as usize];
+        let hit_ids = lexicon.syllable_trie().exact_entries(next_node);
+        for id in hit_ids.iter().take(6) {
+            let entry = lexicon.entry(id);
             out_edges.push(LatticeEdge {
                 start: origin_start,
                 end: sp.end,
-                text: entry.text.clone(),
-                code_key: entry.syllable_key.clone(),
+                text: entry.text().to_string(),
+                code_key: entry.syllable_key().to_string(),
                 kind: EdgeKind::ChineseWord,
-                base_cost: entry.cost + base_penalty,
-                domain: entry.domain,
+                base_cost: entry.cost() + base_penalty,
+                domain: entry.domain(),
                 syllable_count: syl_count,
                 is_fuzzy: false,
             });

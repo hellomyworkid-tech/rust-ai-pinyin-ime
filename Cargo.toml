@@ -4,7 +4,10 @@ members = [
     "crates/ime-lexicon",
     "crates/ime-core",
     "crates/ime-ai",
+    "crates/ime-llm",
     "crates/ime-playground",
+    "crates/ime-session",
+    "crates/ime-ffi",
     "crates/ime-tsf-win",
 ]
 

@@ -181,8 +181,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==========================================================================================");
     println!(
         " • 词库零拷贝就绪 : 中文+英文共 {} 词条 | Bigram {} 条 | 启动加载耗时 {:?}",
-        core.lexicon.entries.len(),
-        core.lexicon.bigrams.len(),
+        core.lexicon.entry_count(),
+        core.lexicon.bigram_count(),
         load_elapsed
     );
     let endpoints = ime_ai::OpenAiCompatibleClient::probe_local_endpoints();

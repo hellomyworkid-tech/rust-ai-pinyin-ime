@@ -1,0 +1,886 @@
+{
+  "action": "update",
+  "view": {
+    "active_scene_label": "通用日常",
+    "active_syllable_index": null,
+    "ai_semantic_hint": "通用语境",
+    "composed_full_sentence": "你好",
+    "cursor_byte_pos": 5,
+    "full_sentence_parts": [
+      [
+        "你好",
+        false
+      ]
+    ],
+    "full_sentence_selected": false,
+    "ghost_text_preview": null,
+    "page_index": 0,
+    "page_size": 30,
+    "preedit_text": "ni'hao",
+    "selected_candidate_index": 0,
+    "syllable_spans": [
+      {
+        "code_key": "ni",
+        "end": 2,
+        "start": 0,
+        "text": "你"
+      },
+      {
+        "code_key": "hao",
+        "end": 5,
+        "start": 2,
+        "text": "好"
+      }
+    ],
+    "top_segments": [
+      {
+        "code_key": "ni'hao",
+        "end": 5,
+        "start": 0,
+        "text": "你好"
+      }
+    ],
+    "total_candidates": 30,
+    "visible": true,
+    "visible_candidates": [
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 92.24947357177734,
+        "l1_cost": 7.750525951385498,
+        "preedit": "ni'hao",
+        "segment_spans": [
+          {
+            "code_key": "ni'hao",
+            "end": 5,
+            "start": 0,
+            "text": "你好"
+          }
+        ],
+        "segments": [
+          "你好"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "你"
+          },
+          {
+            "code_key": "hao",
+            "end": 5,
+            "start": 2,
+            "text": "好"
+          }
+        ],
+        "tag": "[词库]",
+        "text": "你好"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 0.0,
+        "l1_cost": 0.0,
+        "preedit": "ni'hao",
+        "segment_spans": [],
+        "segments": [
+          "👋"
+        ],
+        "syllable_spans": [],
+        "tag": "[表情]",
+        "text": "👋"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 5,
+        "final_score": 85.98724365234375,
+        "l1_cost": 14.012754440307617,
+        "preedit": "ni'hao",
+        "segment_spans": [
+          {
+            "code_key": "ni'hao",
+            "end": 5,
+            "start": 0,
+            "text": "拟好"
+          }
+        ],
+        "segments": [
+          "拟好"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "拟"
+          },
+          {
+            "code_key": "hao",
+            "end": 5,
+            "start": 2,
+            "text": "好"
+          }
+        ],
+        "tag": "[词库]",
+        "text": "拟好"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.98724365234375,
+        "l1_cost": 15.845704078674316,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "你"
+          }
+        ],
+        "segments": [
+          "你"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "你"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "你"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.97724151611328,
+        "l1_cost": 18.310592651367188,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "尼"
+          }
+        ],
+        "segments": [
+          "尼"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "尼"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "尼"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.96724700927734,
+        "l1_cost": 19.12433624267578,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "泥"
+          }
+        ],
+        "segments": [
+          "泥"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "泥"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "泥"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.95724487304688,
+        "l1_cost": 19.616058349609375,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "逆"
+          }
+        ],
+        "segments": [
+          "逆"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "逆"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "逆"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.9472427368164,
+        "l1_cost": 19.99127197265625,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "拟"
+          }
+        ],
+        "segments": [
+          "拟"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "拟"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "拟"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.93724060058594,
+        "l1_cost": 20.172626495361328,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "腻"
+          }
+        ],
+        "segments": [
+          "腻"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "腻"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "腻"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.92724609375,
+        "l1_cost": 20.439167022705078,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "倪"
+          }
+        ],
+        "segments": [
+          "倪"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "倪"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "倪"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.91724395751953,
+        "l1_cost": 20.689144134521484,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "霓"
+          }
+        ],
+        "segments": [
+          "霓"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "霓"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "霓"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.90724182128906,
+        "l1_cost": 21.069889068603516,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "匿"
+          }
+        ],
+        "segments": [
+          "匿"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "匿"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "匿"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.89724731445312,
+        "l1_cost": 21.174007415771484,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "妮"
+          }
+        ],
+        "segments": [
+          "妮"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "妮"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "妮"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.88724517822266,
+        "l1_cost": 21.243423461914062,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "溺"
+          }
+        ],
+        "segments": [
+          "溺"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "溺"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "溺"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.87724304199219,
+        "l1_cost": 21.500577926635742,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "昵"
+          }
+        ],
+        "segments": [
+          "昵"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "昵"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "昵"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.86724090576172,
+        "l1_cost": 21.95270347595215,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "睨"
+          }
+        ],
+        "segments": [
+          "睨"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "睨"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "睨"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.85724639892578,
+        "l1_cost": 22.662818908691406,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "旎"
+          }
+        ],
+        "segments": [
+          "旎"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "旎"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "旎"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.84724426269531,
+        "l1_cost": 23.05314064025879,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "怩"
+          }
+        ],
+        "segments": [
+          "怩"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "怩"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "怩"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.83724212646484,
+        "l1_cost": 23.104145050048828,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "猊"
+          }
+        ],
+        "segments": [
+          "猊"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "猊"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "猊"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.82723999023438,
+        "l1_cost": 24.645034790039062,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "鲵"
+          }
+        ],
+        "segments": [
+          "鲵"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "鲵"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "鲵"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.81724548339844,
+        "l1_cost": 25.468463897705078,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "伲"
+          }
+        ],
+        "segments": [
+          "伲"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "伲"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "伲"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.80724334716797,
+        "l1_cost": 26.799699783325195,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "坭"
+          }
+        ],
+        "segments": [
+          "坭"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "坭"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "坭"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.7972412109375,
+        "l1_cost": 27.93467903137207,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "铌"
+          }
+        ],
+        "segments": [
+          "铌"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "铌"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "铌"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.78724670410156,
+        "l1_cost": 27.991836547851562,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "麑"
+          }
+        ],
+        "segments": [
+          "麑"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "麑"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "麑"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.7772445678711,
+        "l1_cost": 28.34014320373535,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "薿"
+          }
+        ],
+        "segments": [
+          "薿"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "薿"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "薿"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.76724243164062,
+        "l1_cost": 30.13190269470215,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "呢"
+          }
+        ],
+        "segments": [
+          "呢"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "呢"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "呢"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.75724029541016,
+        "l1_cost": 30.13190269470215,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "鿭"
+          }
+        ],
+        "segments": [
+          "鿭"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "鿭"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "鿭"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.74724578857422,
+        "l1_cost": 30.13190269470215,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "𨺙"
+          }
+        ],
+        "segments": [
+          "𨺙"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "𨺙"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "𨺙"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.73724365234375,
+        "l1_cost": 30.13190269470215,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "𫐐"
+          }
+        ],
+        "segments": [
+          "𫐐"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "𫐐"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "𫐐"
+      },
+      {
+        "ai_boosted": false,
+        "consumed_len": 2,
+        "final_score": 84.72724151611328,
+        "l1_cost": 30.13190269470215,
+        "preedit": "ni",
+        "segment_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "𫠜"
+          }
+        ],
+        "segments": [
+          "𫠜"
+        ],
+        "syllable_spans": [
+          {
+            "code_key": "ni",
+            "end": 2,
+            "start": 0,
+            "text": "𫠜"
+          }
+        ],
+        "tag": "[前缀选词]",
+        "text": "𫠜"
+      }
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  键盘扩展的隐私清单。不追踪、不收集任何数据（键盘不联网）。用到的「需要说明理由的 API」：
+  - 文件时间戳：链接进来的 Rust 引擎（ImeFFI.xcframework）用 stat / fstat / fstatat / lstat
+    读词库、个人词库（键盘自己的容器）和本地模型（App Group 容器）的元数据，
+    并按个人词库文件的修改时间判断它是否被别的键盘进程改过（ime_engine_reload_user_dict）。C617.1
+  Swift 代码不用 UserDefaults（设置是 App Group 里的 settings.json）；llama.cpp 和 Rust 标准库计时用
+  clock_gettime，不在系统启动时间那一类里。链接的库换了版本要重新检查（nm -u 键盘的可执行文件）。
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
