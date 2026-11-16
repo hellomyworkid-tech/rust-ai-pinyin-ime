@@ -37,21 +37,70 @@ final class CandidateCell: UIControl {
         .systemFont(ofSize: landscape ? 17 : 20, weight: isFirst ? .semibold : .regular)
     }
 
+    static func hintFont(landscape: Bool) -> UIFont {
+        .systemFont(ofSize: landscape ? 11.5 : 13, weight: .regular)
+    }
+
+    static func attributedTitle(for candidate: IMECandidate, isFirst: Bool, landscape: Bool) -> NSAttributedString {
+        let primaryFont = font(isFirst: isFirst, landscape: landscape)
+        let result = NSMutableAttributedString(
+            string: candidate.text,
+            attributes: [
+                .font: primaryFont,
+                .foregroundColor: KeyboardTheme.keyText,
+            ]
+        )
+        if let hint = candidate.pronunciationHint, !hint.isEmpty {
+            result.append(NSAttributedString(
+                string: " ",
+                attributes: [.font: primaryFont]
+            ))
+            result.append(NSAttributedString(
+                string: hint,
+                attributes: [
+                    .font: hintFont(landscape: landscape),
+                    .foregroundColor: KeyboardTheme.secondaryText,
+                ]
+            ))
+        }
+        return result
+    }
+
     /// 按文字算出这个候选需要的宽度
     static func width(for text: String, isFirst: Bool, landscape: Bool) -> CGFloat {
         let size = (text as NSString).size(withAttributes: [.font: font(isFirst: isFirst, landscape: landscape)])
         return max(minimumWidth, ceil(size.width) + 2 * horizontalPadding)
     }
 
+    /// 按完整候选（含可选的正音提示）算出需要的宽度
+    static func width(for candidate: IMECandidate, isFirst: Bool, landscape: Bool) -> CGFloat {
+        guard let hint = candidate.pronunciationHint, !hint.isEmpty else {
+            return width(for: candidate.text, isFirst: isFirst, landscape: landscape)
+        }
+        let attr = attributedTitle(for: candidate, isFirst: isFirst, landscape: landscape)
+        return max(minimumWidth, ceil(attr.size().width) + 2 * horizontalPadding)
+    }
+
     func configure(_ candidate: IMECandidate, index: Int, isFirst: Bool, landscape: Bool) {
         self.index = index
-        label.text = candidate.text
-        label.font = Self.font(isFirst: isFirst, landscape: landscape)
+        label.attributedText = Self.attributedTitle(for: candidate, isFirst: isFirst, landscape: landscape)
         let boosted = Self.isAIBoosted(candidate)
         marker.isHidden = !boosted
         backdrop.backgroundColor = isFirst ? KeyboardTheme.firstCandidateBackground : .clear
-        accessibilityLabel = boosted ? "\(candidate.text)，AI 推荐" : candidate.text
+        accessibilityIdentifier = candidate.text
+        accessibilityLabel = Self.accessibilityDescription(for: candidate, boosted: boosted)
         setNeedsLayout()
+    }
+
+    static func accessibilityDescription(for candidate: IMECandidate, boosted: Bool) -> String {
+        var parts = [candidate.text]
+        if let hint = candidate.pronunciationHint, !hint.isEmpty {
+            parts.append("读音 \(hint)")
+        }
+        if boosted {
+            parts.append("AI 推荐")
+        }
+        return parts.joined(separator: "，")
     }
 
     /// AI 提上来的候选：aiBoosted 为真，或标签里写着 AI

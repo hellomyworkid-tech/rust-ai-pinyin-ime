@@ -34,11 +34,11 @@ final class CandidateGridCell: UICollectionViewCell {
     }
 
     func configure(_ candidate: IMECandidate, isFirst: Bool, landscape: Bool) {
-        label.text = candidate.text
-        label.font = CandidateCell.font(isFirst: isFirst, landscape: landscape)
+        label.attributedText = CandidateCell.attributedTitle(for: candidate, isFirst: isFirst, landscape: landscape)
         let boosted = CandidateCell.isAIBoosted(candidate)
         marker.isHidden = !boosted
-        accessibilityLabel = boosted ? "\(candidate.text)，AI 推荐" : candidate.text
+        accessibilityIdentifier = candidate.text
+        accessibilityLabel = CandidateCell.accessibilityDescription(for: candidate, boosted: boosted)
     }
 
     override var isHighlighted: Bool {

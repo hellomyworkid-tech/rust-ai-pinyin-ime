@@ -22,7 +22,7 @@ targets:
   AIPinyin:
     type: application
     platform: iOS
-    # App/ 里还有 Assets.xcassets（AppIcon，目前是占位图）和 PrivacyInfo.xcprivacy（隐私清单）
+    # App/ 里包含 Assets.xcassets（AppIcon 浅色 / 深色 / 着色三套图标）和 PrivacyInfo.xcprivacy（隐私清单）
     sources: [App, Shared]
     scheme:
       testTargets: [AIPinyinTests, AIPinyinUITests]
@@ -32,9 +32,13 @@ targets:
         CFBundleDisplayName: AI 拼音
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         # 宿主界面暂时允许横屏，键盘的横屏布局要靠它来测（正式 App 可改回只竖屏）
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        CFBundleURLTypes:
+          - CFBundleURLName: com.zengji.aipinyin
+            CFBundleURLSchemes: [aipinyin]
     entitlements:
       path: Generated/App.entitlements
       properties:

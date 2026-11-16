@@ -68,6 +68,14 @@ final class AppModel: ObservableObject {
         #if DEBUG
         let arguments = ProcessInfo.processInfo.arguments
         let env = ProcessInfo.processInfo.environment
+        if let marker = AppGroup.debugSimulateFullAccessURL {
+            if env["SIM_KEYBOARD_FULL_ACCESS"] == "1" {
+                try? FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? Data("1".utf8).write(to: marker)
+            } else {
+                try? FileManager.default.removeItem(at: marker)
+            }
+        }
         let network = NetworkMonitor(forceExpensive: env["SIM_EXPENSIVE"] == "1")
         let freeSpace: () -> Int64 = {
             Int64(env["SIM_FREE_BYTES"] ?? "") ?? StorageCheck.availableBytes()

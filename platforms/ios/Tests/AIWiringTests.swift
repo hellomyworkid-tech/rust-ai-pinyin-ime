@@ -422,4 +422,94 @@ final class AIWiringTests: XCTestCase {
         XCTAssertFalse(engine.calls.contains { if case .deliverChoice = $0 { return true } else { return false } },
                        "引擎作废的请求不交回")
     }
+
+    // MARK: - 同一扩展进程内多控制器协同（跨应用切换不误报内存不足）
+
+    func testPeerControllerReusesModelInsteadOfReportingLowMemory() async throws {
+        let queue = DispatchQueue(label: "test.local-model.shared")
+        let coordinator = LocalModelCoordinator(queue: queue)
+        let engine1 = RecordingEngine()
+        let engine2 = RecordingEngine()
+        // 模拟真机 177MB 进程上限：任意一个控制器装着模型时，进程剩余内存只剩 80MB（低于加载门槛）
+        let sharedMemory: () -> UInt64 = {
+            (engine1.isLocalModelLoaded || engine2.isLocalModelLoaded)
+                ? 80 * 1024 * 1024
+                : 160 * 1024 * 1024
+        }
+        let modelFile = try makeModelFile()
+        let loader1 = LocalModelLoader(coordinator: coordinator, availableMemory: sharedMemory)
+        let loader2 = LocalModelLoader(coordinator: coordinator, availableMemory: sharedMemory)
+        let ai1 = AIController(chooser: AppleModelChooser(model: FakeChoiceModel()),
+                               localLoader: loader1,
+                               localModelURL: { _ in modelFile })
+        let ai2 = AIController(chooser: AppleModelChooser(model: FakeChoiceModel()),
+                               localLoader: loader2,
+                               localModelURL: { _ in modelFile })
+
+        var settings = IMESettings()
+        settings.aiMode = .local
+        settings.localModelID = "qwen3-0.6b-q4km"
+
+        // 1. 先在「AI 拼音」App 的试一试框里加载本地模型
+        ai1.attach(engine1)
+        ai1.apply(settings)
+        await poll(loader1, until: .loaded)
+        XCTAssertTrue(engine1.isLocalModelLoaded)
+        XCTAssertEqual(ai1.statusText, "AI 选词 · 本地模型")
+
+        // 2. 切到别的 App（如搜索框 / 微信）：系统在同一扩展进程新建第二个控制器，此时进程剩余内存仅 80MB，
+        //    应当复用并接管已驻留的模型，不能误报「内存不足，本地模型没有加载」
+        ai2.attach(engine2)
+        ai2.apply(settings)
+        await poll(loader2, until: .loaded)
+        await drain(queue)
+        XCTAssertTrue(engine2.isLocalModelLoaded)
+        XCTAssertFalse(engine1.isLocalModelLoaded, "旧控制器的引用应已卸下，同一时刻只留一份")
+        XCTAssertEqual(loader1.state, .idle)
+        XCTAssertEqual(ai2.statusText, "AI 选词 · 本地模型")
+
+        // 3. 回到第一个控制器继续打字时，按需无缝接回本地模型
+        ai1.restoreLocalModelIfYielded()
+        await poll(loader1, until: .loaded)
+        await drain(queue)
+        XCTAssertTrue(engine1.isLocalModelLoaded)
+        XCTAssertFalse(engine2.isLocalModelLoaded)
+        XCTAssertEqual(ai1.statusText, "AI 选词 · 本地模型")
+    }
+
+    func testPeerControllerModelSwitchAndOffEvictsBackgroundPeer() async throws {
+        let queue = DispatchQueue(label: "test.local-model.switch")
+        let coordinator = LocalModelCoordinator(queue: queue)
+        let engine1 = RecordingEngine()
+        let engine2 = RecordingEngine()
+        let sharedMemory: () -> UInt64 = {
+            (engine1.isLocalModelLoaded || engine2.isLocalModelLoaded)
+                ? 80 * 1024 * 1024
+                : 160 * 1024 * 1024
+        }
+        let a = try makeModelFile()
+        let b = try makeModelFile()
+        let loader1 = LocalModelLoader(coordinator: coordinator, availableMemory: sharedMemory)
+        let loader2 = LocalModelLoader(coordinator: coordinator, availableMemory: sharedMemory)
+
+        loader1.load(a, into: engine1)
+        await waitForState(loader1, .loaded)
+        XCTAssertEqual(engine1.loadedModel, a)
+
+        // 第二个控制器要换另一个模型 b：先卸掉控制器 1 的 a 腾出内存，再加载 b
+        loader2.load(b, into: engine2)
+        await waitForState(loader2, .loaded)
+        await drain(queue)
+        XCTAssertFalse(engine1.isLocalModelLoaded)
+        XCTAssertEqual(loader1.state, .idle)
+        XCTAssertEqual(engine2.loadedModel, b)
+
+        // 在任意控制器上收到内存警告，进程里所有控制器的本地模型都卸掉，且正在持有模型的控制器进入 .unloadedForMemory
+        loader1.didReceiveMemoryWarning(engine: engine1)
+        await drain(queue)
+        XCTAssertFalse(engine1.isLocalModelLoaded)
+        XCTAssertFalse(engine2.isLocalModelLoaded)
+        XCTAssertEqual(loader1.state, .idle)
+        XCTAssertEqual(loader2.state, .unloadedForMemory)
+    }
 }

@@ -114,4 +114,22 @@ final class IMEEngineJSONTests: XCTestCase {
         XCTAssertEqual(view.fullSentenceParts, [IMESentencePart(text: "啊", pinned: true)])
         XCTAssertEqual(view.cursorBytePos, 1)
     }
+
+    func testDecodePronunciationHint() throws {
+        let rangeData = Data(#"""
+        {
+          "total": 2,
+          "offset": 0,
+          "candidates": [
+            {"text": "混沌", "preedit": "hun'dun", "consumed_len": 6, "tag": "[词库]", "ai_boosted": false},
+            {"text": "馄饨", "preedit": "hun'dun", "consumed_len": 6, "tag": "[错音]", "ai_boosted": false, "pronunciation_hint": "馄 (hun) 饨 (tun)"}
+          ]
+        }
+        """#.utf8)
+        let decoded = try IMEEngineJSON.decodeCandidateRange(rangeData)
+        XCTAssertEqual(decoded.candidates.count, 2)
+        XCTAssertNil(decoded.candidates[0].pronunciationHint)
+        XCTAssertEqual(decoded.candidates[1].text, "馄饨")
+        XCTAssertEqual(decoded.candidates[1].pronunciationHint, "馄 (hun) 饨 (tun)")
+    }
 }

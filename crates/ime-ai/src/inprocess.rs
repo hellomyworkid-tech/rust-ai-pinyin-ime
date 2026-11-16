@@ -221,10 +221,11 @@ pub enum ChooserDelivery {
 /// 有了之后都是 0 个；其余用例集的候选池一个都没有变。
 pub fn select_scoring_pool(candidates: &[Candidate]) -> Vec<Candidate> {
     let max_len = candidates.iter().map(|c| c.consumed_len).max().unwrap_or(0);
-    let is_fuzzy = |c: &Candidate| c.tag.starts_with("[纠错");
+    let is_fuzzy = |c: &Candidate| c.tag.starts_with("[纠错") || c.tag.starts_with("[错音·近义");
     let mut top_is_exact_word = false;
-    // 首选是否是用户原样敲出来的英文（第 5 条）
+    // 首选是否是用户原样敲出来的英文（第 5 条），或带精确英文词的中英混输整句（如「趁现在 AI」，不能让纯中文「趁现在艾」顶掉）
     let mut top_is_typed_english = false;
+    let mut top_is_exact_bilingual = false;
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<Candidate> = Vec::with_capacity(SCORING_POOL_MAX);
     for c in candidates {
@@ -233,11 +234,16 @@ pub fn select_scoring_pool(candidates: &[Candidate]) -> Vec<Candidate> {
         }
         if out.is_empty() {
             top_is_exact_word = c.segments.len() == 1 && !is_fuzzy(c);
-            top_is_typed_english =
-                c.text.is_ascii() && code_letter_count(&c.preedit) == max_len;
+            let full_code = code_letter_count(&c.preedit) == max_len;
+            top_is_typed_english = c.text.is_ascii() && full_code;
+            top_is_exact_bilingual = !c.text.is_ascii()
+                && c.tag == "[中英混输]"
+                && full_code
+                && c.text.bytes().any(|b| b.is_ascii_alphabetic());
         } else if is_fuzzy(c)
             || (top_is_exact_word && c.segments.len() != 1)
             || (top_is_typed_english && code_letter_count(&c.preedit) > max_len)
+            || (top_is_exact_bilingual && !c.text.bytes().any(|b| b.is_ascii_alphabetic()))
         {
             continue;
         }
@@ -1014,6 +1020,7 @@ mod tests {
             final_score: 100.0 - l1_cost,
             ai_boosted: false,
             tag: String::new(),
+            pronunciation_hint: None,
             segments: vec![text.to_string()],
             segment_spans: Vec::new(),
             syllable_spans: Vec::new(),

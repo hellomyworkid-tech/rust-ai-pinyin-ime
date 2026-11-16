@@ -1,8 +1,10 @@
 //! `ime-core`: 全自研「中英统一晶格图」与混合解码核心引擎
 
+pub mod corrector;
 pub mod decoder;
 pub mod lattice;
 pub mod pinyin;
+pub mod supplement;
 pub mod user_dict;
 
 pub use decoder::{
@@ -336,7 +338,8 @@ impl ImeCoreEngine {
         let end_clamped = preferred_end.min(input.len()).max(start_pos + 1);
         let raw_slice = &input[start_pos..end_clamped];
         let lower_slice = raw_slice.to_ascii_lowercase();
-        let exact_ids = self.lexicon.syllable_trie().exact_lookup(&lower_slice);
+        let canon_slice = crate::pinyin::canonical_syllable(&lower_slice);
+        let exact_ids = self.lexicon.syllable_trie().exact_lookup(canon_slice);
         let (lookup_ids, is_abbrev_initial) = if exact_ids.is_empty() && lower_slice.len() == 1 {
             (self.lexicon.abbrev_trie().exact_lookup(&lower_slice), true)
         } else {
@@ -362,7 +365,92 @@ impl ImeCoreEngine {
                     domain: entry.domain(),
                     syllable_count: 1,
                     is_fuzzy: false,
+                    pronunciation_hint: None,
                 });
+            }
+        }
+        // 若当前音节曾因上文搭配被切短（如 `陕西 + xian` 切成 `xi'an` 后点选 `xi`），
+        // 同时补齐从 `start_pos` 出发的更长完整单音节（如 `xian`）的全部同音单字，避免长句下仅剩前 4 个单字。
+        // 只在被切下的部分本身是合法零声母音节（`an`/`e`/`ao`…）时才这样做：`henan` 里点 `he`
+        // 剩下的 `n` 是下一个音节的声母，不能把 `he` 当成被切短的 `hen`
+        let full_single_syl_end = ((end_clamped + 1)..=(start_pos + 6).min(input.len()))
+            .rev()
+            .find(|&cand_end| {
+                crate::pinyin::is_unapostrophed_single_syllable(&input[start_pos..cand_end])
+                    && crate::pinyin::is_unapostrophed_single_syllable(&input[end_clamped..cand_end])
+            });
+        if let Some(full_end) = full_single_syl_end {
+            let full_canon = crate::pinyin::canonical_syllable(&input[start_pos..full_end]);
+            for id in self.lexicon.syllable_trie().exact_lookup(full_canon) {
+                let entry = self.lexicon.entry(id);
+                let entry_text = entry.text();
+                if entry.syllable_count() == 1
+                    && !edges.iter().any(|e| e.end == full_end && e.text == entry_text)
+                {
+                    edges.push(LatticeEdge {
+                        start: start_pos,
+                        end: full_end,
+                        text: entry_text.to_string(),
+                        code_key: entry.syllable_key().to_string(),
+                        kind: EdgeKind::ChineseChar,
+                        base_cost: entry.cost(),
+                        domain: entry.domain(),
+                        syllable_count: 1,
+                        is_fuzzy: false,
+                        pronunciation_hint: None,
+                    });
+                }
+            }
+        }
+        let target_syl_end = full_single_syl_end.unwrap_or(preferred_end);
+        // 若当前完整音节内部还可合法拆短（如 `jie -> ji + e`、`yue -> yu + e`、`xian -> xi + an`、
+        // 或 `jinan` 中 `jin` 拆为 `ji + nan`），同时补齐拆短前缀音节（如 `ji`/`yu`/`xi`）的全部同音单字，
+        // 排在原样完整音节全部单字与模糊音纠错之后作为兜底（避免因晶格图单音节截断上限 24/4 而漏掉「饥」等字）
+        let mut split_prefix_edges: Vec<LatticeEdge> = Vec::new();
+        let clamped_target_end = target_syl_end.min(input.len());
+        if clamped_target_end > start_pos + 1 {
+            for short_end in ((start_pos + 1)..clamped_target_end).rev() {
+                let short_raw = &input[start_pos..short_end];
+                if !crate::pinyin::is_unapostrophed_single_syllable(short_raw) {
+                    continue;
+                }
+                let rem_is_valid_syl = crate::pinyin::is_unapostrophed_single_syllable(
+                    &input[short_end..clamped_target_end],
+                );
+                let rem_starts_full_pinyin = lattice.edges_from.get(short_end).is_some_and(|es| {
+                    es.iter().any(|e| {
+                        !e.is_fuzzy
+                            && (e.kind == EdgeKind::ChineseWord
+                                || (e.kind == EdgeKind::ChineseChar && e.end > short_end + 1))
+                    })
+                });
+                if !rem_is_valid_syl && !rem_starts_full_pinyin {
+                    continue;
+                }
+                let existing: HashSet<&str> = edges
+                    .iter()
+                    .filter(|e| e.end == short_end)
+                    .map(|e| e.text.as_str())
+                    .collect();
+                let short_canon = crate::pinyin::canonical_syllable(short_raw);
+                for id in self.lexicon.syllable_trie().exact_lookup(short_canon) {
+                    let entry = self.lexicon.entry(id);
+                    let entry_text = entry.text();
+                    if entry.syllable_count() == 1 && !existing.contains(entry_text) {
+                        split_prefix_edges.push(LatticeEdge {
+                            start: start_pos,
+                            end: short_end,
+                            text: entry_text.to_string(),
+                            code_key: entry.syllable_key().to_string(),
+                            kind: EdgeKind::ChineseChar,
+                            base_cost: entry.cost(),
+                            domain: entry.domain(),
+                            syllable_count: 1,
+                            is_fuzzy: false,
+                            pronunciation_hint: None,
+                        });
+                    }
+                }
             }
         }
         edges.retain(|e| !e.text.is_empty());
@@ -393,10 +481,15 @@ impl ImeCoreEngine {
             e.kind == EdgeKind::ChineseWord
                 && e.code_key.bytes().filter(|&b| b != b'\'').count() > e.end.saturating_sub(e.start)
         };
+        let is_unapostrophed_split = |e: &LatticeEdge| -> bool {
+            e.kind == EdgeKind::ChineseWord
+                && e.syllable_count >= 2
+                && crate::pinyin::is_unapostrophed_single_syllable(&input[e.start..e.end.min(n)])
+        };
         let mut multi_syl_words: Vec<LatticeEdge> = edges
             .iter()
             .filter(|e| {
-                if e.end <= preferred_end {
+                if e.end <= preferred_end || is_unapostrophed_split(e) {
                     return false;
                 }
                 // 过滤把后继完整全拼音节切碎的半音节词（如 `zaijia` 中 `0..5 zai'ji -> 在即` 切碎了 `3..6 jia`）
@@ -436,7 +529,7 @@ impl ImeCoreEngine {
         let mut exact_syl_edges: Vec<LatticeEdge> = edges
             .iter()
             .filter(|e| {
-                e.end == preferred_end
+                e.end == target_syl_end
                     && (matches!(e.kind, EdgeKind::ChineseChar | EdgeKind::ChineseWord)
                         || (e.end == n && e.kind == EdgeKind::EnglishWord))
             })
@@ -522,6 +615,13 @@ impl ImeCoreEngine {
         for e in other_edges {
             ordered_edges.push(e);
         }
+        // 4) 拆短前缀音节（如 `jie` 里的 `ji`）其余全部同音单字放在最末
+        split_prefix_edges.sort_by(|a, b| {
+            rank_cost(a)
+                .partial_cmp(&rank_cost(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        ordered_edges.extend(split_prefix_edges);
 
         let mut out = Vec::new();
         let mut seen = HashSet::new();
@@ -547,6 +647,7 @@ impl ImeCoreEngine {
                     text: urec.text.clone(),
                     code_key: raw_slice.to_string(),
                 };
+                let hint = crate::corrector::lookup_hint_flat(raw_slice, &urec.text).map(str::to_string);
                 out.push(Candidate {
                     text: urec.text.clone(),
                     preedit: raw_slice.to_string(),
@@ -555,6 +656,7 @@ impl ImeCoreEngine {
                     final_score: 135.0 + urec.dynamic_score,
                     ai_boosted: false,
                     tag: format!("[记忆·{}次]", urec.commit_count),
+                    pronunciation_hint: hint,
                     segments: vec![urec.text],
                     segment_spans: vec![span.clone()],
                     syllable_spans: vec![span],
@@ -584,6 +686,7 @@ impl ImeCoreEngine {
                 text: e.text.clone(),
                 code_key: e.code_key.clone(),
             };
+            let hint = e.pronunciation_hint.map(str::to_string);
             out.push(Candidate {
                 text: e.text.clone(),
                 preedit: e.code_key,
@@ -592,11 +695,12 @@ impl ImeCoreEngine {
                 final_score: 100.0 - e.base_cost,
                 ai_boosted: false,
                 tag,
+                pronunciation_hint: hint,
                 segments: vec![e.text],
                 segment_spans: vec![span.clone()],
                 syllable_spans: vec![span],
             });
-            if out.len() >= 200 {
+            if out.len() >= 400 {
                 break;
             }
         }
@@ -621,6 +725,7 @@ impl ImeCoreEngine {
                     final_score: 96.0,
                     ai_boosted: false,
                     tag: label.to_string(),
+                    pronunciation_hint: None,
                     segments: vec![en_variant],
                     segment_spans: vec![span.clone()],
                     syllable_spans: vec![span],
@@ -1265,6 +1370,297 @@ mod tests {
         println!("polluted zenmehuishi top5 = {:?}", polluted_top5);
         assert_eq!(polluted_top5[0], "怎么回事");
         assert!(polluted_top5.contains(&"怎么会是".to_string()));
+    }
+
+    #[test]
+    fn test_intact_single_syllable_not_eagerly_vowel_split_without_apostrophe() {
+        let engine = build_test_engine();
+
+        // 1) 独立合法单音节（未输入隔音符 `'`）首选必须是该音节单字，不能被强拆为双音节词；常用隔音词仍保留在候选中
+        for (py, expected_first, split_word) in [
+            ("jie", "接", "饥饿"),
+            ("yue", "越", "余额"),
+            ("xian", "先", "西安"),
+            ("tian", "天", "提案"),
+            ("bian", "边", "彼岸"),
+            ("tuan", "团", "图案"),
+            ("qia", "卡", "起啊"),
+            ("kua", "夸", "苦啊"),
+            ("niao", "鸟", "尼奥"),
+            ("jue", "觉", "巨额"),
+        ] {
+            let cands = engine.decode(py, AppScene::General, "").candidates;
+            assert_eq!(
+                cands[0].text, expected_first,
+                "{py} top1 should be single-syllable char {expected_first}, got {:?}",
+                cands.iter().take(6).map(|c| &c.text).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                cands[0].syllable_spans.len(),
+                1,
+                "{py} top1 syllable_spans should stay intact as 1 syllable: {:?}",
+                cands[0].syllable_spans
+            );
+            assert!(
+                cands.iter().take(25).any(|c| c.text == split_word),
+                "{py} should still retain {split_word} in top 25 candidates"
+            );
+        }
+        assert_eq!(engine.decode("lue", AppScene::General, "").candidates[0].text, "略");
+        assert_eq!(engine.decode("nue", AppScene::General, "").candidates[0].text, "虐");
+
+        // 2) 显式输入隔音符 `'` 时，隔音双音节词必须零惩罚排在首位
+        assert_eq!(engine.decode("ji'e", AppScene::General, "").candidates[0].text, "饥饿");
+        assert_eq!(engine.decode("yu'e", AppScene::General, "").candidates[0].text, "余额");
+        assert_eq!(engine.decode("xi'an", AppScene::General, "").candidates[0].text, "西安");
+        assert_eq!(engine.decode("ti'an", AppScene::General, "").candidates[0].text, "提案");
+
+        // 3) 本身不构成合法单音节的双音节词（如 `jine -> 金额`、`shue -> 数额`、`fangan -> 方案`）完全不受影响
+        assert_eq!(engine.decode("jine", AppScene::General, "").candidates[0].text, "金额");
+        assert_eq!(engine.decode("shue", AppScene::General, "").candidates[0].text, "数额");
+        assert_eq!(engine.decode("fangan", AppScene::General, "").candidates[0].text, "方案");
+
+        // 4) 前缀锁定场景（如 `sijie` 选「司」、`dongyue` 选「东」）：余下 `jie`/`yue` 必须保持完整单音节
+        let mut si_pins = HashMap::new();
+        si_pins.insert(0usize, (2usize, "司".to_string()));
+        let sijie_pinned = engine.decode_with_pins("sijie", AppScene::General, "", &si_pins);
+        let sijie_syls: Vec<&str> = sijie_pinned.candidates[0]
+            .syllable_spans
+            .iter()
+            .map(|s| s.code_key.as_str())
+            .collect();
+        assert_eq!(sijie_syls, vec!["si", "jie"]);
+        assert_ne!(sijie_pinned.candidates[0].text, "司饥饿");
+
+        let jie_alts = engine.query_segment_alternatives_with_prev("sijie", 2, 5, Some("司"));
+        let jie_top30: Vec<&str> = jie_alts.iter().take(30).map(|c| c.text.as_str()).collect();
+        assert!(jie_top30[0].chars().count() == 1, "jie top1 must be single char, got {:?}", jie_top30);
+        assert!(jie_top30.contains(&"接") && jie_top30.contains(&"届") && jie_top30.contains(&"借"));
+        assert!(jie_top30.contains(&"饥饿"), "饥饿 should remain interleaved in jie top30: {:?}", jie_top30);
+        for ji_char in ["级", "集", "几", "机"] {
+            assert!(
+                !jie_top30.contains(&ji_char),
+                "ji char {ji_char} must not pollute sijie->司 jie top30: {:?}",
+                jie_top30
+            );
+        }
+
+        let mut dong_pins = HashMap::new();
+        dong_pins.insert(0usize, (4usize, "东".to_string()));
+        let dongyue_pinned = engine.decode_with_pins("dongyue", AppScene::General, "", &dong_pins);
+        let dongyue_syls: Vec<&str> = dongyue_pinned.candidates[0]
+            .syllable_spans
+            .iter()
+            .map(|s| s.code_key.as_str())
+            .collect();
+        assert_eq!(dongyue_syls, vec!["dong", "yue"]);
+        assert_ne!(dongyue_pinned.candidates[0].text, "东余额");
+
+        let yue_alts = engine.query_segment_alternatives_with_prev("dongyue", 4, 7, Some("东"));
+        let yue_top20: Vec<&str> = yue_alts.iter().take(20).map(|c| c.text.as_str()).collect();
+        assert!(yue_top20[0].chars().count() == 1, "yue top1 must be single char, got {:?}", yue_top20);
+        assert!(yue_top20.contains(&"月") && yue_top20.contains(&"越") && yue_top20.contains(&"岳"));
+        assert!(yue_top20.contains(&"余额"), "余额 should remain interleaved in yue top20: {:?}", yue_top20);
+        for yu_char in ["于", "与", "语", "雨"] {
+            assert!(
+                !yue_top20.contains(&yu_char),
+                "yu char {yu_char} must not pollute dongyue->东 yue top20: {:?}",
+                yue_top20
+            );
+        }
+
+        // 5) 拆短前缀单字兜底完整性（`jie -> ji`、`yue -> yu`、`xian -> xi`）：
+        //    在全部原样完整单音节单字之后，补齐拆短前缀音节的全部同音单字（包括排第 40+ 位的「饥」等字，不因 24/4/200 上限截断）
+        let jie_all_texts: Vec<&str> = jie_alts.iter().map(|c| c.text.as_str()).collect();
+        let pos_jie_last = jie_all_texts.iter().position(|&t| t == "借").unwrap();
+        let pos_ji_first = jie_all_texts.iter().position(|&t| t == "级").unwrap();
+        let pos_ji_hungry = jie_all_texts
+            .iter()
+            .position(|&t| t == "饥")
+            .expect("sijie->司 备选后部应包含完整的 ji 单字「饥」");
+        assert!(pos_jie_last < pos_ji_first && pos_ji_first < pos_ji_hungry);
+
+        let xian_alts = engine.query_segment_alternatives("xian", 0, 4);
+        let xian_set: HashSet<&str> = xian_alts.iter().map(|c| c.text.as_str()).collect();
+        // 点 `henan` 里的 `he`：剩下的 `n` 是下一个音节的声母，`he` 不能被当成切短的 `hen`，单字仍以 he 的字为先
+        let he_alts = engine.query_segment_alternatives("henan", 0, 2);
+        let he_first_char = he_alts
+            .iter()
+            .find(|c| c.text.chars().count() == 1)
+            .map(|c| c.preedit.as_str());
+        assert_eq!(he_first_char, Some("he"), "{:?}", he_alts.iter().take(8).map(|c| &c.text).collect::<Vec<_>>());
+        for id in engine.lexicon.syllable_trie().exact_lookup("xi") {
+            let entry = engine.lexicon.entry(id);
+            if entry.syllable_count() == 1 {
+                assert!(
+                    xian_set.contains(entry.text()),
+                    "xian 备选应完整包含 xi 的全部单字，缺少: {}",
+                    entry.text()
+                );
+            }
+        }
+
+        // 6) 跨音节元音拆分短语与高频前缀词召回（如 `sijie -> 司机饿 / 司机`、`duzie -> 肚子饿`）
+        let sijie_dec = engine.decode("sijie", AppScene::General, "");
+        let sijie_top25: Vec<&str> = sijie_dec
+            .candidates
+            .iter()
+            .take(25)
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(sijie_top25[0], "四届");
+        assert!(
+            sijie_top25.contains(&"司机") && sijie_top25.contains(&"司机饿"),
+            "sijie 前排展开网格应包含「司机」与「司机饿」联想: {sijie_top25:?}"
+        );
+        assert_eq!(
+            engine.decode("duzie", AppScene::General, "").candidates[0].text,
+            "肚子饿"
+        );
+    }
+
+    #[test]
+    fn test_modern_vocabulary_collocations_and_incomplete_tail_guard() {
+        let engine = build_test_engine();
+        let top = |py: &str| engine.decode(py, AppScene::General, "").candidates[0].text.clone();
+
+        // 高频现代词汇与短语搭配
+        assert_eq!(top("shouzhongrenqun"), "受众人群");
+        assert_eq!(top("renshe"), "人设");
+        assert_eq!(top("nvpinduanju"), "女频短剧");
+        assert_eq!(top("nanpinduanju"), "男频短剧");
+        assert_eq!(top("fuhenvpinduanju"), "符合女频短剧");
+
+        // 末音节已是合法完整拼音时，不应被 +1 字母补全词劫持常用双字词；真正极低频的 zhonggu 仍补全「中国」
+        assert_eq!(top("youjia"), "油价");
+        assert_eq!(top("xuji"), "续集");
+        assert_eq!(top("lingxia"), "零下");
+        assert_eq!(top("aixi"), "爱惜");
+        assert_eq!(top("huoba"), "火把");
+        assert_eq!(top("pinfa"), "贫乏");
+        assert_eq!(top("zhonggu"), "中国");
+    }
+
+    #[test]
+    fn test_misread_pronunciation_recall_and_hints() {
+        let mut engine = build_test_engine();
+
+        // 1) hundun：#1 混沌（无提示），#2 馄饨（带正确读音提示）
+        let hundun = engine.decode("hundun", AppScene::General, "").candidates;
+        assert_eq!(hundun[0].text, "混沌");
+        assert_eq!(hundun[0].pronunciation_hint, None);
+        assert_eq!(hundun[1].text, "馄饨");
+        assert_eq!(
+            hundun[1].pronunciation_hint.as_deref(),
+            Some("馄 (hun) 饨 (tun)")
+        );
+
+        // 2) 餐饮搭配 chihundun：首选「吃馄饨」并保留错字读音提示（三字及以上仅标易错字以节省候选栏宽度）
+        let chihundun = engine.decode("chihundun", AppScene::General, "").candidates;
+        assert_eq!(chihundun[0].text, "吃馄饨");
+        assert_eq!(
+            chihundun[0].pronunciation_hint.as_deref(),
+            Some("饨 (tun)")
+        );
+
+        // 3) 输入正确读音 huntun 时不显示错音提示
+        let huntun = engine.decode("huntun", AppScene::General, "").candidates;
+        assert_eq!(huntun[0].text, "馄饨");
+        assert_eq!(huntun[0].pronunciation_hint, None);
+
+        // 4) 常见易读错词召回与正音标注
+        let jiaose = engine.decode("jiaose", AppScene::General, "").candidates;
+        assert_eq!(jiaose[0].text, "角色");
+        assert_eq!(
+            jiaose[0].pronunciation_hint.as_deref(),
+            Some("角 (jue) 色 (se)")
+        );
+
+        let geiyu = engine.decode("geiyu", AppScene::General, "").candidates;
+        assert_eq!(geiyu[0].text, "给予");
+        assert_eq!(
+            geiyu[0].pronunciation_hint.as_deref(),
+            Some("给 (ji) 予 (yu)")
+        );
+
+        for (py, target, hint, limit) in [
+            ("zhujiao", "主角", "主 (zhu) 角 (jue)", 3usize),
+            ("fazhi", "阈值", "阈 (yu) 值 (zhi)", 3usize),
+            ("moban", "模板", "模 (mu) 板 (ban)", 3usize),
+            ("shuifu", "说服", "说 (shuo) 服 (fu)", 3usize),
+            ("youhuijuan", "优惠券", "券 (quan)", 2usize),
+            ("luoshifen", "螺蛳粉", "蛳 (si)", 2usize),
+            ("hongpei", "烘焙", "烘 (hong) 焙 (bei)", 2usize),
+        ] {
+            let cands = engine.decode(py, AppScene::General, "").candidates;
+            let matched = cands
+                .iter()
+                .take(limit)
+                .find(|c| c.text == target)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{py} should recall {target} in top {limit}, got {:?}",
+                        cands.iter().take(5).map(|c| &c.text).collect::<Vec<_>>()
+                    )
+                });
+            assert_eq!(matched.pronunciation_hint.as_deref(), Some(hint), "{py} -> {target}");
+        }
+
+        // 5) 用户选择过「馄饨」进入个人词库后，再次输入 hundun 依然保留正音提示
+        engine.commit_candidate_ex("hundun", "馄饨", None, true);
+        let hundun_after = engine.decode("hundun", AppScene::General, "").candidates;
+        assert_eq!(hundun_after[0].text, "馄饨");
+        assert_eq!(
+            hundun_after[0].pronunciation_hint.as_deref(),
+            Some("馄 (hun) 饨 (tun)")
+        );
+    }
+
+    #[test]
+    fn test_user_habit_prefix_recall_and_productive_morphology_phrases() {
+        let mut engine = build_test_engine();
+
+        // 1) 个人习惯词末尾未完成音节召回（如曾输入过 xionghan -> 凶悍，敲 xiongh 首选即联想「凶悍」，而敲完整单音节 xiong 仍保持单字首选）
+        engine.commit_candidate_ex("xionghan", "凶悍", None, false);
+        assert_eq!(engine.decode("xiongh", AppScene::General, "").candidates[0].text, "凶悍");
+        assert_eq!(engine.decode("xiong", AppScene::General, "").candidates[0].text.chars().count(), 1);
+
+        // 自定义人名/新词（如 wuzengji -> 武增吉）敲 wuzengj 同样立即召回
+        engine.commit_candidate_ex("wuzengji", "武增吉", None, true);
+        assert_eq!(engine.decode("wuzengj", AppScene::General, "").candidates[0].text, "武增吉");
+
+        // 2) 高产构词词缀、日常口语、对公/私行、中英混输与长句句法消歧
+        for (py, expected) in [
+            ("furenqu", "富人区"),
+            ("zaya", "咋呀"),
+            ("chigongjiafande", "吃公家饭的"),
+            ("chenxianzaiai", "趁现在 AI"),
+            ("chuntangping", "纯躺平"),
+            ("gonghu", "公户"),
+            ("sihangkehu", "私行客户"),
+            ("jiewa", "接娃"),
+            ("baixindeqian", "百姓的钱"),
+            ("baixingdeqian", "百姓的钱"),
+            ("baixindeqiansanqifenzhang", "百姓的钱三七分账"),
+            ("baixingdeqiansanqifenzhang", "百姓的钱三七分账"),
+            ("haoshenchuleqianbaixingcaihuichu", "豪绅出了钱百姓才会出"),
+            // 未在补充词表中枚举的构词泛化验证
+            ("gongsideqian", "公司的钱"),
+            ("hualeqian", "花了钱"),
+            ("chunshougong", "纯手工"),
+        ] {
+            let got = &engine.decode(py, AppScene::General, "").candidates[0].text;
+            assert_eq!(got, expected, "{py}");
+        }
+
+        // 3) 即使个人词库已记住前缀「百姓的」（baixinde -> 百姓的），继续打 qian 首选仍必须是「百姓的钱」而非「百姓的前」
+        for _ in 0..2 {
+            engine.commit_candidate_ex("baixinde", "百姓的", None, true);
+        }
+        assert_eq!(
+            engine.decode("baixindeqian", AppScene::General, "").candidates[0].text,
+            "百姓的钱"
+        );
     }
 
     /// 打印常用输入的前 6 个候选（回归抽查用）：`cargo test -p ime-core dump_top_candidates -- --ignored --nocapture`

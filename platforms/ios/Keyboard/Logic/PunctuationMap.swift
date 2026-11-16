@@ -6,26 +6,56 @@ enum PunctuationMap {
     private static let chinese: [String: String] = [
         ",": "，", ".": "。", "?": "？", "!": "！", ":": "：", ";": "；",
         "(": "（", ")": "）", "[": "【", "]": "】", "{": "｛", "}": "｝",
-        "<": "《", ">": "》", "\\": "、", "^": "……", "_": "——", "~": "～",
+        "<": "《", ">": "》", "\\": "、", "^": "……", "...": "……", "_": "——", "~": "～",
         "$": "￥", "¥": "￥", "`": "·", "•": "·",
     ]
 
-    /// 键上显示的文字
+    /// 键面主字符或放大气泡里显示的文字
     static func label(for ascii: String, chineseMode: Bool) -> String {
-        guard chineseMode else { return ascii }
+        guard chineseMode else {
+            switch ascii {
+            case "“": return "\""
+            case "”": return "'"
+            default: return ascii
+            }
+        }
         switch ascii {
         case "\"": return "“”"
         case "'": return "‘’"
+        case "“": return "“"
+        case "”": return "”"
         default: return chinese[ascii] ?? ascii
         }
     }
 
-    /// 按下后实际上屏的文字。引号要看上文决定是左引号还是右引号
+    /// 键帽顶部上划提示小字：保持紧凑居中（如 `:` `;` `?` `!` `...`），中文特有符号显示 `。` `、` `“` `”`
+    static func subLabel(for ascii: String, chineseMode: Bool) -> String {
+        guard chineseMode else {
+            return label(for: ascii, chineseMode: false)
+        }
+        switch ascii {
+        case ".": return "。"
+        case "\\": return "、"
+        case "“": return "“"
+        case "”": return "”"
+        default: return ascii
+        }
+    }
+
+    /// 按下或上划后实际上屏的文字。双引号单键看上文配对；左右独立引号键直接输出对应引号
     static func output(for ascii: String, chineseMode: Bool, contextBefore: String?) -> String {
-        guard chineseMode else { return ascii }
+        guard chineseMode else {
+            switch ascii {
+            case "“": return "\""
+            case "”": return "'"
+            default: return ascii
+            }
+        }
         switch ascii {
         case "\"": return pairedQuote(open: "“", close: "”", contextBefore: contextBefore)
         case "'": return pairedQuote(open: "‘", close: "’", contextBefore: contextBefore)
+        case "“": return "“"
+        case "”": return "”"
         default: return chinese[ascii] ?? ascii
         }
     }

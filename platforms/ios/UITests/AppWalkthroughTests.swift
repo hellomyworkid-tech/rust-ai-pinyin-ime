@@ -218,4 +218,40 @@ final class AppWalkthroughTests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [wait], timeout: 3), .completed, "输入框内容是 \(field.value ?? "nil")")
         shot("08-try-it-committed")
     }
+
+    /// 键盘快捷设置面板里的「打开 AI 拼音设置」：未开完全访问时原位提示，开启完全访问后经原生 SwiftUI Link 跳到「输入设置」页
+    func testQuickSettingsOpenHostAppLink() {
+        // 1. 未开启完全访问：点击后在键盘工具栏原位提示，不强跳、不崩溃
+        launch()
+        let field = app.textViews["tryTextField"]
+        scrollTo(field)
+        field.tap()
+        XCTAssertTrue(app.keys["q"].firstMatch.waitForExistence(timeout: 10), "AI 拼音键盘没有出现")
+
+        let gear = app.buttons["快捷设置"].firstMatch
+        XCTAssertTrue(gear.waitForExistence(timeout: 3))
+        gear.tap()
+
+        let openApp = app.buttons["打开 AI 拼音设置"].firstMatch
+        XCTAssertTrue(openApp.waitForExistence(timeout: 3))
+        Thread.sleep(forTimeInterval: 0.5)
+        openApp.tap()
+        let notice = app.staticTexts.matching(NSPredicate(format: "label CONTAINS '允许完全访问'")).firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 3), "未开启完全访问时应原位提示")
+
+        // 2. 开启完全访问分支：点击原生 SwiftUI Link 应经 aipinyin://settings 切换到「输入设置」页
+        app.terminate()
+        launch(["SIM_KEYBOARD_FULL_ACCESS": "1"])
+        scrollTo(field)
+        field.tap()
+        XCTAssertTrue(app.keys["q"].firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(gear.waitForExistence(timeout: 3))
+        gear.tap()
+        XCTAssertTrue(openApp.waitForExistence(timeout: 3))
+        XCTAssertEqual(openApp.value as? String, "模糊音 · 词库与模型下载")
+        Thread.sleep(forTimeInterval: 0.5)
+        openApp.tap()
+
+        XCTAssertTrue(app.navigationBars["输入设置"].waitForExistence(timeout: 5), "点击原生 SwiftUI Link 后应经 aipinyin://settings 跳转到输入设置页")
+    }
 }

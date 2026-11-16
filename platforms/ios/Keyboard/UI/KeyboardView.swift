@@ -36,13 +36,7 @@ final class KeyboardView: UIView {
     private var keyViews: [KeyView] = []
     private var keyFrames: [KeyboardGeometry.KeyFrame] = []
 
-    private struct TrackedTouch {
-        var keyIndex: Int
-        /// 已经触发过（多指连打时提前触发），抬手时不再触发
-        var consumed: Bool
-    }
-
-    private var tracked: [ObjectIdentifier: TrackedTouch] = [:]
+    private var touchTracker = KeyboardTouchTracker()
     private var repeatTimer: Timer?
 
     static let repeatDelay: TimeInterval = 0.45
@@ -77,7 +71,9 @@ final class KeyboardView: UIView {
             setNeedsLayout()
         }
         for (i, spec) in specs.enumerated() {
-            keyViews[i].configure(face(for: spec), accessibilityLabel: accessibilityTitle(for: spec))
+            keyViews[i].configure(face(for: spec),
+                                  accessibilityLabel: accessibilityTitle(for: spec),
+                                  accessibilityHint: accessibilityHint(for: spec))
         }
     }
 
@@ -90,6 +86,8 @@ final class KeyboardView: UIView {
             metrics.rowGap = max(4, (bounds.height / CGFloat(rows.count) * 0.2).rounded())
         }
         keyFrames = KeyboardGeometry.layout(rows: rows, in: bounds, metrics: metrics)
+        touchTracker.specs = specs
+        touchTracker.frames = keyFrames
         for (i, frame) in keyFrames.enumerated() where i < keyViews.count {
             keyViews[i].frame = frame.frame
         }
@@ -97,18 +95,38 @@ final class KeyboardView: UIView {
 
     // MARK: - 键面
 
+    private func subLabelTitle(for action: KeyAction) -> String? {
+        switch action {
+        case .letter(let c): return String(c)
+        case .symbol(let s): return PunctuationMap.subLabel(for: s, chineseMode: config.chineseMode)
+        case .literal(let s): return s
+        default: return nil
+        }
+    }
+
     private func face(for spec: KeySpec) -> KeyView.Face {
         let small: CGFloat = config.landscape ? 13 : 16
         let large: CGFloat = config.landscape ? 18 : 23
+        let sub: CGFloat = config.landscape ? 9 : 10.5
         let icon: CGFloat = config.landscape ? 15 : 18
-        var face = KeyView.Face(title: nil, symbolName: nil, fontSize: small, isFunction: spec.isFunctionKey)
+        let subTitle = spec.swipeUpAction.flatMap { subLabelTitle(for: $0) }
+        var face = KeyView.Face(title: nil, subTitle: subTitle, symbolName: nil,
+                                fontSize: small, subFontSize: sub, isFunction: spec.isFunctionKey)
         switch spec.action {
         case .letter(let c):
             face.title = config.shift == .off ? String(c) : c.uppercased()
-            face.fontSize = large
+            face.fontSize = subTitle != nil ? (config.landscape ? 16 : 22) : large
         case .symbol(let s):
-            face.title = PunctuationMap.label(for: s, chineseMode: config.chineseMode)
-            face.fontSize = (face.title?.count ?? 0) > 1 ? small + 2 : large - 1
+            let text = PunctuationMap.label(for: s, chineseMode: config.chineseMode)
+            face.title = text
+            if text.count > 1 {
+                face.fontSize = small + 2
+            } else {
+                face.fontSize = subTitle != nil ? (config.landscape ? 16 : 20) : large - 1
+            }
+        case .literal(let s):
+            face.title = s
+            face.fontSize = s.count > 1 ? small + 2 : large - 1
         case .shift:
             switch config.shift {
             case .off: face.symbolName = "shift"
@@ -124,18 +142,25 @@ final class KeyboardView: UIView {
             face.symbolName = "globe"
             face.fontSize = icon
         case .space:
-            face.title = config.chineseMode ? "空格" : "space"
+            if UIImage(systemName: "space") != nil {
+                face.symbolName = "space"
+                face.fontSize = icon
+            } else {
+                face.title = config.chineseMode ? "空格" : "space"
+            }
         case .returnKey:
             face.title = config.returnTitle
             face.isProminent = config.returnProminent
         case .toggleLanguage:
-            face.title = config.chineseMode ? "中" : "英"
-            face.fontSize = small + 2
+            face.title = config.chineseMode ? "中" : "En"
+            face.badgeSuffix = config.chineseMode ? "/En" : "/中"
+            face.fontSize = config.landscape ? 13 : 15
+            face.subFontSize = config.landscape ? 8.5 : 9.5
         case .page(let page):
             switch page {
             case .letters: face.title = config.chineseMode ? "拼音" : "ABC"
             case .numbers: face.title = "123"
-            case .symbols: face.title = "#+="
+            case .symbols: face.title = config.chineseMode ? "符号" : "#+="
             }
         }
         return face
@@ -145,6 +170,7 @@ final class KeyboardView: UIView {
         switch spec.action {
         case .letter(let c): return String(c)
         case .symbol(let s): return PunctuationMap.label(for: s, chineseMode: config.chineseMode)
+        case .literal(let s): return s
         case .shift: return "上档"
         case .backspace: return "删除"
         case .globe: return "切换输入法"
@@ -160,127 +186,90 @@ final class KeyboardView: UIView {
         }
     }
 
-    /// 键面上显示的字（给气泡用）
-    private func previewTitle(for spec: KeySpec) -> String? {
-        switch spec.action {
+    private func accessibilityHint(for spec: KeySpec) -> String? {
+        guard let swipeUp = spec.swipeUpAction, let text = actionTitle(for: swipeUp) else { return nil }
+        return "上划输入 \(text)"
+    }
+
+    /// 键面上或上划对应的显示文字（给放大气泡用）
+    private func actionTitle(for action: KeyAction) -> String? {
+        switch action {
         case .letter(let c): return config.shift == .off ? String(c) : c.uppercased()
         case .symbol(let s): return PunctuationMap.label(for: s, chineseMode: config.chineseMode)
+        case .literal(let s): return s
         default: return nil
         }
     }
 
     // MARK: - 触摸
 
-    private func keyIndex(at point: CGPoint) -> Int? {
-        if let hit = keyFrames.firstIndex(where: { $0.touchFrame.contains(point) }) { return hit }
-        // 落在区域外（比如滑出了上边）：取最近的键
-        return keyFrames.indices.min { distance(point, keyFrames[$0].frame) < distance(point, keyFrames[$1].frame) }
-    }
-
-    private func distance(_ p: CGPoint, _ r: CGRect) -> CGFloat {
-        let dx = max(r.minX - p.x, 0, p.x - r.maxX)
-        let dy = max(r.minY - p.y, 0, p.y - r.maxY)
-        return dx * dx + dy * dy
-    }
-
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            guard let index = keyIndex(at: touch.location(in: self)), index < specs.count else { continue }
-            let spec = specs[index]
-            // 多指连打：新的手指按下时，先让还按着的字符键生效
-            flushPendingCharacterTouches()
-            tracked[ObjectIdentifier(touch)] = TrackedTouch(keyIndex: index, consumed: false)
-            keyViews[index].isPressed = true
-            delegate?.keyboardViewDidTouchDownKey(self)
-            switch spec.action {
-            case .globe:
-                delegate?.keyboardView(self, globeEvent: event)
-            case .shift:
-                markConsumed(touch)
-                delegate?.keyboardView(self, didTrigger: .shift)
-            case .backspace:
-                markConsumed(touch)
-                delegate?.keyboardView(self, didTrigger: .backspace)
-                startRepeating()
-            default:
-                showPreview(for: index)
-            }
+            applyOutcome(touchTracker.begin(id: ObjectIdentifier(touch), at: touch.location(in: self)), event: event)
         }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            let id = ObjectIdentifier(touch)
-            guard var state = tracked[id], !state.consumed else { continue }
-            let spec = specs[state.keyIndex]
-            if spec.action == .globe {
-                delegate?.keyboardView(self, globeEvent: event)
-                continue
-            }
-            // 只有字符键之间可以滑动换键
-            guard spec.showsPreview,
-                  let index = keyIndex(at: touch.location(in: self)), index != state.keyIndex,
-                  specs[index].showsPreview else { continue }
-            keyViews[state.keyIndex].isPressed = false
-            state.keyIndex = index
-            tracked[id] = state
-            keyViews[index].isPressed = true
-            showPreview(for: index)
+            applyOutcome(touchTracker.move(id: ObjectIdentifier(touch), to: touch.location(in: self)), event: event)
         }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        finish(touches, event: event, trigger: true)
+        for touch in touches {
+            applyOutcome(touchTracker.end(id: ObjectIdentifier(touch), trigger: true), event: event)
+        }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        finish(touches, event: event, trigger: false)
+        for touch in touches {
+            applyOutcome(touchTracker.end(id: ObjectIdentifier(touch), trigger: false), event: event)
+        }
     }
 
-    private func finish(_ touches: Set<UITouch>, event: UIEvent?, trigger: Bool) {
-        for touch in touches {
-            guard let state = tracked.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
-            let spec = specs[state.keyIndex]
-            if !tracked.values.contains(where: { $0.keyIndex == state.keyIndex }) {
-                keyViews[state.keyIndex].isPressed = false
-            }
-            if spec.action == .backspace { stopRepeating() }
-            if spec.action == .globe {
-                delegate?.keyboardView(self, globeEvent: event)
-                continue
-            }
-            if trigger, !state.consumed { delegate?.keyboardView(self, didTrigger: spec.action) }
+    private func applyOutcome(_ outcome: KeyboardTouchTracker.Outcome, event: UIEvent?) {
+        if outcome.didTouchDown {
+            delegate?.keyboardViewDidTouchDownKey(self)
         }
-        if !tracked.values.contains(where: { specs[$0.keyIndex].showsPreview && !$0.consumed }) {
+        if outcome.forwardGlobe {
+            delegate?.keyboardView(self, globeEvent: event)
+        }
+        if outcome.startBackspaceRepeat {
+            startRepeating()
+        }
+        if outcome.stopBackspaceRepeat {
+            stopRepeating()
+        }
+        for action in outcome.triggered {
+            delegate?.keyboardView(self, didTrigger: action)
+        }
+        syncPressedStates()
+        if let p = outcome.preview {
+            showPreview(for: p.keyIndex, action: p.action)
+        } else if outcome.hidePreview {
             preview?.hide()
         }
     }
 
-    private func flushPendingCharacterTouches() {
-        for (id, state) in tracked where !state.consumed && specs[state.keyIndex].showsPreview {
-            tracked[id]?.consumed = true
-            keyViews[state.keyIndex].isPressed = false
-            delegate?.keyboardView(self, didTrigger: specs[state.keyIndex].action)
+    private func syncPressedStates() {
+        let pressed = touchTracker.pressedKeyIndices
+        for i in 0..<min(specs.count, keyViews.count) {
+            keyViews[i].isPressed = pressed.contains(i)
         }
-        preview?.hide()
-    }
-
-    private func markConsumed(_ touch: UITouch) {
-        tracked[ObjectIdentifier(touch)]?.consumed = true
     }
 
     private func cancelAllTouches() {
         stopRepeating()
-        for state in tracked.values where state.keyIndex < keyViews.count {
-            keyViews[state.keyIndex].isPressed = false
+        touchTracker.cancelAll()
+        for i in 0..<keyViews.count {
+            keyViews[i].isPressed = false
         }
-        tracked.removeAll()
         preview?.hide()
     }
 
-    private func showPreview(for index: Int) {
+    private func showPreview(for index: Int, action: KeyAction) {
         guard let preview, let container = preview.superview,
-              specs[index].showsPreview, let title = previewTitle(for: specs[index]) else {
+              specs[index].showsPreview, let title = actionTitle(for: action) else {
             preview?.hide()
             return
         }

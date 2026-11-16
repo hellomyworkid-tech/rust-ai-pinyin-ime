@@ -160,6 +160,15 @@ final class RustEngine: IMEEngine {
         ime_engine_reset(handle)
     }
 
+    func compositionSnapshot() -> String? {
+        guard let data = take(ime_engine_snapshot(handle)) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    func restoreComposition(_ snapshot: String) -> IMEResult {
+        snapshot.withCString { result(ime_engine_restore_snapshot(handle, $0)) }
+    }
+
     var isComposing: Bool { ime_engine_is_composing(handle) }
     var isEnglishMode: Bool { ime_engine_is_english(handle) }
 

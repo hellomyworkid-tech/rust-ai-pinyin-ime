@@ -1,30 +1,49 @@
 import SwiftUI
 
 struct RootView: View {
+    enum SectionTab: Hashable {
+        case home, ai, input, about
+    }
+
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var downloads: ModelDownloadManager
     @EnvironmentObject private var apple: AppleModelMonitor
     @EnvironmentObject private var keyboard: KeyboardInstallMonitor
     @Environment(\.scenePhase) private var scenePhase
+    @State private var selectedTab: SectionTab = .home
 
     var body: some View {
-        TabView {
-            Tab("首页", systemImage: "keyboard") {
+        TabView(selection: $selectedTab) {
+            Tab("首页", systemImage: "keyboard", value: .home) {
                 NavigationStack { HomeView() }
             }
-            Tab("AI 选词", systemImage: "sparkles") {
+            Tab("AI 选词", systemImage: "sparkles", value: .ai) {
                 NavigationStack { AIChoiceView() }
             }
-            Tab("输入设置", systemImage: "slider.horizontal.3") {
+            Tab("输入设置", systemImage: "slider.horizontal.3", value: .input) {
                 NavigationStack { InputSettingsView() }
             }
-            Tab("关于", systemImage: "info.circle") {
+            Tab("关于", systemImage: "info.circle", value: .about) {
                 NavigationStack { AboutView() }
+            }
+        }
+        .onOpenURL { url in
+            guard url.scheme?.lowercased() == "aipinyin" else { return }
+            switch url.host?.lowercased() {
+            case "ai":
+                selectedTab = .ai
+            case "settings", "input":
+                selectedTab = .input
+            case "about":
+                selectedTab = .about
+            default:
+                selectedTab = .home
             }
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
-            // 从系统设置、Apple 智能设置回来：重新检查各种状态
+            // 从系统设置、Apple 智能设置或键盘快捷面板回来：重新检查各种状态
+            settings.reload()
             keyboard.refresh()
             apple.refresh()
             downloads.refresh()

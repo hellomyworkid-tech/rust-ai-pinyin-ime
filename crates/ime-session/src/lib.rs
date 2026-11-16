@@ -159,6 +159,29 @@ pub struct CandidateWindowViewModel {
     pub cursor_byte_pos: usize,
     /// 当前光标所在的活跃音节下标（`Some(idx)` 时预编辑栏高亮该音节，且候选列表展示该音节对应的选词）
     pub active_syllable_index: Option<usize>,
+    /// 触屏模式下正在原处改写的拼音字节区间 `[start, end)`（非空时，落在该区间内的音节及其对应预览文字高亮显示，
+    /// 同时候选栏保持整句候选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_byte_range: Option<(usize, usize)>,
+}
+
+/// 未完成组合的轻量快照（用于宿主切换应用、截图或键盘收起后回到同一输入框时恢复选字状态）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositionSnapshot {
+    pub input_buffer: String,
+    pub cursor_pos: usize,
+    pub cursor_syllable_mode: bool,
+    pub cursor_auto_advanced: bool,
+    pub last_op_was_pinyin_edit: bool,
+    pub had_auto_prefix_lock: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touch_edit_range: Option<(usize, usize)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_segments: Vec<(usize, usize, String)>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sentence_before_pins: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_context: Option<String>,
 }
 
 /// TSF 按键处理后的动作响应（对应 `ITfKeyEventSink` 的 `*pfEaten` 与 `ITfComposition` 提交）
@@ -325,12 +348,15 @@ pub struct KeySession {
     pub context_memory_enabled: bool,
     /// 是否在常用词候选后面跟上对应的表情（见 [`emoji`]）。默认关闭（Windows 版行为不变），iOS 键盘打开
     pub emoji_candidates_enabled: bool,
-    /// 触屏的音节选字方式（iOS 键盘打开，Windows 版默认关闭）。用户点了某个音节、在那里选了字之后：
-    /// - 回到整句，不再自动跳到别的未选音节；由用户看整句候选决定上屏，还是接着点别的音节。
+    /// 触屏的音节选字与改写方式（iOS 键盘打开，Windows 版默认关闭）：
+    /// - 点了某个音节后直接按字母键，会删掉被选中的这个音节，在原位置改写新输入的拼音；
+    /// - 在点的音节上选了字之后回到整句，不再自动跳到别的未选音节；由用户看整句候选决定上屏，还是接着点别的音节。
     ///   选到了句尾、而且整句都已选定时照常直接上屏；
     /// - 点着一个已选定的音节按退格，撤销这个音节上的选字（光标留在这个音节上，可以重选）。
-    /// 关闭时（键盘的逐段选词）：选完跳到第一个未选音节；退格撤销紧挨在光标左边的选字
+    /// 关闭时（键盘的逐段选词）：字母在光标处插入；选完跳到第一个未选音节；退格撤销紧挨在光标左边的选字
     pub touch_syllable_editing: bool,
+    /// 触屏模式下点选音节后直接按字母改写时，记录本次改写拼音在 `input_buffer` 中的字节区间 `(start, end)`
+    pub touch_edit_range: Option<(usize, usize)>,
 }
 
 impl KeySession {
@@ -364,6 +390,7 @@ impl KeySession {
             context_memory_enabled: false,
             emoji_candidates_enabled: false,
             touch_syllable_editing: false,
+            touch_edit_range: None,
         }
     }
 
@@ -390,6 +417,71 @@ impl KeySession {
     pub fn cancel_composition(&mut self) {
         self.reset_input_state();
         self.pending_ghost_text = None;
+    }
+
+    /// 导出当前未上屏组合的快照；当前没有正在组合的输入时返回 `None`
+    pub fn composition_snapshot(&self) -> Option<CompositionSnapshot> {
+        if self.input_buffer.is_empty() {
+            return None;
+        }
+        let mut pinned_segments: Vec<(usize, usize, String)> = self
+            .pinned_segments
+            .iter()
+            .map(|(&s, (e, text))| (s, *e, text.clone()))
+            .collect();
+        pinned_segments.sort_by_key(|&(s, _, _)| s);
+        Some(CompositionSnapshot {
+            input_buffer: self.input_buffer.clone(),
+            cursor_pos: self.cursor_pos.min(self.input_buffer.len()),
+            cursor_syllable_mode: self.cursor_syllable_mode,
+            cursor_auto_advanced: self.cursor_auto_advanced,
+            last_op_was_pinyin_edit: self.last_op_was_pinyin_edit,
+            had_auto_prefix_lock: self.had_auto_prefix_lock,
+            touch_edit_range: self.touch_edit_range,
+            pinned_segments,
+            sentence_before_pins: self.sentence_before_pins.clone(),
+            // 快照会落盘，不带输入框里光标前的文字（隐私）；恢复时由宿主先按当前输入框设置上文
+            host_context: None,
+        })
+    }
+
+    /// 从快照恢复未上屏的组合并重算候选；快照为空或非法时返回 `None`
+    pub fn restore_composition_snapshot(
+        &mut self,
+        snapshot: CompositionSnapshot,
+    ) -> Option<CandidateWindowViewModel> {
+        if snapshot.input_buffer.is_empty() || !snapshot.input_buffer.is_ascii() {
+            return None;
+        }
+        self.reset_input_state();
+        self.pending_ghost_text = None;
+        self.english_passthrough_mode = false;
+        let n = snapshot.input_buffer.len();
+        self.input_buffer = snapshot.input_buffer;
+        self.cursor_pos = snapshot.cursor_pos.min(n);
+        self.cursor_syllable_mode = snapshot.cursor_syllable_mode;
+        self.cursor_auto_advanced = snapshot.cursor_auto_advanced;
+        self.last_op_was_pinyin_edit = snapshot.last_op_was_pinyin_edit;
+        self.had_auto_prefix_lock = snapshot.had_auto_prefix_lock;
+        self.touch_edit_range = snapshot
+            .touch_edit_range
+            .map(|(s, e)| (s.min(n), e.min(n)))
+            .filter(|&(s, e)| s <= e);
+        for (s, e, text) in snapshot.pinned_segments {
+            let overlaps = self
+                .pinned_segments
+                .iter()
+                .any(|(&ps, &(pe, _))| s < pe && ps < e);
+            if s < e && e <= n && !text.is_empty() && !overlaps {
+                self.pinned_segments.insert(s, (e, text));
+            }
+        }
+        self.sentence_before_pins = snapshot.sentence_before_pins;
+        if let Some(ctx) = snapshot.host_context {
+            self.set_context_before_cursor(&ctx);
+        }
+        self.recompute_candidates();
+        Some(self.build_view_model())
     }
 
     /// 直接设置应用场景（iOS 没有前台进程名，由宿主按输入框类型等自行决定）。
@@ -485,8 +577,11 @@ impl KeySession {
         if self.input_buffer.is_empty() || self.last_syllable_spans.is_empty() {
             return None;
         }
+        if self.touch_syllable_editing && self.touch_edit_range.is_some() {
+            return None;
+        }
         if self.last_op_was_pinyin_edit {
-            if self.pinned_segments.is_empty() {
+            if self.touch_syllable_editing || self.pinned_segments.is_empty() {
                 return None;
             }
             let unpinned_start = self.first_unpinned_offset();
@@ -524,10 +619,27 @@ impl KeySession {
     /// 触屏模式下，当前高亮的是用户自己点的音节（不是选完字自动跳过去的，也不是改拼音后推出来的）
     fn on_tapped_syllable(&self) -> bool {
         self.touch_syllable_editing
+            && self.touch_edit_range.is_none()
             && self.cursor_syllable_mode
             && !self.cursor_auto_advanced
             && !self.last_op_was_pinyin_edit
             && self.active_syllable_index().is_some()
+    }
+
+    /// 触屏模式下当前点选音节占用的字节数；未点选音节时返回 0。
+    /// 用于判断继续输入字母改写该音节后是否超过总长度上限。
+    pub fn tapped_syllable_byte_len(&self) -> usize {
+        if !self.on_tapped_syllable() {
+            return 0;
+        }
+        self.active_syllable_index()
+            .and_then(|i| self.last_syllable_spans.get(i))
+            .map(|s| {
+                let start = s.start.min(self.input_buffer.len());
+                let end = s.end.min(self.input_buffer.len());
+                end.saturating_sub(start)
+            })
+            .unwrap_or(0)
     }
 
     /// 光标左侧最近的音节起点（用于 ← 键按整音节跳跃）
@@ -558,6 +670,7 @@ impl KeySession {
             // 首次点击某音节：光标置于该音节最前端（如 `|zuo`），展示 `zuo` 起始的候选词
             self.cursor_pos = span.start;
         }
+        self.touch_edit_range = None;
         self.cursor_syllable_mode = true;
         self.cursor_auto_advanced = false;
         self.last_op_was_pinyin_edit = false;
@@ -571,6 +684,7 @@ impl KeySession {
     /// 鼠标点击回到整句模式（或按 End 键跳回拼音末尾）
     pub fn return_cursor_to_end(&mut self) {
         self.cursor_pos = self.input_buffer.len();
+        self.touch_edit_range = None;
         self.cursor_syllable_mode = false;
         self.cursor_auto_advanced = false;
         self.last_op_was_pinyin_edit = false;
@@ -677,6 +791,7 @@ impl KeySession {
         self.core.flush_user_dict();
         self.input_buffer.clear();
         self.cursor_pos = 0;
+        self.touch_edit_range = None;
         self.cursor_syllable_mode = false;
         self.cursor_auto_advanced = false;
         self.last_op_was_pinyin_edit = false;
@@ -721,10 +836,31 @@ impl KeySession {
                 }
                 self.pending_ghost_text = None;
                 self.full_sentence_selected = false;
+                // 触屏模式下点选某个错误音节（如把 mei 输成 nei 后点选 nei）再按字母键时，
+                // 直接删除被选中的音节，在原处改写新输入的拼音内容，并记录改写区间供界面持续高亮
+                let mut started_touch_overwrite = false;
+                if ch != '\'' && self.on_tapped_syllable() {
+                    if let Some(syl_span) = self
+                        .active_syllable_index()
+                        .and_then(|i| self.last_syllable_spans.get(i).cloned())
+                    {
+                        let start = syl_span.start.min(self.input_buffer.len());
+                        let end = syl_span.end.min(self.input_buffer.len());
+                        if start < end {
+                            self.input_buffer.drain(start..end);
+                            for del_idx in (start..end).rev() {
+                                self.shift_pins_on_delete(del_idx);
+                            }
+                        }
+                        self.cursor_pos = start;
+                        started_touch_overwrite = true;
+                    }
+                }
                 // 若光标是因选定前缀词（如在 `wolaiceshi` 中选定「我来」）而自动推进到下一个未锁定音节 `|ce`，
                 // 此时用户继续敲击新拼音字母（如 `yixia`）应当追加在整串末尾（变成 `wolaiceshiyixia`），
                 // 而保持「我来」锁定与 `|ce` 焦点不变！
                 if self.cursor_auto_advanced {
+                    self.touch_edit_range = None;
                     let end_pos = self.input_buffer.len();
                     self.input_buffer.insert(end_pos, ch);
                     self.shift_pins_on_insert(end_pos, ch.len_utf8());
@@ -735,10 +871,24 @@ impl KeySession {
                     return KeyAction::EatAndUpdateUi(self.build_view_model());
                 }
                 let pos = self.cursor_pos.min(self.input_buffer.len());
+                let delta = ch.len_utf8();
                 let was_in_middle = pos < self.input_buffer.len();
                 self.input_buffer.insert(pos, ch);
-                self.shift_pins_on_insert(pos, ch.len_utf8());
-                self.cursor_pos = pos + ch.len_utf8();
+                self.shift_pins_on_insert(pos, delta);
+                self.cursor_pos = pos + delta;
+                if self.touch_syllable_editing {
+                    if started_touch_overwrite {
+                        self.touch_edit_range = Some((pos, pos + delta));
+                    } else if let Some((s, e)) = self.touch_edit_range {
+                        if pos >= s && pos <= e {
+                            self.touch_edit_range = Some((s, e + delta));
+                        } else {
+                            self.touch_edit_range = None;
+                        }
+                    }
+                } else {
+                    self.touch_edit_range = None;
+                }
                 if self.cursor_pos >= self.input_buffer.len() && !was_in_middle {
                     self.cursor_syllable_mode = false;
                     self.last_op_was_pinyin_edit = false;
@@ -756,12 +906,15 @@ impl KeySession {
                     return KeyAction::PassThrough;
                 }
                 self.full_sentence_selected = false;
-                // 触屏：点着一个已选定的音节按退格，撤销这个音节所在词块的选字，光标留在这个音节上
+                // 触屏：点着音节按退格——「选中谁，修改谁」：
+                // 1) 若该音节已有选定锁定的字，先撤销该词块的选字，光标留在这个音节上；
+                // 2) 若该音节未锁定，则从被选中音节自身的末尾字母开始删除（如选中 men 按退格先删 n 变成 me），
+                //    并保持该改写区间的蓝色高亮，而不是误删前一个音节的末尾字母或误撤前一个音节的锁定。
                 if self.on_tapped_syllable() {
                     let syllable = self
                         .active_syllable_index()
                         .and_then(|i| self.last_syllable_spans.get(i).cloned());
-                    let covering = syllable.and_then(|syl| {
+                    let covering = syllable.as_ref().and_then(|syl| {
                         self.pinned_segments
                             .iter()
                             .find(|(&s, &(e, _))| s <= syl.start && syl.start < e)
@@ -772,11 +925,38 @@ impl KeySession {
                         if self.pinned_segments.is_empty() {
                             self.sentence_before_pins.clear();
                         }
+                        self.touch_edit_range = None;
                         self.cursor_pos = syllable_start;
                         self.current_page = 0;
                         self.selected_candidate_index = 0;
                         self.recompute_candidates();
                         return KeyAction::EatAndUpdateUi(self.build_view_model());
+                    }
+                    if let Some(syl) = syllable {
+                        let start = syl.start.min(self.input_buffer.len());
+                        let end = syl.end.min(self.input_buffer.len());
+                        if start < end {
+                            let was_in_middle = end < self.input_buffer.len();
+                            let del_idx = end - 1;
+                            self.input_buffer.remove(del_idx);
+                            self.shift_pins_on_delete(del_idx);
+                            self.cursor_pos = del_idx;
+                            self.touch_edit_range = Some((start, del_idx));
+                            self.current_page = 0;
+                            self.selected_candidate_index = 0;
+                            if self.input_buffer.is_empty() {
+                                self.reset_input_state();
+                                return KeyAction::EatAndUpdateUi(self.build_view_model());
+                            }
+                            if self.cursor_pos >= self.input_buffer.len() && !was_in_middle {
+                                self.cursor_syllable_mode = false;
+                                self.last_op_was_pinyin_edit = false;
+                            } else {
+                                self.last_op_was_pinyin_edit = true;
+                            }
+                            self.recompute_candidates();
+                            return KeyAction::EatAndUpdateUi(self.build_view_model());
+                        }
                     }
                 }
                 let pos = self.cursor_pos.min(self.input_buffer.len());
@@ -813,6 +993,7 @@ impl KeySession {
                         self.cursor_syllable_mode = true;
                         self.cursor_auto_advanced = true;
                     }
+                    self.touch_edit_range = None;
                     self.last_op_was_pinyin_edit = false;
                     self.current_page = 0;
                     self.selected_candidate_index = 0;
@@ -828,6 +1009,13 @@ impl KeySession {
                 self.input_buffer.remove(del_idx);
                 self.shift_pins_on_delete(del_idx);
                 self.cursor_pos = del_idx;
+                if let Some((s, e)) = self.touch_edit_range {
+                    if del_idx >= s && del_idx < e {
+                        self.touch_edit_range = Some((s, e - 1));
+                    } else {
+                        self.touch_edit_range = None;
+                    }
+                }
                 self.current_page = 0;
                 self.selected_candidate_index = 0;
                 if self.input_buffer.is_empty() {
@@ -852,6 +1040,15 @@ impl KeySession {
                 if pos < self.input_buffer.len() {
                     self.input_buffer.remove(pos);
                     self.shift_pins_on_delete(pos);
+                    if let Some((s, e)) = self.touch_edit_range {
+                        if pos >= s && pos < e {
+                            self.touch_edit_range = Some((s, e - 1));
+                        } else if pos < s {
+                            self.touch_edit_range = Some((s - 1, e - 1));
+                        } else {
+                            self.touch_edit_range = None;
+                        }
+                    }
                     self.last_op_was_pinyin_edit = true;
                     self.current_page = 0;
                     self.selected_candidate_index = 0;
@@ -930,6 +1127,7 @@ impl KeySession {
                 if let Some(t) = target {
                     self.cursor_pos = t;
                 }
+                self.touch_edit_range = None;
                 self.cursor_syllable_mode = true;
                 self.cursor_auto_advanced = false;
                 self.last_op_was_pinyin_edit = false;
@@ -953,6 +1151,7 @@ impl KeySession {
                 } else {
                     self.cursor_syllable_mode = true;
                 }
+                self.touch_edit_range = None;
                 self.last_op_was_pinyin_edit = false;
                 self.cursor_auto_advanced = false;
                 self.full_sentence_selected = false;
@@ -976,6 +1175,7 @@ impl KeySession {
                         self.cursor_syllable_mode = false;
                     }
                 }
+                self.touch_edit_range = None;
                 self.cursor_auto_advanced = false;
                 self.last_op_was_pinyin_edit = false;
                 self.full_sentence_selected = false;
@@ -993,6 +1193,7 @@ impl KeySession {
                     .first()
                     .map(|s| s.start)
                     .unwrap_or(0);
+                self.touch_edit_range = None;
                 self.cursor_syllable_mode = true;
                 self.cursor_auto_advanced = false;
                 self.last_op_was_pinyin_edit = false;
@@ -1125,11 +1326,15 @@ impl KeySession {
                 }
             }
         }
-        // 简拼匹配到的全部记录（同一个词的几条都要，见 `user_memory`）：调度器第一次要某个候选的个人记忆时才查，
+        // 简拼与末尾半音节前缀匹配到的全部记录（同一个词的几条都要，见 `user_memory`）：调度器第一次要某个候选的个人记忆时才查，
         // 每次重算至多查一次
         let jianpin: std::cell::OnceCell<Vec<UserWordRecord>> = std::cell::OnceCell::new();
         let memory = |text: &str| {
-            let recalled = jianpin.get_or_init(|| user_dict.jianpin_matches(code));
+            let recalled = jianpin.get_or_init(|| {
+                let mut v = user_dict.jianpin_matches(code);
+                v.extend(user_dict.prefix_matches(code));
+                v
+            });
             user_memory(user_dict, code, text, recalled)
         };
         let l2 = self.ai.rerank_with_user_priors(
@@ -1257,6 +1462,7 @@ impl KeySession {
                                     final_score: 140.0,
                                     ai_boosted: false,
                                     tag: "[余下整句]".to_string(),
+                                    pronunciation_hint: None,
                                     segments: suffix_segs.iter().map(|s| s.text.clone()).collect(),
                                     segment_spans: suffix_segs.clone(),
                                     syllable_spans: suffix_syls.clone(),
@@ -1295,6 +1501,7 @@ impl KeySession {
                                         final_score: 138.0,
                                         ai_boosted: false,
                                         tag: "[前缀选词]".to_string(),
+                                        pronunciation_hint: None,
                                         segments: sub_segs.iter().map(|s| s.text.clone()).collect(),
                                         segment_spans: sub_segs,
                                         syllable_spans: sub_syls,
@@ -1508,7 +1715,7 @@ impl KeySession {
                             .find(|(_, &(e, _))| e == span_start)
                             .map(|(_, (_, txt))| txt.clone())
                     });
-                let is_single_syllable = ime_core::pinyin::is_valid_syllable(&slice_code)
+                let is_single_syllable = ime_core::pinyin::is_valid_or_alias_syllable(&slice_code)
                     || slice_code.len() <= 1
                     || chosen.text.chars().count() <= 1;
                 if is_single_syllable {
@@ -1555,6 +1762,7 @@ impl KeySession {
             };
 
             self.cursor_pos = next_pos;
+            self.touch_edit_range = None;
             self.cursor_syllable_mode = true;
             self.cursor_auto_advanced = true;
             self.last_op_was_pinyin_edit = false;
@@ -1742,6 +1950,12 @@ impl KeySession {
             }
         }
 
+        let edited_byte_range = self.touch_edit_range.and_then(|(s, e)| {
+            let n = self.input_buffer.len();
+            let (s, e) = (s.min(n), e.min(n));
+            (s < e).then_some((s, e))
+        });
+
         CandidateWindowViewModel {
             visible: true,
             preedit_text: preedit,
@@ -1760,6 +1974,7 @@ impl KeySession {
             top_segments: self.last_full_segments.clone(),
             cursor_byte_pos: self.cursor_pos,
             active_syllable_index: active_syl,
+            edited_byte_range,
         }
     }
 }
@@ -2390,10 +2605,59 @@ mod tests {
         assert_eq!(session.input_buffer, "tademingzijiaoyangjiaye");
         assert_eq!(session.active_syllable_index(), Some(4));
 
-        // 点着没选定的音节按退格：照旧删光标左边的字母
+        // 点着没选定的音节（yang）按退格：从被选中的 yang 末尾字母 g 开始删除，不误删前一个音节 jiao 的 o
         session.click_pinyin_syllable(5, None);
         session.process_key(VirtualKey::Backspace);
-        assert_eq!(session.input_buffer, "tademingzijiayangjiaye");
+        assert_eq!(session.input_buffer, "tademingzijiaoyanjiaye");
+        assert_eq!(session.build_view_model().edited_byte_range, Some((14, 17)));
+    }
+
+    #[test]
+    fn test_touch_backspace_on_tapped_syllable_deletes_within_that_syllable_and_snapshot_restores() {
+        let mut session = new_test_session();
+        session.touch_syllable_editing = true;
+
+        // 1. 选中 men 按退格：依次删 n -> e -> m（不删前面 ta 的 a，也不撤销前面 ta 的选定字），中间重输继续标蓝
+        type_str(&mut session, "nihaotamenzaizheli");
+        pick_on_syllable(&mut session, 2, "她"); // 锁定 ta (5..7) -> 「她」
+        session.click_pinyin_syllable(3, None); // 选中 men (7..10)
+        assert_eq!(session.last_syllable_spans[3].code_key, "men");
+
+        // 第 1 次退格：删掉 men 末尾的 n -> me，且前面的「她」锁定不受影响
+        session.process_key(VirtualKey::Backspace);
+        assert_eq!(session.input_buffer, "nihaotamezaizheli");
+        assert_eq!(session.pinned_segments.get(&5).map(|(_, t)| t.as_str()), Some("她"));
+        assert_eq!(session.build_view_model().edited_byte_range, Some((7, 9)));
+
+        // 在 me 后接输 i -> mei，保持蓝色改写区间 (7, 10)
+        type_str(&mut session, "i");
+        assert_eq!(session.input_buffer, "nihaotameizaizheli");
+        assert_eq!(session.build_view_model().edited_byte_range, Some((7, 10)));
+
+        // 连按 3 次退格把 mei 删空 -> nihaotazaizheli，改写区间为空（None），「她」仍在
+        for _ in 0..3 {
+            session.process_key(VirtualKey::Backspace);
+        }
+        assert_eq!(session.input_buffer, "nihaotazaizheli");
+        assert_eq!(session.build_view_model().edited_byte_range, None);
+        assert_eq!(session.pinned_segments.get(&5).map(|(_, t)| t.as_str()), Some("她"));
+
+        // 2. 快照导出与恢复：保留拼音缓冲、已选定词块、点选/改写高亮状态；
+        //    快照会落盘，不带光标前的上文（隐私），恢复前由宿主按当前输入框设置上文
+        session.set_context_before_cursor("前文内容");
+        type_str(&mut session, "men");
+        assert_eq!(session.build_view_model().edited_byte_range, Some((7, 10)));
+        let snap = session.composition_snapshot().expect("正在输入时应有快照");
+        assert_eq!(snap.host_context, None, "快照不应带上文");
+
+        let mut restored = new_test_session();
+        restored.touch_syllable_editing = true;
+        restored.set_context_before_cursor("新输入框的上文");
+        let vm = restored.restore_composition_snapshot(snap).expect("快照应当成功恢复");
+        assert_eq!(restored.input_buffer, "nihaotamenzaizheli");
+        assert_eq!(restored.context_before_cursor(), "新输入框的上文");
+        assert_eq!(vm.edited_byte_range, Some((7, 10)));
+        assert!(vm.composed_full_sentence.contains('她'));
     }
 
     #[test]
@@ -2411,6 +2675,126 @@ mod tests {
             matches!(&last, KeyAction::EatAndCommit { committed_text, .. } if committed_text == "你好"),
             "{last:?}"
         );
+    }
+
+    #[test]
+    fn test_touch_typing_on_tapped_syllable_overwrites_that_syllable() {
+        let mut session = new_test_session();
+        session.touch_syllable_editing = true;
+
+        // 1. 句中改写：把 mei 输错成 nei（zhong guo nei you e u v），点选 nei 后输入 mei，
+        //    nei 被删除并在原处改写为 mei（zhong guo mei you e u v）
+        type_str(&mut session, "zhongguoneiyoueuv");
+        assert_eq!(session.last_syllable_spans[2].code_key, "nei");
+        session.click_pinyin_syllable(2, None);
+        assert_eq!(session.active_syllable_index(), Some(2));
+        type_str(&mut session, "mei");
+        assert_eq!(session.input_buffer, "zhongguomeiyoueuv");
+        let codes: Vec<&str> = session
+            .last_syllable_spans
+            .iter()
+            .map(|s| s.code_key.as_str())
+            .collect();
+        assert_eq!(codes[..4], ["zhong", "guo", "mei", "you"]);
+        let vm = session.build_view_model();
+        assert_eq!(vm.active_syllable_index, None, "改写完成后回到整句候选");
+        assert_eq!(vm.edited_byte_range, Some((8, 11)), "改写区间精确对应 mei 的字节范围");
+        assert!(
+            vm.composed_full_sentence.starts_with("中国没有"),
+            "整句应以『中国没有』开头，实际: {}",
+            vm.composed_full_sentence
+        );
+        assert!(
+            vm.visible_candidates[0].text.starts_with("中国没有"),
+            "第 1 候选应为修正后的整句，实际: {:?}",
+            vm.visible_candidates[0].text
+        );
+        session.cancel_composition();
+
+        // 1b. 单音节改写为多音节（nihaowozaizheli 点选 wo 改写为 tamen）：
+        //     edited_byte_range 覆盖 ta 与 men 两个音节，退格/重输动态伸缩，再点 ta 可进入该处选词
+        type_str(&mut session, "nihaowozaizheli");
+        session.click_pinyin_syllable(2, None);
+        assert_eq!(session.build_view_model().edited_byte_range, None);
+        type_str(&mut session, "tamen");
+        assert_eq!(session.input_buffer, "nihaotamenzaizheli");
+        let vm_multi = session.build_view_model();
+        assert_eq!(vm_multi.active_syllable_index, None);
+        assert_eq!(vm_multi.edited_byte_range, Some((5, 10)));
+        assert_eq!(vm_multi.composed_full_sentence, "你好他们在这里");
+        assert_eq!(vm_multi.syllable_spans[2].code_key, "ta");
+        assert_eq!(vm_multi.syllable_spans[2].text, "他");
+        assert_eq!(vm_multi.syllable_spans[3].code_key, "men");
+        assert_eq!(vm_multi.syllable_spans[3].text, "们");
+
+        // 退格删掉 n -> edited_byte_range 缩为 (5, 9)；删空改写区后为 None，接着重输仍继续标蓝
+        session.process_key(VirtualKey::Backspace);
+        assert_eq!(session.build_view_model().edited_byte_range, Some((5, 9)));
+        for _ in 0..4 {
+            session.process_key(VirtualKey::Backspace);
+        }
+        assert_eq!(session.input_buffer, "nihaozaizheli");
+        assert_eq!(session.build_view_model().edited_byte_range, None);
+        type_str(&mut session, "tamen");
+        assert_eq!(session.build_view_model().edited_byte_range, Some((5, 10)));
+
+        // 再点改写出来的 ta（index 2）：清除改写区间，进入 ta 处的候选词选择（如选「她们」）
+        session.click_pinyin_syllable(2, None);
+        let vm_tap_edited = session.build_view_model();
+        assert_eq!(vm_tap_edited.edited_byte_range, None);
+        assert_eq!(vm_tap_edited.active_syllable_index, Some(2));
+        session.cancel_composition();
+
+        // 2. 句首与句尾音节改写，且长度可长可短
+        type_str(&mut session, "neiyou");
+        session.click_pinyin_syllable(0, None);
+        type_str(&mut session, "mei");
+        assert_eq!(session.input_buffer, "meiyou");
+        assert_eq!(session.build_view_model().edited_byte_range, Some((0, 3)));
+        assert_eq!(session.build_view_model().visible_candidates[0].text, "没有");
+        session.cancel_composition();
+
+        type_str(&mut session, "nihaowo");
+        session.click_pinyin_syllable(2, None);
+        type_str(&mut session, "tamen");
+        assert_eq!(session.input_buffer, "nihaotamen");
+        assert_eq!(session.active_syllable_index(), None);
+        assert_eq!(session.build_view_model().edited_byte_range, Some((5, 10)));
+        session.cancel_composition();
+
+        // 3. 前后已有选定词块时改写中间音节：前后选定均保持正确偏移，且候选仍为整句（不跳回句首音节）
+        type_str(&mut session, "tademingzineiyangjiaye");
+        pick_on_syllable(&mut session, 0, "她");
+        pick_on_syllable(&mut session, 5, "杨");
+        // 点选中间输错的 nei (index 4) 改写为 jiao（长度从 3 字节变为 4 字节）
+        session.click_pinyin_syllable(4, None);
+        type_str(&mut session, "jiao");
+        assert_eq!(session.input_buffer, "tademingzijiaoyangjiaye");
+        let vm_pinned = session.build_view_model();
+        assert_eq!(vm_pinned.active_syllable_index, None);
+        assert!(
+            vm_pinned.composed_full_sentence.starts_with("她")
+                && vm_pinned.composed_full_sentence.contains('杨'),
+            "前后锁定的『她』与『杨』均应保留，实际: {}",
+            vm_pinned.composed_full_sentence
+        );
+        session.cancel_composition();
+
+        // 4. 点选一个已选定的音节直接输入新拼音：自动解除该音节的锁定并改写拼音
+        type_str(&mut session, "nihao");
+        pick_on_syllable(&mut session, 1, "号");
+        session.click_pinyin_syllable(1, None);
+        type_str(&mut session, "ma");
+        assert_eq!(session.input_buffer, "nima");
+        assert!(session.pinned_segments.is_empty());
+        session.cancel_composition();
+
+        // 5. 未开启触屏模式（桌面版）：点击音节后敲字母照旧在光标处插入，不删除原音节
+        let mut desktop = new_test_session();
+        type_str(&mut desktop, "nihao");
+        desktop.click_pinyin_syllable(1, None);
+        type_str(&mut desktop, "m");
+        assert_eq!(desktop.input_buffer, "nimhao");
     }
 
     #[test]
@@ -3173,5 +3557,135 @@ mod tests {
             ImePersistentConfig::default().ai_config.enabled
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_prefix_pick_keeps_trailing_jie_and_yue_as_intact_syllables() {
+        // 1) 复现真机场景 `sijie` 选前缀「司」：预编辑栏必须是 `si | jie`（而非拆成 `si | ji | e`），
+        //    候选前排为 `jie` 单字（接/解/姐/届/借…），保留「饥饿」穿插在后，绝不混入 `ji` 单字（级/集/几/机）
+        let mut s = new_test_session();
+        s.touch_syllable_editing = true;
+        type_str(&mut s, "sijie");
+        let si_idx = s
+            .current_candidates
+            .iter()
+            .position(|c| c.text == "司")
+            .expect("sijie candidates should include prefix char 司");
+        let KeyAction::EatAndUpdateUi(vm) = s.select_candidate(si_idx) else {
+            panic!("selecting prefix 司 should stay in composition");
+        };
+        let syl_keys: Vec<&str> = vm
+            .syllable_spans
+            .iter()
+            .map(|sp| &s.input_buffer[sp.start..sp.end])
+            .collect();
+        assert_eq!(syl_keys, vec!["si", "jie"]);
+        assert_eq!(vm.active_syllable_index, Some(1));
+        assert!(!vm.composed_full_sentence.contains("饥饿"), "got {}", vm.composed_full_sentence);
+        let cands: Vec<&str> = s.current_candidates.iter().take(30).map(|c| c.text.as_str()).collect();
+        assert!(cands[0].chars().count() == 1, "expected jie single char first, got {cands:?}");
+        assert!(cands.contains(&"届") && cands.contains(&"借") && cands.contains(&"饥饿"), "{cands:?}");
+        assert!(!cands.contains(&"级") && !cands.contains(&"几"), "{cands:?}");
+
+        // 2) 复现真机场景 `dongyue` 选前缀「东」：预编辑栏必须是 `dong | yue`（而非拆成 `dong | yu | e`）
+        let mut s = new_test_session();
+        s.touch_syllable_editing = true;
+        type_str(&mut s, "dongyue");
+        let dong_idx = s
+            .current_candidates
+            .iter()
+            .position(|c| c.text == "东")
+            .expect("dongyue candidates should include prefix char 东");
+        let KeyAction::EatAndUpdateUi(vm) = s.select_candidate(dong_idx) else {
+            panic!("selecting prefix 东 should stay in composition");
+        };
+        let syl_keys: Vec<&str> = vm
+            .syllable_spans
+            .iter()
+            .map(|sp| &s.input_buffer[sp.start..sp.end])
+            .collect();
+        assert_eq!(syl_keys, vec!["dong", "yue"]);
+        assert_eq!(vm.active_syllable_index, Some(1));
+        assert!(!vm.composed_full_sentence.contains("余额"), "got {}", vm.composed_full_sentence);
+        let yue_cands: Vec<&str> = s.current_candidates.iter().take(20).map(|c| c.text.as_str()).collect();
+        assert!(yue_cands[0].chars().count() == 1, "expected yue single char first, got {yue_cands:?}");
+        assert!(yue_cands.contains(&"月") && yue_cands.contains(&"越") && yue_cands.contains(&"岳") && yue_cands.contains(&"余额"), "{yue_cands:?}");
+        assert!(!yue_cands.contains(&"于") && !yue_cands.contains(&"与"), "{yue_cands:?}");
+
+        // 3) 触屏直接点击长句 `dongyue`（n=7 > 6）中的 `yue` 音节并选定第 5+ 顺位单字「岳」（或「粤」），
+        //    由于单字锁定不借用 `yu'e` 的 code_key，预编辑音节仍保持 `["dong", "yue"]` 两段且整句直接上屏或保持完整
+        let mut s = new_test_session();
+        s.touch_syllable_editing = true;
+        type_str(&mut s, "dongyue");
+        s.click_pinyin_syllable(1, None);
+        let yue_rare_idx = s
+            .current_candidates
+            .iter()
+            .position(|c| c.text == "粤")
+            .expect("tapping yue in dongyue should supplement 粤");
+        let KeyAction::EatAndUpdateUi(vm) = s.select_candidate(yue_rare_idx) else {
+            panic!("picking 粤 while dong is unpinned should return to full-sentence view");
+        };
+        let syl_keys: Vec<&str> = vm
+            .syllable_spans
+            .iter()
+            .map(|sp| &s.input_buffer[sp.start..sp.end])
+            .collect();
+        assert_eq!(syl_keys, vec!["dong", "yue"], "粤 must not borrow yu'e code_key");
+        assert!(vm.composed_full_sentence.ends_with('粤'), "got {}", vm.composed_full_sentence);
+
+        // 4) 单输 `jie`/`yue` 以及多段整句（`nayue`/`chaxunyue`/`wohenjie`）：
+        //    - 单输时常用拆分词「饥饿」「余额」保留在前排合理位置（首屏展开网格可见）；
+        //    - 强搭配整句「查询余额」「我很饥饿」直接命中首选；
+        //    - 普通多段整句 `nayue` 首选「那月」，且「那余额」作为 `[分词备选]` 保留在候选末尾而不被清空。
+        let mut s = new_test_session();
+        type_str(&mut s, "jie");
+        let jie_top20: Vec<&str> = s.current_candidates.iter().take(20).map(|c| c.text.as_str()).collect();
+        assert_eq!(jie_top20[0], "接");
+        assert!(jie_top20.contains(&"饥饿"), "jie top20 should retain 饥饿: {jie_top20:?}");
+
+        s.cancel_composition();
+        type_str(&mut s, "yue");
+        let yue_top10: Vec<&str> = s.current_candidates.iter().take(10).map(|c| c.text.as_str()).collect();
+        assert_eq!(yue_top10[0], "越");
+        assert!(yue_top10.contains(&"余额"), "yue top10 should retain 余额: {yue_top10:?}");
+
+        s.cancel_composition();
+        type_str(&mut s, "chaxunyue");
+        assert_eq!(s.current_candidates[0].text, "查询余额");
+        let cx_idx = s.current_candidates.iter().position(|c| c.text == "查询").unwrap();
+        s.select_candidate(cx_idx);
+        let after_cx: Vec<&str> = s.current_candidates.iter().take(10).map(|c| c.text.as_str()).collect();
+        assert_eq!(after_cx[0], "余额");
+        assert!(!after_cx.contains(&"于") && !after_cx.contains(&"与"), "{after_cx:?}");
+
+        s.cancel_composition();
+        type_str(&mut s, "wohenjie");
+        assert_eq!(s.current_candidates[0].text, "我很饥饿");
+
+        s.cancel_composition();
+        type_str(&mut s, "nayue");
+        let nayue_all: Vec<&str> = s.current_candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(nayue_all[0], "那月");
+        assert!(nayue_all.contains(&"那余额"), "nayue should retain 那余额 in candidates: {nayue_all:?}");
+
+        // 5) `sijie` 跨音节联想与 `ji` 完整备选字验证：
+        //    - 初态保持「四届」第 1，且首屏展开网格内提供「司机」与「司机饿」联想；
+        //    - 选定「司」后，后部完整保留全部 `ji` 单字（含「饥」），点选「饥」后剩余 `e` 自动聚焦并给出「饿」。
+        s.cancel_composition();
+        type_str(&mut s, "sijie");
+        let sijie_top25: Vec<&str> = s.current_candidates.iter().take(25).map(|c| c.text.as_str()).collect();
+        assert_eq!(sijie_top25[0], "四届");
+        assert!(sijie_top25.contains(&"司机") && sijie_top25.contains(&"司机饿"), "{sijie_top25:?}");
+        let si_bar_idx = s.current_candidates.iter().position(|c| c.text == "司").unwrap();
+        s.select_candidate(si_bar_idx);
+        let ji_hungry_idx = s
+            .current_candidates
+            .iter()
+            .position(|c| c.text == "饥")
+            .expect("选定『司』后备选应包含完整的 ji 单字『饥』");
+        assert!(ji_hungry_idx > 30, "『饥』应排在 jie 单字之后: idx={ji_hungry_idx}");
+        s.select_candidate(ji_hungry_idx);
+        assert_eq!(s.current_candidates[0].text, "饿");
     }
 }

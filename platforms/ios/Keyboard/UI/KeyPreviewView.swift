@@ -50,6 +50,7 @@ final class KeyPreviewView: UIView {
         path.append(UIBezierPath(rect: neck))
         shape.path = path.cgPath
         shape.shadowPath = path.cgPath
+        label.font = KeyTypography.font(ofSize: 32, weight: .regular, for: title)
         label.text = title
         label.frame = local(balloon).insetBy(dx: 2, dy: 2)
         isHidden = false

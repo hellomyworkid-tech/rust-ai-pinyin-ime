@@ -9,7 +9,7 @@ protocol CompositionStripDelegate: AnyObject {
 final class CompositionStripView: UIView {
     weak var delegate: CompositionStripDelegate?
 
-    private let scrollView = UIScrollView()
+    private let scrollView = TouchCancellingScrollView()
     private var chips: [SyllableChip] = []
     private let sentenceLabel = UILabel()
     private var model: CompositionModel?
@@ -63,7 +63,7 @@ final class CompositionStripView: UIView {
         }
         let height = scrollView.bounds.height
         var x: CGFloat = 8
-        var activeFrame: CGRect?
+        var focusFrame: CGRect?
         for (i, chip) in chips.enumerated() {
             guard i < syllables.count else {
                 chip.isHidden = true
@@ -74,7 +74,7 @@ final class CompositionStripView: UIView {
             chip.configure(syllable, index: i, font: font)
             let width = chip.preferredWidth
             chip.frame = CGRect(x: x, y: 1, width: width, height: max(1, height - 2))
-            if syllable.isActive { activeFrame = chip.frame }
+            if i == model.scrollFocusIndex { focusFrame = chip.frame }
             x += width + 1
         }
 
@@ -92,9 +92,9 @@ final class CompositionStripView: UIView {
         let contentWidth = sentence.length == 0 ? x + 8 : x + 10 + sentenceWidth + 8
         scrollView.contentSize = CGSize(width: contentWidth, height: height)
 
-        // 让当前音节露出来；没有当前音节时停在末尾（刚打的字母处）
+        // 让当前选中或正在句中改写的音节露出来；在句尾正常输入时停在末尾（刚打的字母处）
         let visible = scrollView.bounds.width
-        let target = activeFrame.map { $0.midX - visible / 2 } ?? (x - visible + 8)
+        let target = focusFrame.map { $0.midX - visible / 2 } ?? (x - visible + 8)
         scrollView.contentOffset.x = max(0, min(target, contentWidth - visible))
     }
 

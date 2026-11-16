@@ -496,6 +496,7 @@ impl OnDeviceAiEngine {
 
             if ai_bonus.abs() > 0.5 {
                 if (cand.tag == "[整句备选]"
+                    || cand.tag == "[分词备选]"
                     || (cand.consumed_len == max_len && cand.final_score < 90.0))
                     && ai_bonus > 0.5
                 {

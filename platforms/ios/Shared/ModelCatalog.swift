@@ -15,6 +15,9 @@ struct LocalModel: Identifiable, Equatable {
     /// 文件的 SHA-256（十六进制小写）。下载完先核对它再交给键盘；nil 表示不核对
     var sha256: String? = nil
 
+    /// 加载前要求的最小剩余可用内存（MiB）：覆盖模型本身的驻留增量并预留约 20–30 MiB 安全余量，防止触发 177 MB Jetsam 上限
+    var minimumAvailableMiB: Int { max(75, residentMiB + 2) }
+
     var localURL: URL? { AppGroup.modelsDirectory?.appendingPathComponent(fileName) }
 
     var isDownloaded: Bool {

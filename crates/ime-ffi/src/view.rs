@@ -15,6 +15,8 @@ pub(crate) struct CandidateOut<'a> {
     consumed_len: usize,
     tag: &'a str,
     ai_boosted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pronunciation_hint: Option<&'a str>,
 }
 
 impl<'a> CandidateOut<'a> {
@@ -25,6 +27,7 @@ impl<'a> CandidateOut<'a> {
             consumed_len: candidate.consumed_len,
             tag: &candidate.tag,
             ai_boosted: candidate.ai_boosted,
+            pronunciation_hint: candidate.pronunciation_hint.as_deref(),
         }
     }
 }
@@ -43,6 +46,8 @@ pub(crate) struct ViewOut<'a> {
     syllable_spans: &'a [SegmentSpan],
     cursor_byte_pos: usize,
     active_syllable_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edited_byte_range: Option<(usize, usize)>,
     ai_semantic_hint: &'a str,
     ghost_text_preview: Option<&'a str>,
 }
@@ -62,6 +67,7 @@ impl<'a> ViewOut<'a> {
             syllable_spans: &vm.syllable_spans,
             cursor_byte_pos: vm.cursor_byte_pos,
             active_syllable_index: vm.active_syllable_index,
+            edited_byte_range: vm.edited_byte_range,
             ai_semantic_hint: &vm.ai_semantic_hint,
             ghost_text_preview: vm.ghost_text_preview.as_deref(),
         }

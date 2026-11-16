@@ -20,4 +20,11 @@ enum AppGroup {
     static var modelsDirectory: URL? { sharedDirectory?.appendingPathComponent("Models", isDirectory: true) }
     /// App 下载、解压好的完整词库（见 LexiconCatalog）
     static var lexiconDirectory: URL? { sharedDirectory?.appendingPathComponent("Lexicon", isDirectory: true) }
+
+    #if DEBUG
+    /// 仅调试构建：模拟器 UI 测试模拟已开启「允许完全访问」以测试原生 SwiftUI Link 跳转
+    static var debugSimulateFullAccessURL: URL? {
+        sharedDirectory?.appendingPathComponent(".debug-simulate-full-access")
+    }
+    #endif
 }

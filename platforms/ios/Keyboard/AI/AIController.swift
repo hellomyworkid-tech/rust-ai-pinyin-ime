@@ -50,7 +50,8 @@ final class AIController {
     }
 
     convenience init() {
-        self.init(chooser: AppleModelChooser(model: AppleChoiceModel(), debounce: AppleModelChooser.keyboardDebounce))
+        self.init(chooser: AppleModelChooser(model: AppleChoiceModel(), debounce: AppleModelChooser.keyboardDebounce),
+                  localLoader: LocalModelLoader(coordinator: .shared))
     }
 
     /// 引擎建好后接上
@@ -99,11 +100,26 @@ final class AIController {
             engine.onChoiceRequest = nil
             chooser.cancel()
             localLoader.keyboardWillAppear()
-            localLoader.load(ModelCatalog.find(newSettings.localModelID)?.localURL, into: engine)
+            localLoader.load(localModelURL(newSettings), into: engine)
         case .off:
             engine.onChoiceRequest = nil
             chooser.cancel()
             localLoader.unload(into: engine)
+        }
+    }
+
+    /// 键盘一直可见时，若同进程里的另一个键盘控制器（如弹出的系统搜索层）曾借走本地模型使本控制器回到 .idle，按需重新接回
+    func restoreLocalModelIfYielded() {
+        guard let engine, localLoader.state == .idle else { return }
+        switch settings.aiMode {
+        case .local:
+            localLoader.load(localModelURL(settings), into: engine)
+        case .apple:
+            if case .localFallback(let url) = appleRoute {
+                localLoader.load(url, into: engine)
+            }
+        case .off:
+            break
         }
     }
 

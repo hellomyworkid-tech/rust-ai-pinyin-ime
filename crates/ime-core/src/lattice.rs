@@ -44,6 +44,9 @@ pub struct LatticeEdge {
     /// 是否由模糊音或拼写纠错产生
     #[serde(default)]
     pub is_fuzzy: bool,
+    /// 常见易读错字词的正确读音提示（如 `"馄 (hun) 饨 (tun)"`）；常规词为 `None`
+    #[serde(skip)]
+    pub pronunciation_hint: Option<&'static str>,
 }
 
 /// 针对输入字符串构建的中英统一有向无环图
@@ -92,6 +95,18 @@ impl BilingualLattice {
                     input,
                     &spans_at,
                     lexicon,
+                    &mut edges_from[start_pos],
+                );
+                crate::supplement::collect_supplement_edges(
+                    start_pos,
+                    input,
+                    &spans_at,
+                    &mut edges_from[start_pos],
+                );
+                crate::corrector::collect_misread_edges(
+                    start_pos,
+                    input,
+                    &spans_at,
                     &mut edges_from[start_pos],
                 );
             } else if start_pos == 0 && (2..=6).contains(&n) && !spans_at[1].is_empty() {
@@ -171,6 +186,7 @@ impl BilingualLattice {
                                 domain: entry.domain(),
                                 syllable_count: 1,
                                 is_fuzzy: false,
+                                pronunciation_hint: None,
                             });
                         }
                     }
@@ -186,7 +202,7 @@ impl BilingualLattice {
                 if covered_by_single_full_syl && !is_whole_input {
                     continue;
                 }
-                let is_single_full_syl = crate::pinyin::is_valid_syllable(span_str);
+                let is_single_full_syl = crate::pinyin::is_valid_or_alias_syllable(span_str);
                 let is_sentence_tail_abbrev = end_pos == n
                     && no_full_syl_at_start
                     && matched_len <= 4
@@ -200,8 +216,16 @@ impl BilingualLattice {
                     continue;
                 }
 
+                let clean_full_syls = matched_len >= 3
+                    && crate::pinyin::can_segment_as_clean_full_syllables(
+                        &lower_input[start_pos..end_pos],
+                    );
                 let (abbrev_penalty, take_limit) = if is_single_full_syl {
                     (4.2, 6)
+                } else if is_whole_input && clean_full_syls {
+                    // 整串本身已能完整切分为标准全拼音节（如 `zaya -> za'ya`、`jiewa -> jie'wa`）时，
+                    // 四字成语简拼（如 `z'a'y'a -> 左岸右岸`）只能排在全拼候选之后兜底，绝不反超全拼
+                    (8.5 + (matched_len as f32) * 1.0, 8)
                 } else if is_whole_input {
                     (1.6 + (matched_len as f32) * 0.25, 24)
                 } else if no_full_syl_at_start {
@@ -216,17 +240,46 @@ impl BilingualLattice {
                     if entry.syllable_count() < 2 {
                         continue;
                     }
+                    let cal_cost = calibrated_word_cost(entry.text(), entry.syllable_key(), entry.cost());
                     edges_from[start_pos].push(LatticeEdge {
                         start: start_pos,
                         end: end_pos,
                         text: entry.text().to_string(),
                         code_key: entry.syllable_key().to_string(),
                         kind: EdgeKind::AbbrevPinyin,
-                        base_cost: entry.cost() + abbrev_penalty,
+                        base_cost: cal_cost + abbrev_penalty,
                         domain: entry.domain(),
                         syllable_count: entry.syllable_count(),
                         is_fuzzy: false,
+                        pronunciation_hint: None,
                     });
+                }
+            }
+
+            if start_pos == 0
+                && n >= 2
+                && suffix.bytes().all(|b| b.is_ascii_lowercase())
+                && !crate::pinyin::can_segment_as_clean_full_syllables(&lower_input)
+            {
+                let abbrev_pen = 1.6 + (n as f32) * 0.25;
+                for sup in crate::supplement::lookup_supplement_abbrev(&lower_input) {
+                    if !edges_from[0]
+                        .iter()
+                        .any(|e| e.end == n && e.text == sup.text)
+                    {
+                        edges_from[0].push(LatticeEdge {
+                            start: 0,
+                            end: n,
+                            text: sup.text.to_string(),
+                            code_key: sup.syllable_key.to_string(),
+                            kind: EdgeKind::AbbrevPinyin,
+                            base_cost: sup.cost + abbrev_pen,
+                            domain: sup.domain,
+                            syllable_count: sup.syllable_key.split('\'').count(),
+                            is_fuzzy: false,
+                            pronunciation_hint: None,
+                        });
+                    }
                 }
             }
 
@@ -234,7 +287,7 @@ impl BilingualLattice {
             let tail_len = n - start_pos;
             if (2..=5).contains(&tail_len)
                 && suffix.bytes().all(|b| b.is_ascii_lowercase())
-                && !crate::pinyin::is_valid_syllable(suffix)
+                && !crate::pinyin::is_valid_or_alias_syllable(suffix)
                 && lexicon
                     .english_trie()
                     .exact_lookup(&lower_input[start_pos..n])
@@ -255,6 +308,7 @@ impl BilingualLattice {
                             domain: entry.domain(),
                             syllable_count: 1,
                             is_fuzzy: false,
+                            pronunciation_hint: None,
                         });
                     }
                 }
@@ -305,6 +359,7 @@ impl BilingualLattice {
                         domain: entry.domain(),
                         syllable_count: 1,
                         is_fuzzy: false,
+                        pronunciation_hint: None,
                     });
                 }
             }
@@ -325,6 +380,7 @@ impl BilingualLattice {
                             domain: entry.domain(),
                             syllable_count: 1,
                             is_fuzzy: false,
+                            pronunciation_hint: None,
                         });
                     }
                 }
@@ -346,6 +402,7 @@ impl BilingualLattice {
                     domain: DomainTag::General,
                     syllable_count: 0,
                     is_fuzzy: false,
+                    pronunciation_hint: None,
                 });
                 continue;
             }
@@ -366,6 +423,7 @@ impl BilingualLattice {
                     domain: DomainTag::Tech,
                     syllable_count: 1,
                     is_fuzzy: false,
+                    pronunciation_hint: None,
                 });
             }
 
@@ -383,6 +441,7 @@ impl BilingualLattice {
                     domain: DomainTag::General,
                     syllable_count: 1,
                     is_fuzzy: false,
+                    pronunciation_hint: None,
                 });
             }
         }
@@ -448,14 +507,22 @@ fn collect_chinese_edges<'a>(
         };
 
         let hit_ids = lexicon.syllable_trie().exact_entries(next_node);
-        if !hit_ids.is_empty() {
+        let raw_span = &input[origin_start..sp.end];
+        let splits_single_syl =
+            syl_count >= 2 && crate::pinyin::is_unapostrophed_single_syllable(raw_span);
+        // 无隔音符强拆合法单音节惩罚（如 `jie -> ji'e 饥饿`、`yue -> yu'e 余额`、`tuan -> tu'an 图案`）：
+        // 适度回补词库构建期对双音节词预扣的长度加成，使高频单音节字（接/解…、越/月/约/乐、先/现、团）稳居前排，
+        // 同时让常用拆分词（饥饿、余额、西安、提案、企鹅）保留在靠后的合理位置而不被挤没；
+        // 用户显式输入 `ji'e`、`yu'e`、`xi'an` 时包含 `'`，`splits_single_syl` 为 false，零惩罚。
+        const SINGLE_SYLLABLE_SPLIT_PENALTY: f32 = 0.70;
+        if !hit_ids.is_empty() && !(splits_single_syl && new_fuzzy > 0.0) {
             let take_limit = if syl_count == 1 {
                 if new_fuzzy > 0.0 {
                     // 长句中绝不用模糊音单字去拼凑碎片；短输入时最多保留前 3 个高频模糊单字
                     if n > 6 { 0 } else { 3 }
                 } else if n > 6 {
-                    // 长句中每个单音节保留前 4 个最高频单字供整句 Beam Search（逐音节选词时会从 Trie 补齐全部同音字）
-                    4
+                    // 句中音节保留前 8 个高频单字（覆盖「钱/区/饭/娃/账」等常用字），句首保留前 4 个供整句解码（首音节分步候选由解码器单独补齐）
+                    if origin_start > 0 { 8 } else { 4 }
                 } else {
                     24
                 }
@@ -466,12 +533,14 @@ fn collect_chinese_edges<'a>(
             } else {
                 12
             };
-            // 多音节词条的纠错惩罚略打折（完整词比碎片更可信）；
-            // 单音节短输入则适当提高模糊音门槛，让 `si` 的精确字「死/四/思」排在模糊音「是/时」前面
+            // 多音节词条的纠错惩罚校准到 AIMELX03 百万词尺度（`cost < 13.8`，对应 `wt >= ~2500`，涵盖「趁现在」「豪绅」「公家」「分账」）：
+            // 当起始位置已存在精确多音节词条，或同一词累计了 2 次以上模糊音替换时，不给模糊音打折，杜绝「呈现再爱」「辞工甲方的」「骑缝章」反超精确输入
             let has_common_exact_word_at_origin = new_fuzzy > 0.0
-                && out_edges.iter().any(|e| !e.is_fuzzy && e.syllable_count >= 2 && e.base_cost < 9.2);
+                && out_edges
+                    .iter()
+                    .any(|e| !e.is_fuzzy && e.syllable_count >= 2 && e.base_cost < 13.1);
             let effective_fuzzy = if syl_count >= 2 {
-                if has_common_exact_word_at_origin {
+                if has_common_exact_word_at_origin || new_fuzzy >= 3.0 {
                     new_fuzzy * 1.15
                 } else {
                     new_fuzzy * 0.75
@@ -481,9 +550,15 @@ fn collect_chinese_edges<'a>(
             } else {
                 new_fuzzy
             };
+            let split_penalty = if splits_single_syl {
+                SINGLE_SYLLABLE_SPLIT_PENALTY
+            } else {
+                0.0
+            };
 
             for id in hit_ids.iter().take(take_limit) {
                 let entry = lexicon.entry(id);
+                let cal_cost = calibrated_word_cost(entry.text(), entry.syllable_key(), entry.cost());
                 out_edges.push(LatticeEdge {
                     start: origin_start,
                     end: sp.end,
@@ -494,10 +569,11 @@ fn collect_chinese_edges<'a>(
                     } else {
                         EdgeKind::ChineseChar
                     },
-                    base_cost: entry.cost() + effective_fuzzy,
+                    base_cost: cal_cost + effective_fuzzy + split_penalty,
                     domain: entry.domain(),
                     syllable_count: syl_count,
                     is_fuzzy: new_fuzzy > 0.0,
+                    pronunciation_hint: None,
                 });
             }
         }
@@ -518,7 +594,7 @@ fn collect_chinese_edges<'a>(
     // 多音节词末尾不完整音节/声母补全（如 `keyiyouhuadedif` 中的 `di` + `f` -> `地方`，`zenm` -> `怎么`，`weishenm` -> `为什么`，`zenmy` -> `怎么样`）
     // 注意：若 `input[origin_start..n]` 本身已是单个合法完整音节（如 `qun`、`fan`、`zhuang`），绝不能将其韵尾（如 `qun` 中的 `n`）拆成第 2 个半音节去补全出「去年」等双字词！
     let whole_slice_lower = input[origin_start..n].to_ascii_lowercase();
-    let whole_slice_is_single_syl = crate::pinyin::is_valid_syllable(&whole_slice_lower);
+    let whole_slice_is_single_syl = crate::pinyin::is_valid_or_alias_syllable(&whole_slice_lower);
     if depth >= 1 && accum_fuzzy == 0.0 && effective_pos < n && !whole_slice_is_single_syl {
         let rem_tail = &input[effective_pos..n];
         if rem_tail.len() <= 5 && rem_tail.bytes().all(|b| b.is_ascii_lowercase()) {
@@ -534,27 +610,34 @@ fn collect_chinese_edges<'a>(
             } else {
                 1.55
             };
-            // 句尾已是完整音节（如 `zhongli` 的 `li`、`shima` 的 `ma`、`api` 的 `pi`）时：
-            // 1) 若该完整音节本身已能与前文构成常用词（`exact_best_cost < 10.2`，如 `zhongli` -> 中立/重力、`shima` -> 是吗），
-            //    绝不再将其当作“未输完的半截音节”去扩展出 `zhong'liang`（重量）、`zhong'liu`（肿瘤）等跨音节干扰项；
-            // 2) 仅当原样完整音节无常用词（如 `zhonggu` 仅有低频词「中古」）且补全音节最多只多 1 个尾字母（如 `gu` -> `guo` 补全「中国」）时才允许补全。
+            // 句尾已是完整音节（如 `zhongli` 的 `li`、`shima` 的 `ma`、`youjia` 的 `jia`、`renshe` 的 `she`）时：
+            // 1) 若该完整音节本身已能与前文构成常用词（`AIMELX03` 代价 `< 12.6`，对应原词频 `>= ~9000`，
+            //    如 `youjia` -> 油价、`xuji` -> 续集、`lingxia` -> 零下、`renshe` -> 人设、`shijia` -> 施加/是假），
+            //    绝不再将其当作“未输完的半截音节”去扩展出 `you'jian`（邮件）、`ren'shen`（人身）等跨音节干扰项；
+            // 2) 仅当原样完整音节无常用词（如 `zhonggu` 仅有生僻/低频词「中古」`cost ≈ 13.45`）且补全音节最多只多 1 个尾字母
+            //    且补全词显著高频（如 `gu` -> `guo` 补全「中国」）时才允许补全。
             let exact_best_cost = if tail_is_valid_syl {
                 lexicon
                     .syllable_trie()
                     .advance_node(base_node, rem_tail)
                     .and_then(|nd| lexicon.syllable_trie().exact_entries(nd).first())
-                    .map(|id| lexicon.entry(id).cost())
+                    .map(|id| {
+                        let e = lexicon.entry(id);
+                        calibrated_word_cost(e.text(), e.syllable_key(), e.cost())
+                    })
             } else {
                 None
             };
             let allow_tail_completion = if !tail_is_valid_syl {
                 true
             } else {
-                exact_best_cost.is_none_or(|best| best >= 10.2)
+                exact_best_cost.is_none_or(|best| best >= 12.6)
             };
             if allow_tail_completion {
-                for id in collect_syllable_prefix_entries(lexicon, base_node, rem_tail, false, 8) {
+                let prefix_limit = if tail_is_valid_syl { 3 } else { 8 };
+                for id in collect_syllable_prefix_entries(lexicon, base_node, rem_tail, false, prefix_limit) {
                     let entry = lexicon.entry(id);
+                    let cal_cost = calibrated_word_cost(entry.text(), entry.syllable_key(), entry.cost());
                     if tail_is_valid_syl {
                         let last_syl_len = entry
                             .syllables()
@@ -564,20 +647,29 @@ fn collect_chinese_edges<'a>(
                         if last_syl_len > rem_tail.len() + 1 {
                             continue;
                         }
-                        if exact_best_cost.is_some_and(|best| entry.cost() + 0.8 >= best) {
+                        if exact_best_cost.is_some_and(|best| cal_cost + 3.2 >= best) {
                             continue;
                         }
                     }
+                    let extra_valid_tail_pen = if tail_is_valid_syl
+                        && cal_cost >= 8.8
+                        && exact_best_cost.is_none_or(|best| best >= 14.5)
+                    {
+                        2.6
+                    } else {
+                        0.0
+                    };
                     out_edges.push(LatticeEdge {
                         start: origin_start,
                         end: n,
                         text: entry.text().to_string(),
                         code_key: entry.syllable_key().to_string(),
                         kind: EdgeKind::ChineseWord,
-                        base_cost: entry.cost() + inc_penalty,
+                        base_cost: cal_cost + inc_penalty + extra_valid_tail_pen,
                         domain: entry.domain(),
                         syllable_count: syl_count,
                         is_fuzzy: false,
+                        pronunciation_hint: None,
                     });
                 }
             }
@@ -590,16 +682,18 @@ fn collect_chinese_edges<'a>(
                     6,
                 ) {
                     let entry = lexicon.entry(id);
+                    let cal_cost = calibrated_word_cost(entry.text(), entry.syllable_key(), entry.cost());
                     out_edges.push(LatticeEdge {
                         start: origin_start,
                         end: n,
                         text: entry.text().to_string(),
                         code_key: entry.syllable_key().to_string(),
                         kind: EdgeKind::ChineseWord,
-                        base_cost: entry.cost() + 1.35,
+                        base_cost: cal_cost + 1.35,
                         domain: entry.domain(),
                         syllable_count: syl_count + 1,
                         is_fuzzy: false,
+                        pronunciation_hint: None,
                     });
                 }
             }
@@ -732,16 +826,18 @@ fn collect_chinese_edges_from_sep<'a>(
         let hit_ids = lexicon.syllable_trie().exact_entries(next_node);
         for id in hit_ids.iter().take(6) {
             let entry = lexicon.entry(id);
+            let cal_cost = calibrated_word_cost(entry.text(), entry.syllable_key(), entry.cost());
             out_edges.push(LatticeEdge {
                 start: origin_start,
                 end: sp.end,
                 text: entry.text().to_string(),
                 code_key: entry.syllable_key().to_string(),
                 kind: EdgeKind::ChineseWord,
-                base_cost: entry.cost() + base_penalty,
+                base_cost: cal_cost + base_penalty,
                 domain: entry.domain(),
                 syllable_count: syl_count,
                 is_fuzzy: false,
+                pronunciation_hint: None,
             });
         }
         if syl_count < 6 && sp.end < input.len() {
@@ -758,4 +854,32 @@ fn collect_chinese_edges_from_sep<'a>(
             );
         }
     }
+}
+
+/// 现代汉语高频新词/常用词静态词频校准：
+/// 开源基础词库（`rime_ice_base`）基于早期书面语料统计，对部分近年日常高频词（如「人设」「女频」「男频」「短剧」「受众」「痛点」「复盘」「内卷」「霸总」）
+/// 赋予了偏低权重（甚至被模糊音或单字拼接反超）。在不重编远端词库的前提下按 `AIMELX03` 代价标尺做温和上界校准，
+/// 同时保留同音正词（如「手中」「短句」「通电」「塌方」「填充」）自身的原始领先地位，交由搭配与语境模型决胜。
+#[inline]
+pub(crate) fn calibrated_word_cost(text: &str, code_key: &str, raw_cost: f32) -> f32 {
+    let cap = match (text, code_key) {
+        ("人设", "ren'she") => 10.55,
+        ("女频", "nv'pin") => 10.75,
+        ("男频", "nan'pin") => 10.85,
+        ("受众", "shou'zhong") => 10.85,
+        ("短剧", "duan'ju") => 12.15,
+        ("内卷", "nei'juan") => 10.95,
+        ("复盘", "fu'pan") => 10.95,
+        ("霸总", "ba'zong") => 11.35,
+        ("团宠", "tuan'chong") => 11.55,
+        ("二创", "er'chuang") => 11.55,
+        ("拉新", "la'xin") => 11.75,
+        ("投流", "tou'liu") => 11.75,
+        ("出圈", "chu'quan") => 11.65,
+        ("痛点", "tong'dian") => 11.35,
+        ("甜宠", "tian'chong") => 11.45,
+        ("塌房", "ta'fang") => 11.85,
+        _ => return raw_cost,
+    };
+    raw_cost.min(cap)
 }

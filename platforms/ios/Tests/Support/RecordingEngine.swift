@@ -149,6 +149,18 @@ final class RecordingEngine: IMEEngine {
         pageIndex = 0
     }
 
+    func compositionSnapshot() -> String? {
+        isComposing ? buffer : nil
+    }
+
+    func restoreComposition(_ snapshot: String) -> IMEResult {
+        guard !snapshot.isEmpty, snapshot.allSatisfy(\.isASCII) else { return .passThrough }
+        isEnglishMode = false
+        buffer = snapshot
+        pageIndex = 0
+        return .update(view())
+    }
+
     func deliverChoice(id: UInt64, text: String?) {
         calls.append(.deliverChoice(id, text))
     }

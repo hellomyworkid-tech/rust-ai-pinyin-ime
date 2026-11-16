@@ -40,14 +40,14 @@ use ime_ai::{
 use ime_core::{AppScene, ImeCoreEngine};
 use ime_lexicon::CompiledLexicon;
 use ime_llm::{LlmOptions, LlmScorer};
-use ime_session::{KeyAction, KeySession, VirtualKey};
+use ime_session::{CompositionSnapshot, KeyAction, KeySession, VirtualKey};
 use serde::Deserialize;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// 接口版本。2：新增 `ime_engine_candidates`、`ime_engine_reload_user_dict`；空格与
 /// `ime_engine_refresh_after_ai` 先回到第 0 页；正在输入时整句上屏 / 空格 / 光标键不再出现
@@ -198,12 +198,75 @@ pub struct ImeEngine {
     llm_loading: Mutex<()>,
 }
 
+struct CachedLexicon {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
+    lexicon: CompiledLexicon,
+}
+
+/// 同一键盘扩展进程内多个 `ImeEngine` 打开同一份未变动的词库时直接复用 `Arc` 映射，不再重复预热缺页线程
+static SHARED_LEXICON: Mutex<Option<CachedLexicon>> = Mutex::new(None);
+
+struct CachedLlm {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
+    threads: u32,
+    scorer: Arc<LlmScorer>,
+}
+
+/// 同一键盘扩展进程内的本地模型共享缓存：
+/// - 在 `.local` 模式下跨宿主应用切换输入法控制器时，即使前一个控制器的 `ImeEngine` 已先析构，
+///   新控制器也能在亚毫秒内直接复用进程内已加载的 `LlmScorer`，无需重复解析数百 MB 的 GGUF 与词表；
+/// - 当收到系统内存警告、切换 AI 模式（调用 `unload_llm`）或更换其他模型文件时，立即清空释放，不留双份驻留。
+static SHARED_LLM: Mutex<Option<CachedLlm>> = Mutex::new(None);
+
+/// 当前进程内挂载着本地模型的活跃 `ImeEngine` 数量（用于判断 `unload_llm` 是否应一并释放 `SHARED_LLM`）
+static ACTIVE_LLM_ENGINES: AtomicUsize = AtomicUsize::new(0);
+
+/// 进程级 `load_llm` 串行锁：防止同一进程里两个引擎并发加载模型瞬间翻倍超过 iOS 177MB 内存上限
+static LLM_LOAD_LOCK: Mutex<()> = Mutex::new(());
+
+fn load_or_reuse_lexicon(lexicon_path: &Path) -> Result<CompiledLexicon, String> {
+    if let Ok(meta) = std::fs::metadata(lexicon_path) {
+        if meta.len() > 0 {
+            let canon = std::fs::canonicalize(lexicon_path)
+                .unwrap_or_else(|_| lexicon_path.to_path_buf());
+            let modified = meta.modified().ok();
+            {
+                let guard = lock_ignoring_poison(&SHARED_LEXICON);
+                if let Some(cached) = guard.as_ref() {
+                    if cached.path == canon
+                        && cached.len == meta.len()
+                        && cached.modified == modified
+                    {
+                        return Ok(cached.lexicon.clone());
+                    }
+                }
+            }
+            let lexicon = CompiledLexicon::load_mmap(lexicon_path)
+                .map_err(|e| format!("无法加载词库 {}: {e}", lexicon_path.display()))?;
+            spawn_page_warmup(lexicon.clone());
+            *lock_ignoring_poison(&SHARED_LEXICON) = Some(CachedLexicon {
+                path: canon,
+                len: meta.len(),
+                modified,
+                lexicon: lexicon.clone(),
+            });
+            return Ok(lexicon);
+        }
+    }
+    let lexicon = CompiledLexicon::load_mmap(lexicon_path)
+        .map_err(|e| format!("无法加载词库 {}: {e}", lexicon_path.display()))?;
+    spawn_page_warmup(lexicon.clone());
+    Ok(lexicon)
+}
+
 impl ImeEngine {
     /// 打开词库并创建引擎。`user_dict_path` 为 `None` 时个人词频只留在内存里
     pub fn open(lexicon_path: &Path, user_dict_path: Option<&Path>) -> Result<Self, String> {
-        let lexicon = CompiledLexicon::load_mmap(lexicon_path)
-            .map_err(|e| format!("无法加载词库 {}: {e}", lexicon_path.display()))?;
-        spawn_page_warmup(lexicon.clone());
+        let lexicon = load_or_reuse_lexicon(lexicon_path)?;
 
         let mut core = ImeCoreEngine::new(lexicon);
         if let Some(path) = user_dict_path {
@@ -353,9 +416,14 @@ impl ImeEngine {
         KeyAction::PassThrough
     }
 
-    /// 把字母或分词符并进拼音串；已到 [`MAX_COMPOSITION_BYTES`] 时吃掉按键、视图不变
+    /// 把字母或分词符并进拼音串；改写后总长超过 [`MAX_COMPOSITION_BYTES`] 时吃掉按键、视图不变
     fn extend_composition(session: &mut KeySession, ch: char) -> KeyAction {
-        if session.input_buffer.len() >= MAX_COMPOSITION_BYTES {
+        let replaced = if ch != '\'' {
+            session.tapped_syllable_byte_len()
+        } else {
+            0
+        };
+        if session.input_buffer.len().saturating_sub(replaced) + ch.len_utf8() > MAX_COMPOSITION_BYTES {
             return KeyAction::EatAndUpdateUi(session.build_view_model());
         }
         session.process_key(VirtualKey::Char(ch))
@@ -465,6 +533,31 @@ impl ImeEngine {
         self.sync_flags(&session);
     }
 
+    /// 导出当前未完成组合的 JSON 快照；当前未在输入时返回 `None`
+    pub fn snapshot(&self) -> Option<String> {
+        let session = self.session();
+        let snap = session.composition_snapshot()?;
+        serde_json::to_string(&snap).ok()
+    }
+
+    /// 从 [`Self::snapshot`] 导出的 JSON 恢复未完成组合，返回信封 JSON（成功为 `update`，快照为空或非法时为 `pass`）
+    pub fn restore_snapshot(&self, snapshot_json: &str) -> String {
+        let Ok(snapshot) = serde_json::from_str::<CompositionSnapshot>(snapshot_json) else {
+            return view::PASS_JSON.to_string();
+        };
+        if snapshot.input_buffer.len() > MAX_COMPOSITION_BYTES {
+            return view::PASS_JSON.to_string();
+        }
+        let mut session = self.session();
+        if self.llm_backend_active() {
+            session.ai.cancel_pending_llm_work();
+        }
+        match session.restore_composition_snapshot(snapshot) {
+            Some(vm) => self.finish(&session, KeyAction::EatAndUpdateUi(vm)),
+            None => view::PASS_JSON.to_string(),
+        }
+    }
+
     pub fn is_composing(&self) -> bool {
         // 上一次调用 panic 过：下一次拿会话时当前输入会被丢掉（见 `session`），这里已经不算在输入
         !self.session.is_poisoned() && self.composing.load(Ordering::Acquire)
@@ -566,7 +659,39 @@ impl ImeEngine {
     /// 不会留着旧的。旧模型若正在打分，最多等 2 秒让那次打分注意到取消并放手。
     /// 并发的 `load_llm` 排队执行，最后完成的那个生效
     pub fn load_llm(&self, model_path: &Path, threads: u32) -> Result<(), String> {
+        let _process_loading = lock_ignoring_poison(&LLM_LOAD_LOCK);
         let _loading = lock_ignoring_poison(&self.llm_loading);
+
+        let file_key = std::fs::metadata(model_path).ok().map(|meta| {
+            let canon = std::fs::canonicalize(model_path)
+                .unwrap_or_else(|_| model_path.to_path_buf());
+            (canon, meta.len(), meta.modified().ok())
+        });
+        let reusable = file_key.as_ref().and_then(|(canon, len, modified)| {
+            let guard = lock_ignoring_poison(&SHARED_LLM);
+            let cached = guard.as_ref()?;
+            if &cached.path == canon
+                && cached.len == *len
+                && cached.modified == *modified
+                && cached.threads == threads
+            {
+                Some(Arc::clone(&cached.scorer))
+            } else {
+                None
+            }
+        });
+
+        if let Some(ref reused) = reusable {
+            if let Some(current) = lock_ignoring_poison(&self.llm).as_ref() {
+                if Arc::ptr_eq(current, reused) {
+                    return Ok(());
+                }
+            }
+        } else {
+            // 要加载的是另一个模型（或无效路径）：先清掉进程缓存，确保旧模型在加载新模型之前彻底释放，绝不同时驻留两份
+            *lock_ignoring_poison(&SHARED_LLM) = None;
+        }
+
         // 没装模型时不去动调度器：否则当前输入正在等的宿主选词结果到达时就不再通知了
         let installed = lock_ignoring_poison(&self.llm).is_some();
         if let Some(old) = installed.then(|| self.detach_llm()).flatten() {
@@ -578,13 +703,34 @@ impl ImeEngine {
             }
             drop(old);
         }
-        let options = LlmOptions {
-            threads: threads as _,
-            ..LlmOptions::default()
+
+        let scorer = match reusable {
+            Some(reused) => reused,
+            None => {
+                let options = LlmOptions {
+                    threads: threads as _,
+                    ..LlmOptions::default()
+                };
+                let loaded =
+                    Arc::new(LlmScorer::load(model_path, options).map_err(|e| e.to_string())?);
+                if let Some((canon, len, modified)) = file_key {
+                    *lock_ignoring_poison(&SHARED_LLM) = Some(CachedLlm {
+                        path: canon,
+                        len,
+                        modified,
+                        threads,
+                        scorer: Arc::clone(&loaded),
+                    });
+                }
+                loaded
+            }
         };
-        let scorer = Arc::new(LlmScorer::load(model_path, options).map_err(|e| e.to_string())?);
+
         let mut session = self.session();
-        *lock_ignoring_poison(&self.llm) = Some(Arc::clone(&scorer));
+        let prev = lock_ignoring_poison(&self.llm).replace(Arc::clone(&scorer));
+        if prev.is_none() {
+            ACTIVE_LLM_ENGINES.fetch_add(1, Ordering::AcqRel);
+        }
         session.ai.set_candidate_scorer(Some(scorer));
         self.llm_loaded.store(true, Ordering::Release);
         self.sync_llm_switch(&mut session);
@@ -599,6 +745,9 @@ impl ImeEngine {
         self.llm_loaded.store(false, Ordering::Release);
         self.sync_llm_switch(&mut session);
         let detached = lock_ignoring_poison(&self.llm).take();
+        if detached.is_some() {
+            ACTIVE_LLM_ENGINES.fetch_sub(1, Ordering::AcqRel);
+        }
         session.ai.set_candidate_scorer(None);
         detached
     }
@@ -613,6 +762,9 @@ impl ImeEngine {
     /// 下次加载会复用，不会无限增长。权重本身是只读 mmap，从来不计入 phys_footprint
     pub fn unload_llm(&self) {
         let detached = self.detach_llm();
+        if ACTIVE_LLM_ENGINES.load(Ordering::Acquire) == 0 {
+            *lock_ignoring_poison(&SHARED_LLM) = None;
+        }
         drop(detached);
     }
 
@@ -676,6 +828,14 @@ impl ImeEngine {
             ChooserDelivery::Implausible => IME_CHOICE_IMPLAUSIBLE,
             ChooserDelivery::Stale => IME_CHOICE_STALE,
             ChooserDelivery::TimedOut => IME_CHOICE_TIMED_OUT,
+        }
+    }
+}
+
+impl Drop for ImeEngine {
+    fn drop(&mut self) {
+        if lock_ignoring_poison(&self.llm).take().is_some() {
+            ACTIVE_LLM_ENGINES.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
@@ -982,6 +1142,41 @@ pub unsafe extern "C" fn ime_engine_reset(engine: *mut ime_engine) {
         return;
     };
     let _ = catch_unwind(AssertUnwindSafe(|| engine.reset()));
+}
+
+/// 导出当前未完成组合的快照 JSON（用 `ime_string_free` 释放）；未在输入或 `engine` 为 NULL 时返回 NULL
+///
+/// # Safety
+/// `engine` 必须是 NULL 或有效的引擎指针
+#[no_mangle]
+pub unsafe extern "C" fn ime_engine_snapshot(engine: *const ime_engine) -> *mut c_char {
+    // SAFETY: 调用方保证指针有效
+    let Some(engine) = (unsafe { engine.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.snapshot())) {
+        Ok(Some(json)) => into_c_string(json),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// 从 `ime_engine_snapshot` 导出的快照恢复未完成组合，返回动作信封 JSON（成功为 `update`，非法或空快照为 `pass`）
+///
+/// # Safety
+/// `engine` 必须是 NULL 或有效的引擎指针；`snapshot_json` 必须是 NULL 或以 NUL 结尾的字符串
+#[no_mangle]
+pub unsafe extern "C" fn ime_engine_restore_snapshot(
+    engine: *mut ime_engine,
+    snapshot_json: *const c_char,
+) -> *mut c_char {
+    // SAFETY: 调用方保证指针有效
+    if engine.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Some(snapshot) = (unsafe { borrow_str(snapshot_json) }) else {
+        return into_c_string(pass_json());
+    };
+    unsafe { call_json(engine, pass_json, |e| e.restore_snapshot(snapshot)) }
 }
 
 /// # Safety

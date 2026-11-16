@@ -19,6 +19,7 @@ enum KeyboardTheme {
     static let functionKeyPressed = letterKey
     static let keyShadow = dynamic(light: rgb(136, 138, 142), dark: rgb(20, 20, 20))
     static let keyText = dynamic(light: .black, dark: .white)
+    static let keyHintText = dynamic(light: rgb(118, 120, 128), dark: rgb(235, 235, 245, 0.62))
     static let secondaryText = dynamic(light: rgb(60, 60, 67, 0.7), dark: rgb(235, 235, 245, 0.65))
     static let accent = UIColor.systemBlue
     static let accentText = UIColor.white
@@ -30,4 +31,10 @@ enum KeyboardTheme {
     static let candidatePressed = dynamic(light: rgb(0, 0, 0, 0.12), dark: rgb(255, 255, 255, 0.2))
     static let separator = dynamic(light: rgb(0, 0, 0, 0.12), dark: rgb(255, 255, 255, 0.12))
     static let previewBackground = dynamic(light: .white, dark: rgb(120, 120, 124))
+    /// 快捷设置面板里的卡片底色（未开启 / 已开启 / 选中模式）
+    static let panelCard = dynamic(light: rgb(255, 255, 255, 0.56), dark: rgb(52, 52, 56))
+    static let panelCardActive = dynamic(light: .white, dark: rgb(74, 76, 84))
+    static let panelCardPressed = dynamic(light: rgb(198, 202, 212), dark: rgb(96, 98, 106))
+    static let panelAccentFill = dynamic(light: rgb(0, 122, 255, 0.13), dark: rgb(10, 132, 255, 0.24))
+    static let panelAccentBorder = dynamic(light: rgb(0, 122, 255, 0.55), dark: rgb(100, 170, 255, 0.65))
 }

@@ -78,7 +78,7 @@ final class CandidateGridView: UIView, UICollectionViewDataSource, UICollectionV
             return
         }
         let unit = available / Self.columns
-        let needed = candidates.map { CandidateCell.width(for: $0.text, isFirst: true, landscape: landscape) }
+        let needed = candidates.map { CandidateCell.width(for: $0, isFirst: true, landscape: landscape) }
         let spans = GridPacking.spans(neededWidths: needed, unit: unit, columns: Int(Self.columns))
         // 向下取整，免得一行的总宽因为小数超出而折行
         cellWidths = spans.map { floor(CGFloat($0) * unit) }

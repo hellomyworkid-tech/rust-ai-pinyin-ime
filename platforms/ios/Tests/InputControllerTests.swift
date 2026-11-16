@@ -118,6 +118,13 @@ final class InputControllerTests: XCTestCase {
         XCTAssertEqual(engine.count(.commitFullSentence), 0, "空闲时不必调用 commitFullSentence")
     }
 
+    func testLiteralKeepsHalfWidthDotEvenInChineseMode() {
+        type("ni")
+        controller.typeLiteral(".")
+        XCTAssertEqual(output.inserted, ["[ni]", "."])
+        XCTAssertEqual(engine.count(.commitFullSentence), 1)
+    }
+
     func testChineseQuotesPairUsingLocalContext() {
         output.hostText = "他说"
         controller.typeSymbol("\"")
@@ -352,5 +359,97 @@ final class InputControllerTests: XCTestCase {
         controller.ensureEngine()
         controller.apply(IMESettings())
         XCTAssertEqual(engine.count(.apply), 2)
+    }
+
+    func testBeginFieldRestoresSavedCompositionOnlyForChineseCapableFields() {
+        type("nihao")
+        let snapshot = controller.compositionSnapshot()
+        XCTAssertEqual(snapshot, "nihao")
+
+        // 切到网址框（强制英文）：即使传入快照也不恢复，从英文空闲态开始
+        controller.beginField(FieldTraits(keyboardType: .URL, returnKeyType: .go), restoring: snapshot)
+        XCTAssertFalse(controller.isComposing)
+        XCTAssertFalse(controller.isChineseMode)
+
+        // 回到原输入框：恢复之前的未完成组合，继续选字并上屏
+        controller.beginField(FieldTraits(), restoring: snapshot)
+        XCTAssertTrue(controller.isComposing)
+        XCTAssertTrue(controller.isChineseMode)
+        XCTAssertEqual(controller.view.preeditText, "nihao")
+        controller.space()
+        XCTAssertEqual(output.hostText, "<nihao>")
+    }
+
+    func testPendingCompositionStorePersistsExpiresAndCapsEntries() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PendingCompositionStoreTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("pending.json")
+
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let id1 = UUID()
+        let id2 = UUID()
+        let id3 = UUID()
+
+        let writer = PendingCompositionStore(fileURL: file, ttl: 60, maxEntries: 2)
+        writer.save("snap-1", for: id1, contextBefore: "上文一", now: t0)
+        writer.save("snap-2", for: id2, contextBefore: "上文二", now: t0.addingTimeInterval(5))
+        // 超出 maxEntries = 2 时淘汰最早的 id1
+        writer.save("snap-3", for: id3, contextBefore: "上文三", now: t0.addingTimeInterval(10))
+
+        // 模拟键盘扩展进程重启：新建实例从磁盘读取
+        let reader = PendingCompositionStore(fileURL: file, ttl: 60, maxEntries: 2)
+        XCTAssertNil(reader.take(for: id1, contextBefore: "上文一", now: t0.addingTimeInterval(15)), "最早的记录应已被淘汰")
+        XCTAssertEqual(reader.take(for: id2, contextBefore: "上文二", now: t0.addingTimeInterval(15)), "snap-2")
+        XCTAssertNil(reader.take(for: id2, contextBefore: "上文二", now: t0.addingTimeInterval(15)), "取出一次后即移除")
+        // 超过 TTL 后自动失效
+        XCTAssertNil(reader.take(for: id3, contextBefore: "上文三", now: t0.addingTimeInterval(100)), "超时记录不应恢复")
+    }
+
+    func testPendingCompositionStoreFallbackMatchesRotatedDocumentIDWithoutLeakingToSiblingField() {
+        let store = PendingCompositionStore()
+        let fieldA1 = UUID()
+        let fieldB = UUID()
+        let fieldA2 = UUID() // SwiftUI 输入框重新聚焦后分配的新 UUID
+        let chatTraits = FieldTraits(keyboardType: .default, returnKeyType: .send)
+
+        store.save("snap-a", for: fieldA1, traits: chatTraits, contextBefore: "今天天气")
+
+        // 1. 直接点同屏幕另一个同类型但上文不同的输入框 B：上文不匹配且排除刚离开的 fieldA1，不串入
+        XCTAssertNil(store.take(for: fieldB, traits: chatTraits, contextBefore: "", excludingFallbackID: fieldA1))
+
+        // 2. 点回原输入框（即使系统换成了新 UUID fieldA2）：traits 与上文后缀一致，恢复成功
+        XCTAssertEqual(store.take(for: fieldA2, traits: chatTraits, contextBefore: "今天天气"), "snap-a")
+    }
+
+    /// 空白输入框之间无法区分：没有上文的快照只在很短时间内回退匹配，免得被带进别的 App 的空白输入框
+    func testPendingCompositionStoreEmptyContextFallbackIsShortLived() {
+        let store = PendingCompositionStore()
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        store.save("snap-empty", for: UUID(), contextBefore: "", now: t0)
+        XCTAssertNil(store.take(for: UUID(), contextBefore: "", now: t0.addingTimeInterval(5 * 60)),
+                     "空上文的快照过了短窗口不再回退匹配")
+
+        store.save("snap-empty-2", for: UUID(), contextBefore: "", now: t0.addingTimeInterval(1))
+        XCTAssertEqual(store.take(for: UUID(), contextBefore: "", now: t0.addingTimeInterval(30)), "snap-empty-2")
+    }
+
+    /// 多个宿主进程共用一个文件：remove 每次重读，不会用旧副本把别的进程已经取走的记录写回来
+    func testPendingCompositionStoreRemoveDoesNotResurrectEntriesTakenElsewhere() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PendingCompositionStoreTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("pending.json")
+        let a = UUID(), b = UUID()
+        let processA = PendingCompositionStore(fileURL: file)
+        let processB = PendingCompositionStore(fileURL: file)
+        processA.save("snap-a", for: a, contextBefore: "上文甲")
+        processA.save("snap-b", for: b, contextBefore: "上文乙")
+        processB.remove(for: UUID()) // B 读入一次
+        XCTAssertEqual(processA.take(for: a, contextBefore: "上文甲"), "snap-a")
+        processB.remove(for: b)
+        let reader = PendingCompositionStore(fileURL: file)
+        XCTAssertNil(reader.take(for: a, contextBefore: "上文甲"), "A 已经取走的记录不能被 B 写回")
+        XCTAssertNil(reader.take(for: b, contextBefore: "上文乙"))
     }
 }

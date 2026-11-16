@@ -14,11 +14,21 @@ final class KeyboardLayoutTests: XCTestCase {
         let rows = KeyboardLayout.rows(for: .letters, chineseMode: true, showsGlobe: false)
         XCTAssertEqual(rows.count, 4)
         XCTAssertEqual(letters(rows[0]), "qwertyuiop")
+        XCTAssertEqual(rows[0].map(\.swipeUpAction), "1234567890".map { .symbol(String($0)) })
         XCTAssertEqual(letters(rows[1]), "asdfghjkl")
+        XCTAssertEqual(rows[1].map(\.swipeUpAction), [
+            .symbol("`"), .symbol("/"), .symbol(":"), .symbol(";"),
+            .symbol("("), .symbol(")"), .symbol("~"), .symbol("“"), .symbol("”"),
+        ])
         XCTAssertEqual(letters(rows[2]), "zxcvbnm")
         XCTAssertEqual(rows[2].first?.action, .shift)
         XCTAssertEqual(rows[2].last?.action, .backspace)
-        XCTAssertEqual(rows[3].map(\.action), [.page(.numbers), .toggleLanguage, .symbol(","), .space, .symbol("."), .returnKey])
+        XCTAssertEqual(Array(rows[2].dropFirst().dropLast()).map(\.swipeUpAction), [
+            .symbol("@"), .literal("."), .symbol("#"), .symbol("\\"),
+            .symbol("?"), .symbol("!"), .symbol("..."),
+        ])
+        XCTAssertEqual(rows[3].map(\.action), [.page(.numbers), .symbol(","), .space, .toggleLanguage, .returnKey])
+        XCTAssertEqual(rows[3][1].swipeUpAction, .symbol("."))
     }
 
     func testGlobeOnlyWhenNeeded() {
@@ -110,8 +120,77 @@ final class KeyboardLayoutTests: XCTestCase {
     func testFunctionKeyFlags() {
         XCTAssertTrue(KeySpec(.letter("a")).showsPreview)
         XCTAssertTrue(KeySpec(.symbol(",")).showsPreview)
+        XCTAssertTrue(KeySpec(.literal(".")).showsPreview)
         XCTAssertFalse(KeySpec(.space).showsPreview)
         XCTAssertTrue(KeySpec(.shift).isFunctionKey)
         XCTAssertFalse(KeySpec(.space).isFunctionKey)
+        XCTAssertFalse(KeySpec(.toggleLanguage).isFunctionKey)
+    }
+
+    func testSwipeUpGesturesAndSlideDisambiguation() {
+        let bounds = CGRect(x: 0, y: 0, width: 402, height: 216)
+        let rows = KeyboardLayout.rows(for: .letters, chineseMode: true, showsGlobe: false)
+        var metrics = KeyboardGeometry.Metrics.portrait
+        metrics.rowGap = max(4, (bounds.height / CGFloat(rows.count) * 0.2).rounded())
+        let frames = KeyboardGeometry.layout(rows: rows, in: bounds, metrics: metrics)
+        let specs = rows.flatMap { $0 }
+        var tracker = KeyboardTouchTracker(specs: specs, frames: frames)
+
+        func center(of target: KeyAction) -> CGPoint {
+            let idx = specs.firstIndex { $0.action == target }!
+            return CGPoint(x: frames[idx].frame.midX, y: frames[idx].frame.midY)
+        }
+
+        // 1. 普通点按 q → .letter("q")；上划 q → 气泡先切到 .symbol("1")，松手提交 .symbol("1")
+        let q = center(of: .letter("q"))
+        _ = tracker.begin(id: 1, at: q)
+        XCTAssertEqual(tracker.end(id: 1).triggered, [.letter("q")])
+
+        _ = tracker.begin(id: 2, at: q)
+        let movedQ = tracker.move(id: 2, to: CGPoint(x: q.x, y: q.y - 24))
+        XCTAssertEqual(movedQ.preview?.action, .symbol("1"))
+        XCTAssertEqual(tracker.end(id: 2).triggered, [.symbol("1")])
+
+        // 2. 从第二行 s 直向上滑进第一行 w 的区域，应触发 s 的上划 "/" 而不误跳到 w
+        let s = center(of: .letter("s"))
+        let w = center(of: .letter("w"))
+        _ = tracker.begin(id: 3, at: s)
+        _ = tracker.move(id: 3, to: CGPoint(x: s.x, y: s.y - 10))
+        _ = tracker.move(id: 3, to: CGPoint(x: s.x, y: w.y))
+        XCTAssertEqual(tracker.end(id: 3).triggered, [.symbol("/")])
+
+        // 3. 上划 b 后未抬手又滑回键帽，取消上划回到字母 b
+        let b = center(of: .letter("b"))
+        _ = tracker.begin(id: 4, at: b)
+        XCTAssertEqual(tracker.move(id: 4, to: CGPoint(x: b.x, y: b.y - 26)).preview?.action, .symbol("?"))
+        XCTAssertEqual(tracker.move(id: 4, to: b).preview?.action, .letter("b"))
+        XCTAssertEqual(tracker.end(id: 4).triggered, [.letter("b")])
+
+        // 4. 横向从 f 滑到 g，正常换键为 g，不误触上划标点
+        let f = center(of: .letter("f"))
+        let g = center(of: .letter("g"))
+        _ = tracker.begin(id: 5, at: f)
+        XCTAssertEqual(tracker.move(id: 5, to: g).preview?.action, .letter("g"))
+        XCTAssertEqual(tracker.end(id: 5).triggered, [.letter("g")])
+
+        // 5. 底排逗号键点按输 ","，上划输 "."；x 上划输原样 "."
+        let comma = center(of: .symbol(","))
+        let x = center(of: .letter("x"))
+        _ = tracker.begin(id: 6, at: comma)
+        XCTAssertEqual(tracker.end(id: 6).triggered, [.symbol(",")])
+        _ = tracker.begin(id: 7, at: comma)
+        _ = tracker.move(id: 7, to: CGPoint(x: comma.x, y: comma.y - 26))
+        XCTAssertEqual(tracker.end(id: 7).triggered, [.symbol(".")])
+        _ = tracker.begin(id: 8, at: x)
+        _ = tracker.move(id: 8, to: CGPoint(x: x.x, y: x.y - 26))
+        XCTAssertEqual(tracker.end(id: 8).triggered, [.literal(".")])
+
+        // 6. 多指连打：第一指已上划 q ("1") 尚未抬起时第二指按下 w，应先提交 "1" 再提交 "w"
+        _ = tracker.begin(id: 9, at: q)
+        _ = tracker.move(id: 9, to: CGPoint(x: q.x, y: q.y - 24))
+        let secondDown = tracker.begin(id: 10, at: w)
+        XCTAssertEqual(secondDown.triggered, [.symbol("1")])
+        XCTAssertTrue(tracker.end(id: 9).triggered.isEmpty)
+        XCTAssertEqual(tracker.end(id: 10).triggered, [.letter("w")])
     }
 }

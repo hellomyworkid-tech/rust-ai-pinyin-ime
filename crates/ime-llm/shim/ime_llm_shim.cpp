@@ -21,6 +21,9 @@
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <malloc/malloc.h>
+#include <pthread/qos.h>
+#include <sys/mman.h>
 #include <sys/sysctl.h>
 #if !defined(IME_LLM_NO_ACCELERATE)
 #include <Accelerate/Accelerate.h>
@@ -277,6 +280,20 @@ ime_llm *ime_llm_load(const char *model_path, int32_t n_ctx, int32_t n_threads, 
         h->batch = llama_batch_init(h->n_batch, 0, 1);
         h->batch_ready = true;
         h->scratch.reserve((size_t)h->n_vocab);
+
+        // 在后台加载线程预先跑一次单 token 空载前向（不取 logits，不占输出缓冲），
+        // 提前触发各层 mmap 权重缺页与 ggml 线程池初始化，避免用户第一次敲字时现触发冷缺页抖动
+        {
+            llama_batch &wb = h->batch;
+            wb.n_tokens = 1;
+            wb.token[0] = 0;
+            wb.pos[0] = 0;
+            wb.n_seq_id[0] = 1;
+            wb.seq_id[0][0] = 0;
+            wb.logits[0] = false;
+            (void)llama_decode(h->ctx, wb);
+            llama_memory_clear(h->mem, false);
+        }
         return h;
     } catch (const std::exception &e) {
         write_err(err, err_cap, std::string("exception: ") + e.what());
@@ -303,10 +320,18 @@ int32_t ime_llm_resolve_limits(int32_t n_ctx, int32_t *n_seq_max, int32_t *n_out
 }
 
 void ime_llm_free(ime_llm *h) {
+    if (h == nullptr) {
+        return;
+    }
     try {
         destroy(h);
     } catch (...) {
     }
+#if defined(__APPLE__)
+    // 词表与上下文缓冲释放后留在 libsystem_malloc 的缓存区里仍计入 phys_footprint，
+    // 主动归还空闲页，避免 iOS 键盘扩展（177MB 上限）后续换模型或重连时误判剩余内存不足
+    malloc_zone_pressure_relief(nullptr, 0);
+#endif
 }
 
 int32_t ime_llm_n_vocab(const ime_llm *h) { return h ? h->n_vocab : 0; }

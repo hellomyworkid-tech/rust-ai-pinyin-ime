@@ -148,6 +148,34 @@ final class KeyboardLogicTests: XCTestCase {
         XCTAssertTrue(pager.hasMore)
     }
 
+    /// 显示不出来的候选不进列表；列表下标经 engineIndex(at:) 换算回引擎的全局下标，加载更多从已取到的个数接着取
+    func testPagerSkipsUndisplayableCandidates() {
+        let saved = CandidatePager.isDisplayable
+        defer { CandidatePager.isDisplayable = saved }
+        CandidatePager.isDisplayable = { !["c1", "c3"].contains($0.text) }
+        var pager = CandidatePager()
+        pager.apply(view(page: 0, size: 2, total: 5))
+        XCTAssertEqual(pager.candidates.map(\.text), ["c0"])
+        XCTAssertEqual(pager.fetchedCount, 2)
+        pager.append(view(page: 1, size: 2, total: 5).visibleCandidates, at: 2)
+        XCTAssertEqual(pager.candidates.map(\.text), ["c0", "c2"])
+        XCTAssertEqual(pager.engineIndex(at: 1), 2)
+        pager.append(view(page: 2, size: 2, total: 5).visibleCandidates, at: 4)
+        XCTAssertEqual(pager.candidates.map(\.text), ["c0", "c2", "c4"])
+        XCTAssertEqual(pager.engineIndex(at: 2), 4)
+        XCTAssertNil(pager.engineIndex(at: 3))
+        XCTAssertFalse(pager.hasMore)
+    }
+
+    func testRenderabilityOfCommonAndRareCharacters() {
+        XCTAssertTrue(CandidateRenderability.isRenderable("查询余额"))
+        XCTAssertTrue(CandidateRenderability.isRenderable("YU yu 😀🌍"))
+        // 私用区码位在系统字体里没有字形
+        XCTAssertFalse(CandidateRenderability.isRenderable("\u{F0001}"))
+        // chaxunyue 点 yu 时出现的方框字（CJK 扩展 C，U+2B6AA）
+        XCTAssertFalse(CandidateRenderability.isRenderable("\u{2B6AA}"))
+    }
+
     // MARK: - FieldTraits
 
     func testStartModes() {
@@ -180,6 +208,39 @@ final class KeyboardLogicTests: XCTestCase {
         XCTAssertEqual(model.syllables.map(\.code), ["wo", "xiang", "qu", "gong", "yuan", "wan"])
         XCTAssertEqual(model.syllables.map(\.isActive), [false, false, true, false, false, false])
         XCTAssertFalse(model.syllables.contains { $0.isPinned })
+        XCTAssertEqual(model.sentence, [
+            IMESentencePart(text: "我想", pinned: false),
+            IMESentencePart(text: "去", pinned: true),
+            IMESentencePart(text: "公园完", pinned: false),
+        ])
+    }
+
+    func testEditedByteRangeHighlightsMultipleSyllablesAndCharacters() {
+        var view = IMEView()
+        view.visible = true
+        view.composedFullSentence = "你好他们在这里"
+        view.fullSentenceParts = [IMESentencePart(text: "你好他们在这里", pinned: false)]
+        view.syllableSpans = [
+            IMESpan(start: 0, end: 2, text: "你", codeKey: "ni"),
+            IMESpan(start: 2, end: 5, text: "好", codeKey: "hao"),
+            IMESpan(start: 5, end: 7, text: "他", codeKey: "ta"),
+            IMESpan(start: 7, end: 10, text: "们", codeKey: "men"),
+            IMESpan(start: 10, end: 13, text: "在", codeKey: "zai"),
+            IMESpan(start: 13, end: 16, text: "这", codeKey: "zhe"),
+            IMESpan(start: 16, end: 18, text: "里", codeKey: "li"),
+        ]
+        view.editedByteRange = IMEByteRange(start: 5, end: 10)
+        view.cursorBytePos = 10
+
+        let model = CompositionModel(view: view)
+        XCTAssertEqual(model.syllables.map(\.isActive), [false, false, true, true, false, false, false])
+        XCTAssertFalse(model.syllables.contains { $0.isPinned })
+        XCTAssertEqual(model.sentence, [
+            IMESentencePart(text: "你好", pinned: false),
+            IMESentencePart(text: "他们", pinned: true),
+            IMESentencePart(text: "在这里", pinned: false),
+        ])
+        XCTAssertEqual(model.scrollFocusIndex, 3)
     }
 
     func testPinnedSyllablesFollowSentenceParts() {
@@ -207,5 +268,41 @@ final class KeyboardLogicTests: XCTestCase {
         let model = CompositionModel(view: engine.currentView())
         XCTAssertEqual(model.syllables.map(\.isPinned), [true, false])
         XCTAssertEqual(model.sentence.first, IMESentencePart(text: "你", pinned: true))
+    }
+
+    func testScrollFocusTracksMidSentenceCursor() {
+        var view = IMEView()
+        view.visible = true
+        view.syllableSpans = [
+            IMESpan(start: 0, end: 5, text: "中", codeKey: "zhong"),
+            IMESpan(start: 5, end: 8, text: "国", codeKey: "guo"),
+            IMESpan(start: 8, end: 11, text: "没", codeKey: "mei"),
+            IMESpan(start: 11, end: 14, text: "有", codeKey: "you"),
+        ]
+        view.activeSyllableIndex = nil
+        view.cursorBytePos = 11 // 刚在句中把 nei 改写成 mei，光标停在 byte 11
+        XCTAssertEqual(CompositionModel(view: view).scrollFocusIndex, 2)
+
+        view.cursorBytePos = 14 // 光标在句尾正常输入
+        XCTAssertNil(CompositionModel(view: view).scrollFocusIndex)
+    }
+
+    // MARK: - Pronunciation Hint Preservation & Grid Packing
+
+    func testGridPackingSpansWidePronunciationHintAcrossColumns() {
+        // 展开网格 6 列（单列宽 65pt）：「混沌」（~64pt）占 1 列，「馄饨 馄 (hun) 饨 (tun)」（~162pt）自动跨 3 列
+        let spans = GridPacking.spans(neededWidths: [64, 162, 44, 44], unit: 65, columns: 6)
+        XCTAssertEqual(spans, [1, 3, 1, 1])
+
+        let hinted = IMECandidate(
+            text: "馄饨",
+            preedit: "hun'dun",
+            consumedLen: 6,
+            tag: "[错音]",
+            aiBoosted: false,
+            pronunciationHint: "馄 (hun) 饨 (tun)"
+        )
+        XCTAssertTrue(CandidateRenderability.isRenderable(hinted.text))
+        XCTAssertEqual(hinted.pronunciationHint, "馄 (hun) 饨 (tun)")
     }
 }

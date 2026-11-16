@@ -91,6 +91,11 @@ char *ime_engine_refresh_after_ai(ime_engine *engine);
 void ime_engine_set_context(ime_engine *engine, const char *text_before_cursor);
 // 放弃当前输入，不上屏
 void ime_engine_reset(ime_engine *engine);
+// 导出当前未完成组合的快照 JSON（用 ime_string_free 释放）；当前没有未上屏输入或 engine 为 NULL 时返回 NULL。
+// 供宿主在切换应用、截图或键盘收起前暂存，回到同一输入框时用 ime_engine_restore_snapshot 恢复继续选字
+char *ime_engine_snapshot(const ime_engine *engine);
+// 从快照 JSON 恢复未完成组合，返回动作信封 JSON（恢复成功为 update，快照为空或无法解析时为 pass；用 ime_string_free 释放）
+char *ime_engine_restore_snapshot(ime_engine *engine, const char *snapshot_json);
 bool ime_engine_is_composing(const ime_engine *engine);
 bool ime_engine_is_english(const ime_engine *engine);
 // 最近一次按键是否还在等本地模型 / 宿主选词的结果。以下情况变回 false：结果被采纳（随即 ai_notify 回调）、

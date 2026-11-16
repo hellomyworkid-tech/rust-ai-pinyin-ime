@@ -37,6 +37,14 @@ final class KeyboardSmokeTests: XCTestCase {
         element.tap()
     }
 
+    private func swipeUpKey(_ label: String, file: StaticString = #filePath, line: UInt = #line) {
+        let element = key(label)
+        XCTAssertTrue(element.waitForExistence(timeout: 5), "找不到键 \(label)", file: file, line: line)
+        let start = element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let end = element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: -0.3))
+        start.press(forDuration: 0.02, thenDragTo: end)
+    }
+
     private func type(_ letters: String) {
         for c in letters { tap(String(c)) }
     }
@@ -117,7 +125,7 @@ final class KeyboardSmokeTests: XCTestCase {
         waitForText("你好你ok")
         tap("英文，点按切换到中文")
 
-        // 数字页
+        // 数字页 → 分类符号面板（测试分类切换、锁定连输、退格与返回）
         tap("数字")
         XCTAssertTrue(key("1").waitForExistence(timeout: 2))
         screenshot("light-numbers")
@@ -125,9 +133,62 @@ final class KeyboardSmokeTests: XCTestCase {
         tap("。")
         waitForText("你好你ok1。")
         tap("符号")
+        let backFromSymbols = app.buttons["返回"].firstMatch
+        let lockSymbols = app.buttons["锁定符号面板"].firstMatch
+        let mathTab = app.buttons["数学符号"].firstMatch
+        XCTAssertTrue(backFromSymbols.waitForExistence(timeout: 2), "应打开分类符号面板")
+        XCTAssertTrue(lockSymbols.exists)
+        XCTAssertTrue(mathTab.exists)
         screenshot("light-symbols")
-        tap("字母")
-        XCTAssertTrue(key("q").waitForExistence(timeout: 2))
+
+        // 切到「网络」分类查看跨列长符号排布
+        app.buttons["网络符号"].firstMatch.tap()
+        XCTAssertTrue(key("https://").waitForExistence(timeout: 2))
+        screenshot("light-symbols-network")
+
+        // 直接按在分类按钮（「数学」）上往左拖动：验证手指落在按钮上也能顺畅横滑出后续分类（「希腊」）
+        let startDrag = mathTab.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let endDrag = backFromSymbols.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        startDrag.press(forDuration: 0.02, thenDragTo: endDrag)
+        let greekTab = app.buttons["希腊符号"].firstMatch
+        XCTAssertTrue(greekTab.waitForExistence(timeout: 2) && greekTab.isHittable, "按在分类按钮上横滑应顺畅滚出后续分类")
+        greekTab.tap()
+        XCTAssertTrue(key("α").waitForExistence(timeout: 2))
+
+        // 再直接按在分类按钮上往右拖回开头，验证双向拖动均顺畅
+        for _ in 0..<2 {
+            let dragRightStart = backFromSymbols.coordinate(withNormalizedOffset: CGVector(dx: 1.4, dy: 0.5))
+            let dragRightEnd = lockSymbols.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            dragRightStart.press(forDuration: 0.02, thenDragTo: dragRightEnd)
+        }
+        Thread.sleep(forTimeInterval: 0.35)
+
+        // 锁定面板：连续输入两个数学符号再退格删掉第二个，面板保持不关闭
+        lockSymbols.tap()
+        XCTAssertEqual(lockSymbols.value as? String, "已锁定")
+        mathTab.tap()
+        tap("≠")
+        tap("∞")
+        waitForText("你好你ok1。≠∞")
+        app.buttons["删除"].firstMatch.tap()
+        waitForText("你好你ok1。≠")
+        XCTAssertTrue(backFromSymbols.exists, "锁定状态下点选符号不应退出面板")
+
+        // 解锁后点选一个英文半角符号：中文模式下也原样上屏（不转全角），并自动返回字母主键盘
+        lockSymbols.tap()
+        XCTAssertEqual(lockSymbols.value as? String, "未锁定")
+        app.buttons["常用符号"].firstMatch.tap()
+        tap("_")
+        waitForText("你好你ok1。≠_")
+        XCTAssertTrue(key("q").waitForExistence(timeout: 2), "未锁定时点选符号后应自动回到主键盘")
+
+        // 字母页上划输入数字与标点：q→1、x→.、t→5、b→？、，→。
+        swipeUpKey("q")
+        swipeUpKey("x")
+        swipeUpKey("t")
+        swipeUpKey("b")
+        swipeUpKey("，")
+        waitForText("你好你ok1。≠_1.5？。")
     }
 
     private func syllableChip(_ label: String) -> XCUIElement {
@@ -164,6 +225,71 @@ final class KeyboardSmokeTests: XCTestCase {
         screenshot("light-syllable-undone")
     }
 
+    /// 点选输错的音节后直接按键输入，删除原音节并在原处改写为新拼音；改写出的单音节或多音节及右侧对应文字均保持蓝色高亮
+    func testTapSyllableAndRetypeReplacesMistypedPinyin() {
+        focusAndWaitForKeyboard()
+        type("zhongguoneiyoueuv")
+        let nei = syllableChip("音节 nei")
+        XCTAssertTrue(nei.waitForExistence(timeout: 3))
+        nei.tap()
+        XCTAssertTrue(nei.isSelected)
+
+        type("mei")
+        let mei = syllableChip("音节 mei")
+        XCTAssertTrue(mei.waitForExistence(timeout: 3), "nei 应被改写为 mei")
+        XCTAssertFalse(nei.exists, "旧音节 nei 应已被删除")
+        XCTAssertTrue(mei.isSelected, "改写出的 mei 应保持蓝色高亮")
+        let sentence = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "整句预览：")).firstMatch
+        XCTAssertTrue(sentence.label.contains("中国没有"), sentence.label)
+
+        tap("空格")
+        XCTAssertTrue(fieldText.hasPrefix("中国没有"), "上屏内容应以『中国没有』开头，实际：\(fieldText)")
+
+        // 单音节改写为双音节：nihaowozaizheli 点选 wo 改写成 tamen，ta 与 men 均蓝色高亮，整句预览识别为「他们」
+        type("nihaowozaizheli")
+        let wo = syllableChip("音节 wo")
+        XCTAssertTrue(wo.waitForExistence(timeout: 3))
+        wo.tap()
+        XCTAssertTrue(wo.isSelected)
+        screenshot("light-syllable-tapped-wo")
+
+        type("tamen")
+        let ta = syllableChip("音节 ta")
+        let men = syllableChip("音节 men")
+        XCTAssertTrue(ta.waitForExistence(timeout: 3), "wo 应被改写为 ta men")
+        XCTAssertTrue(men.exists)
+        XCTAssertFalse(wo.exists)
+        XCTAssertTrue(ta.isSelected, "ta 应保持蓝色高亮")
+        XCTAssertTrue(men.isSelected, "men 应保持蓝色高亮")
+        XCTAssertTrue(sentence.label.contains("你好他们在这里"), sentence.label)
+        screenshot("light-syllable-overwritten")
+
+        tap("空格")
+        XCTAssertTrue(fieldText.hasSuffix("你好他们在这里"), "实际：\(fieldText)")
+
+        // 点选音节后按退格：从被选音节 men 自身末尾字母删起（不误删 ta 的 a），继续补打仍保持蓝色高亮
+        type("nihaotamenzaizheli")
+        let men2 = syllableChip("音节 men")
+        XCTAssertTrue(men2.waitForExistence(timeout: 3))
+        men2.tap()
+        XCTAssertTrue(men2.isSelected)
+        tap("删除")
+        tap("删除")
+        let taRemain = syllableChip("音节 ta")
+        let mRemain = syllableChip("音节 m")
+        XCTAssertTrue(taRemain.waitForExistence(timeout: 3), "前一个音节 ta 不应被误删")
+        XCTAssertTrue(mRemain.exists, "men 连按两次退格后应剩 m")
+        XCTAssertFalse(taRemain.isSelected, "ta 不应被误标蓝")
+        XCTAssertTrue(mRemain.isSelected, "剩余的 m 应保持蓝色高亮")
+        type("ei")
+        let mei2 = syllableChip("音节 mei")
+        XCTAssertTrue(mei2.waitForExistence(timeout: 3))
+        XCTAssertTrue(mei2.isSelected)
+        tap("空格")
+        XCTAssertTrue(fieldText.hasSuffix("你好他没在这里"), "实际：\(fieldText)")
+    }
+
     func testSyllableStripAndGrid() {
         focusAndWaitForKeyboard()
         type("jintiantianqihenhao")
@@ -179,6 +305,42 @@ final class KeyboardSmokeTests: XCTestCase {
         XCTAssertTrue(app.buttons["收起候选"].waitForExistence(timeout: 2))
         screenshot("light-grid")
         app.buttons["收起候选"].tap()
+        tap("空格")
+        waitForText("今天天气很好")
+
+        // 易读错词召回与正音提示：打 hundun，候选栏与展开网格均展示「馄饨 馄 (hun) 饨 (tun)」，点选仅上屏「馄饨」
+        type("hundun")
+        XCTAssertTrue(app.buttons["混沌"].firstMatch.waitForExistence(timeout: 3))
+        let wonton = app.buttons["馄饨，读音 馄 (hun) 饨 (tun)"].firstMatch
+        XCTAssertTrue(wonton.waitForExistence(timeout: 3), "hundun 应召回带正音提示的「馄饨」")
+        screenshot("light-hundun-bar")
+
+        app.buttons["展开候选"].tap()
+        XCTAssertTrue(app.buttons["收起候选"].waitForExistence(timeout: 2))
+        let gridWonton = app.cells.matching(NSPredicate(format: "label == %@", "馄饨，读音 馄 (hun) 饨 (tun)")).firstMatch
+        XCTAssertTrue(gridWonton.waitForExistence(timeout: 2), "展开网格中也应完整显示带正音提示的「馄饨」")
+        screenshot("light-hundun-grid")
+        gridWonton.tap()
+        waitForText("今天天气很好馄饨")
+
+        // 高频现代词组与短剧搭配首屏核验
+        type("shouzhongrenqun")
+        XCTAssertTrue(app.buttons["受众人群"].firstMatch.waitForExistence(timeout: 3))
+        screenshot("light-shouzhongrenqun")
+        tap("空格")
+        waitForText("今天天气很好馄饨受众人群")
+
+        type("renshe")
+        XCTAssertTrue(app.buttons["人设"].firstMatch.waitForExistence(timeout: 3))
+        screenshot("light-renshe")
+        tap("空格")
+        waitForText("今天天气很好馄饨受众人群人设")
+
+        type("fuhenvpinduanju")
+        XCTAssertTrue(app.buttons["符合女频短剧"].firstMatch.waitForExistence(timeout: 3))
+        screenshot("light-fuhenvpinduanju")
+        tap("空格")
+        waitForText("今天天气很好馄饨受众人群人设符合女频短剧")
     }
 
     /// 上文决定同音词：输入框里已有「宪法保障公民的合法」，打 quanli，首选应是带 AI 标记的「权利」
@@ -238,8 +400,13 @@ final class KeyboardSmokeTests: XCTestCase {
         type("nihao")
         XCTAssertTrue(app.buttons["你好"].firstMatch.waitForExistence(timeout: 3))
         screenshot("dark-composing")
+        app.buttons["你好"].firstMatch.tap()
         tap("数字")
         screenshot("dark-numbers")
+        tap("符号")
+        XCTAssertTrue(app.buttons["中文符号"].firstMatch.waitForExistence(timeout: 2))
+        app.buttons["中文符号"].firstMatch.tap()
+        screenshot("dark-symbols")
     }
 
     /// 英文词后面也有表情：打 ok，「ok」后面是 👌 🆗（和系统键盘一样），点表情上屏的是表情
@@ -282,6 +449,41 @@ final class KeyboardSmokeTests: XCTestCase {
         waitForText("你好")
     }
 
+    /// 输完拼音还没选完字时切输入框、收起键盘或切应用，回到原输入框时保留未完成的拼音和选字进度
+    func testUnfinishedCompositionSurvivesSwitchAndDismiss() {
+        focusAndWaitForKeyboard()
+        type("nihaotamenzaizheli")
+        let hao = syllableChip("音节 hao")
+        XCTAssertTrue(hao.waitForExistence(timeout: 3))
+        hao.tap()
+        app.buttons["好"].firstMatch.tap()
+        let pinnedHao = syllableChip("音节 hao，已选定")
+        XCTAssertTrue(pinnedHao.waitForExistence(timeout: 3))
+
+        // 1. 切到网址输入框：网址框干净且处于英文模式，不带入刚才未完成的拼音
+        let url = app.textFields["urlTextField"]
+        XCTAssertTrue(url.waitForExistence(timeout: 3))
+        url.tap()
+        XCTAssertTrue(key("英文，点按切换到中文").waitForExistence(timeout: 5))
+        XCTAssertFalse(pinnedHao.exists)
+
+        // 2. 切回原输入框：未完成的拼音与已锁定的「好」完整恢复
+        field.tap()
+        XCTAssertTrue(pinnedHao.waitForExistence(timeout: 5), "切回原输入框后应恢复未完成的组合与已选定的字")
+
+        // 3. 切到桌面（模拟切换程序 / 截图跳出）再切回宿主 App，同样保留并可继续选字上屏
+        XCUIDevice.shared.press(.home)
+        Thread.sleep(forTimeInterval: 0.8)
+        app.activate()
+        if !key("q").waitForExistence(timeout: 3) {
+            field.tap()
+            XCTAssertTrue(key("q").waitForExistence(timeout: 10))
+        }
+        XCTAssertTrue(pinnedHao.waitForExistence(timeout: 5), "切应用回来后应保留未完成的组合")
+        tap("空格")
+        waitForText("你好他们在这里")
+    }
+
     func testURLFieldStartsInEnglish() {
         let url = app.textFields["urlTextField"]
         XCTAssertTrue(url.waitForExistence(timeout: 5))
@@ -289,5 +491,57 @@ final class KeyboardSmokeTests: XCTestCase {
         XCTAssertTrue(key("英文，点按切换到中文").waitForExistence(timeout: 10))
         type("abc")
         XCTAssertEqual(url.value as? String, "abc")
+    }
+
+    /// 工具栏左上角快捷设置：输入时自动隐藏防误触；空闲点击展开二级面板，开关即时生效，左 `<` / 右 `⊗` 均可收起
+    func testQuickSettingsPanelTogglesAndCloses() {
+        focusAndWaitForKeyboard()
+        let gear = app.buttons["快捷设置"].firstMatch
+        XCTAssertTrue(gear.waitForExistence(timeout: 3), "空闲工具栏左上角应有快捷设置入口")
+
+        // 输入中隐藏工具栏与设置入口，避免连打时误触
+        type("n")
+        XCTAssertFalse(gear.exists, "输入拼音期间不应显示快捷设置按钮")
+        tap("删除")
+        XCTAssertTrue(gear.waitForExistence(timeout: 2))
+
+        // 展开二级面板
+        gear.tap()
+        let back = app.buttons["返回键盘"].firstMatch
+        let close = app.buttons["关闭设置"].firstMatch
+        let openApp = app.buttons["打开 AI 拼音设置"].firstMatch
+        let emojiToggle = app.buttons["候选表情"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 2))
+        XCTAssertTrue(close.exists)
+        XCTAssertTrue(openApp.exists)
+        XCTAssertTrue(emojiToggle.exists)
+        XCTAssertFalse(key("q").exists, "快捷设置面板展开时应遮住按键区")
+        screenshot("light-quick-settings")
+
+        // 关闭「候选表情」并点右上角「关闭设置」回到键盘，验证立即生效
+        emojiToggle.tap()
+        XCTAssertEqual(emojiToggle.value as? String, "已关闭")
+        close.tap()
+        XCTAssertTrue(key("q").waitForExistence(timeout: 2))
+
+        type("ok")
+        XCTAssertTrue(app.buttons["ok"].firstMatch.waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["👌"].firstMatch.exists, "关闭候选表情后不应再出现表情候选")
+        tap("删除")
+        tap("删除")
+
+        // 重新打开面板（顺便切深色外观截一张图），开启「候选表情」并点左上角「返回键盘」收起
+        XCUIDevice.shared.appearance = .dark
+        XCTAssertTrue(gear.waitForExistence(timeout: 2))
+        gear.tap()
+        XCTAssertTrue(back.waitForExistence(timeout: 2))
+        emojiToggle.tap()
+        XCTAssertEqual(emojiToggle.value as? String, "已开启")
+        screenshot("dark-quick-settings")
+        back.tap()
+        XCTAssertTrue(key("q").waitForExistence(timeout: 2))
+
+        type("ok")
+        XCTAssertTrue(app.buttons["👌"].firstMatch.waitForExistence(timeout: 3), "重新开启候选表情后应立即恢复")
     }
 }

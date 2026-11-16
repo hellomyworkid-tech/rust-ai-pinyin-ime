@@ -230,6 +230,59 @@ fn tapping_a_syllable_toggles_single_syllable_mode() {
 }
 
 #[test]
+fn typing_after_tapping_a_syllable_replaces_that_syllable() {
+    let engine = engine();
+    type_letters(&engine, "zhongguoneiyoueuv");
+    let tapped = json(&engine.tap_syllable(2));
+    assert_eq!(tapped["view"]["active_syllable_index"], 2);
+    assert_eq!(tapped["view"]["syllable_spans"][2]["code_key"], "nei");
+
+    let edited = type_letters(&engine, "mei");
+    assert_eq!(edited["view"]["active_syllable_index"], Value::Null);
+    assert_eq!(edited["view"]["edited_byte_range"], serde_json::json!([8, 11]));
+    assert_eq!(edited["view"]["syllable_spans"][2]["code_key"], "mei");
+    assert_eq!(edited["view"]["syllable_spans"][3]["code_key"], "you");
+    assert!(
+        top_text(&edited).starts_with("中国没有"),
+        "expected top candidate to start with 中国没有, got {}",
+        top_text(&edited)
+    );
+
+    // 单音节改写为双音节（wo -> tamen）：edited_byte_range 覆盖 ta 与 men，再点 ta 进入单音节选词并清除 edited_byte_range
+    engine.reset();
+    let initial = type_letters(&engine, "nihaowozaizheli");
+    assert!(initial["view"].get("edited_byte_range").is_none());
+    engine.tap_syllable(2);
+    let rewritten = type_letters(&engine, "tamen");
+    assert_eq!(rewritten["view"]["edited_byte_range"], serde_json::json!([5, 10]));
+    assert_eq!(rewritten["view"]["composed_full_sentence"], "你好他们在这里");
+    let retapped = json(&engine.tap_syllable(2));
+    assert!(retapped["view"].get("edited_byte_range").is_none());
+    assert_eq!(retapped["view"]["active_syllable_index"], 2);
+
+    // 再点一次同一音节退出单音节选中后，打字照常接在句尾
+    engine.reset();
+    type_letters(&engine, "nihao");
+    engine.tap_syllable(0);
+    engine.tap_syllable(0);
+    let appended = type_letters(&engine, "ma");
+    assert_eq!(appended["view"]["preedit_text"], "ni'hao'ma");
+
+    // 已满 MAX_COMPOSITION_BYTES 时，点选一个音节仍可用不超过剩余空间的字母改写它
+    engine.reset();
+    let full = "nihao".repeat(MAX_COMPOSITION_BYTES / 5);
+    type_letters(&engine, &full);
+    engine.tap_syllable(0); // 选中 "ni"（2 字节）
+    let m1 = json(&engine.key(IME_KEY_CHAR, 'w' as u32));
+    assert_eq!(m1["view"]["syllable_spans"][0]["code_key"], "w");
+    let m2 = json(&engine.key(IME_KEY_CHAR, 'o' as u32));
+    assert_eq!(m2["view"]["syllable_spans"][0]["code_key"], "wo");
+    // 再次达到 100 字节上限：第 3 个字母被吃掉
+    let swallowed = json(&engine.key(IME_KEY_CHAR, 'a' as u32));
+    assert_eq!(swallowed["view"], m2["view"]);
+}
+
+#[test]
 fn cursor_keys_move_by_syllable() {
     let engine = engine();
     type_letters(&engine, "nihao");
@@ -1615,3 +1668,162 @@ fn ai_pending_follows_the_chooser_request() {
     }
 }
 
+#[test]
+fn c_abi_touch_backspace_on_tapped_syllable_and_snapshot_roundtrip() {
+    let lexicon = CString::new(lexicon_path().to_str().unwrap()).unwrap();
+    unsafe {
+        assert!(ime_engine_snapshot(std::ptr::null()).is_null());
+        assert!(ime_engine_restore_snapshot(std::ptr::null_mut(), std::ptr::null()).is_null());
+
+        let engine = ime_engine_new(lexicon.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert!(!engine.is_null());
+        // 空闲时没有快照
+        assert!(ime_engine_snapshot(engine).is_null());
+        let bad = CString::new("{bad json").unwrap();
+        assert_eq!(
+            json(&take(ime_engine_restore_snapshot(engine, bad.as_ptr())))["action"],
+            "pass"
+        );
+        assert_eq!(
+            json(&take(ime_engine_restore_snapshot(engine, std::ptr::null())))["action"],
+            "pass"
+        );
+
+        // 输入 nihaotamenzaizheli，先点选 hao（下标 1）锁定一个字，再点选 men（下标 3）按退格
+        for ch in "nihaotamenzaizheli".chars() {
+            take(ime_engine_key(engine, IME_KEY_CHAR, ch as u32));
+        }
+        let hao = json(&take(ime_engine_tap_syllable(engine, 1)));
+        let hao_idx = hao["view"]["visible_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|c| c["text"] == "好")
+            .expect("hao 候选里应有「好」");
+        take(ime_engine_select_candidate(engine, hao_idx as u32));
+
+        let tapped_men = json(&take(ime_engine_tap_syllable(engine, 3)));
+        assert_eq!(tapped_men["view"]["syllable_spans"][3]["code_key"], "men");
+
+        // 按退格：删的是 men 末尾的 n（剩余字母变成 nihaotamezaizheli，merged 词库里 tame 暂按英文词切分），
+        // 而不是删掉 ta 的 a（nihaotmenzaizheli），且改写区间 [7, 9) 保持蓝色高亮
+        let after_bs = json(&take(ime_engine_key(engine, IME_KEY_BACKSPACE, 0)));
+        assert_eq!(after_bs["view"]["preedit_text"], "ni'hao'tame'zai'zhe'li");
+        assert_eq!(after_bs["view"]["edited_byte_range"], serde_json::json!([7, 9]));
+        let before_snapshot_sentence = after_bs["view"]["composed_full_sentence"].clone();
+        let before_snapshot_parts = after_bs["view"]["full_sentence_parts"].clone();
+
+        // 导出快照，销毁旧引擎，模拟切换应用 / 截图后在全新引擎实例里恢复
+        let raw_snap = ime_engine_snapshot(engine);
+        assert!(!raw_snap.is_null());
+        let snap_str = take(raw_snap);
+        ime_engine_free(engine);
+
+        let restored_engine = ime_engine_new(lexicon.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert!(!restored_engine.is_null());
+        let snap_c = CString::new(snap_str).unwrap();
+        let restored = json(&take(ime_engine_restore_snapshot(restored_engine, snap_c.as_ptr())));
+        assert_eq!(restored["action"], "update");
+        assert!(ime_engine_is_composing(restored_engine));
+        assert_eq!(restored["view"]["preedit_text"], "ni'hao'tame'zai'zhe'li");
+        assert_eq!(restored["view"]["edited_byte_range"], serde_json::json!([7, 9]));
+        assert_eq!(restored["view"]["composed_full_sentence"], before_snapshot_sentence);
+        assert_eq!(restored["view"]["full_sentence_parts"], before_snapshot_parts);
+
+        // 恢复后继续按退格可依次删掉 e、m 回到 ni'hao'ta'zai'zhe'li，再输入 mei 得到 ni'hao'ta'mei'zai'zhe'li
+        let after_bs2 = json(&take(ime_engine_key(restored_engine, IME_KEY_BACKSPACE, 0)));
+        assert_eq!(after_bs2["view"]["preedit_text"], "ni'hao'ta'm'zai'zhe'li");
+        assert_eq!(after_bs2["view"]["edited_byte_range"], serde_json::json!([7, 8]));
+        let after_bs3 = json(&take(ime_engine_key(restored_engine, IME_KEY_BACKSPACE, 0)));
+        assert_eq!(after_bs3["view"]["preedit_text"], "ni'hao'ta'zai'zhe'li");
+        assert!(after_bs3["view"]["edited_byte_range"].is_null());
+        for ch in "mei".chars() {
+            take(ime_engine_key(restored_engine, IME_KEY_CHAR, ch as u32));
+        }
+        let after_mei = json(&take(ime_engine_view(restored_engine)));
+        assert_eq!(after_mei["preedit_text"], "ni'hao'ta'mei'zai'zhe'li");
+        assert_eq!(after_mei["edited_byte_range"], serde_json::json!([7, 10]));
+
+        ime_engine_free(restored_engine);
+    }
+}
+
+#[test]
+fn misread_pronunciation_hint_serializes_and_commits_clean_text() {
+    let engine = engine();
+
+    // 1) 高频现代词组验证
+    for (py, want) in [
+        ("shouzhongrenqun", "受众人群"),
+        ("renshe", "人设"),
+        ("nvpinduanju", "女频短剧"),
+        ("fuhenvpinduanju", "符合女频短剧"),
+    ] {
+        let out = type_letters(&engine, py);
+        assert_eq!(top_text(&out), want, "{py}");
+        engine.reset();
+    }
+
+    // 2) hundun：#0 混沌（不含 pronunciation_hint 字段），#1 馄饨（含 pronunciation_hint）
+    let hundun = type_letters(&engine, "hundun");
+    let visible = hundun["view"]["visible_candidates"].as_array().unwrap();
+    assert_eq!(visible[0]["text"], "混沌");
+    assert!(visible[0].get("pronunciation_hint").is_none());
+    assert_eq!(visible[1]["text"], "馄饨");
+    assert_eq!(visible[1]["pronunciation_hint"], "馄 (hun) 饨 (tun)");
+
+    let paged = json(&engine.candidates(0, 5));
+    assert_eq!(paged["candidates"][1]["text"], "馄饨");
+    assert_eq!(paged["candidates"][1]["pronunciation_hint"], "馄 (hun) 饨 (tun)");
+
+    // 3) 点选「馄饨」时只上屏纯词文本，绝不把拼音提示带进输入框
+    let commit = json(&engine.select_candidate(1));
+    assert_eq!(commit["action"], "commit");
+    assert_eq!(commit["text"], "馄饨");
+
+    // 4) 个人记忆置顶后再次输入 hundun，依然保留正音提示
+    let hundun_learned = type_letters(&engine, "hundun");
+    let learned_top = &hundun_learned["view"]["visible_candidates"][0];
+    assert_eq!(learned_top["text"], "馄饨");
+    assert_eq!(learned_top["pronunciation_hint"], "馄 (hun) 饨 (tun)");
+    engine.reset();
+
+    // 5) 正确读音 huntun 不应出现 pronunciation_hint
+    let huntun = type_letters(&engine, "huntun");
+    let huntun_top = &huntun["view"]["visible_candidates"][0];
+    assert_eq!(huntun_top["text"], "馄饨");
+    assert!(huntun_top.get("pronunciation_hint").is_none());
+    engine.reset();
+}
+
+#[test]
+fn personal_prefix_recall_and_colloquial_compounds_rank_first() {
+    let engine = engine();
+
+    // 先正常输入一次 xionghan -> 凶悍（空格确认首选），随后敲 xiongh 首选立即联想「凶悍」
+    let xh_full = type_letters(&engine, "xionghan");
+    assert_eq!(top_text(&xh_full), "凶悍");
+    assert_eq!(json(&engine.key(IME_KEY_SPACE, 0))["text"], "凶悍");
+
+    let xh_prefix = type_letters(&engine, "xiongh");
+    assert_eq!(top_text(&xh_prefix), "凶悍");
+    engine.reset();
+
+    for (py, want) in [
+        ("furenqu", "富人区"),
+        ("zaya", "咋呀"),
+        ("chigongjiafande", "吃公家饭的"),
+        ("chenxianzaiai", "趁现在 AI"),
+        ("chuntangping", "纯躺平"),
+        ("gonghu", "公户"),
+        ("sihangkehu", "私行客户"),
+        ("jiewa", "接娃"),
+        ("baixindeqian", "百姓的钱"),
+        ("baixindeqiansanqifenzhang", "百姓的钱三七分账"),
+        ("haoshenchuleqianbaixingcaihuichu", "豪绅出了钱百姓才会出"),
+    ] {
+        let out = type_letters(&engine, py);
+        assert_eq!(top_text(&out), want, "{py}");
+        engine.reset();
+    }
+}

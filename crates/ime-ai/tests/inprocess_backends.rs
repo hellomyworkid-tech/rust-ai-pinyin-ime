@@ -23,6 +23,7 @@ fn cand(text: &str, consumed_len: usize, score: f32) -> Candidate {
         final_score: score,
         ai_boosted: false,
         tag: String::new(),
+        pronunciation_hint: None,
         segments: vec![text.to_string()],
         segment_spans: Vec::new(),
         syllable_spans: Vec::new(),

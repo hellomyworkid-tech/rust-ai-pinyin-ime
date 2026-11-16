@@ -41,5 +41,15 @@ final class PunctuationMapTests: XCTestCase {
         XCTAssertEqual(PunctuationMap.label(for: ",", chineseMode: true), "，")
         XCTAssertEqual(PunctuationMap.label(for: "\"", chineseMode: true), "“”")
         XCTAssertEqual(PunctuationMap.label(for: "1", chineseMode: true), "1")
+        XCTAssertEqual(PunctuationMap.label(for: "...", chineseMode: true), "……")
+        XCTAssertEqual(PunctuationMap.label(for: "...", chineseMode: false), "...")
+        XCTAssertEqual(PunctuationMap.output(for: "“", chineseMode: true, contextBefore: "“甲"), "“", "独立左引号键固定输出左引号")
+        XCTAssertEqual(PunctuationMap.output(for: "”", chineseMode: true, contextBefore: nil), "”", "独立右引号键固定输出右引号")
+        XCTAssertEqual(PunctuationMap.output(for: "“", chineseMode: false, contextBefore: nil), "\"")
+        XCTAssertEqual(PunctuationMap.output(for: "”", chineseMode: false, contextBefore: nil), "'")
+        XCTAssertEqual(PunctuationMap.subLabel(for: ".", chineseMode: true), "。")
+        XCTAssertEqual(PunctuationMap.subLabel(for: "\\", chineseMode: true), "、")
+        XCTAssertEqual(PunctuationMap.subLabel(for: "?", chineseMode: true), "?")
+        XCTAssertEqual(PunctuationMap.subLabel(for: "”", chineseMode: false), "'")
     }
 }

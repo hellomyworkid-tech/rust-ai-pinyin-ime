@@ -46,17 +46,12 @@ struct InputSettingsView: View {
             Section {
                 Toggle("按键音", isOn: settings.binding(\.keyClickSound))
                     .accessibilityIdentifier("toggle-keyClickSound")
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("触感反馈", isOn: settings.binding(\.haptics))
-                        .accessibilityIdentifier("toggle-haptics")
-                    Text("需要打开「允许完全访问」才有效：设置 → 通用 → 键盘 → 键盘 → AI 拼音。没打开时这个开关不起作用。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                Toggle("触感反馈", isOn: settings.binding(\.haptics))
+                    .accessibilityIdentifier("toggle-haptics")
             } header: {
                 Text("按键")
             } footer: {
-                Text("改动立即保存，键盘下次出现时生效。按键音还要看手机的静音开关和「系统声音与触感」设置。")
+                Text("第三方键盘的按键音和触感反馈都需要打开「允许完全访问」才生效（设置 › 通用 › 键盘 › 键盘 › AI 拼音）。按键音还要看手机静音开关与系统「声音与触感」设置。改动立即保存，键盘下次出现时生效。")
             }
         }
         .navigationTitle("输入设置")

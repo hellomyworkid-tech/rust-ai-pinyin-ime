@@ -114,7 +114,7 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
                 continue
             }
             let isFirst = i == 0
-            let width = CandidateCell.width(for: candidates[i].text, isFirst: isFirst, landscape: landscape)
+            let width = CandidateCell.width(for: candidates[i], isFirst: isFirst, landscape: landscape)
             cell.isHidden = false
             cell.configure(candidates[i], index: i, isFirst: isFirst, landscape: landscape)
             cell.frame = CGRect(x: x, y: 0, width: width, height: height)

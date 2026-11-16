@@ -522,7 +522,7 @@ final class MockEngine: IMEEngine {
             var top = list.remove(at: index)
             let c = top.candidate
             top.candidate = IMECandidate(text: c.text, preedit: c.preedit, consumedLen: c.consumedLen,
-                                         tag: "[AI 优选]", aiBoosted: true)
+                                         tag: "[AI 优选]", aiBoosted: true, pronunciationHint: c.pronunciationHint)
             list.insert(top, at: 0)
         }
         return list

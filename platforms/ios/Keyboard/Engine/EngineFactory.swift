@@ -46,6 +46,18 @@ enum EngineFactory {
             .appendingPathComponent("AIPinyin/user_dict.json")
     }
 
+    /// 未上屏组合的暂存快照（切应用、截图或收起键盘后回到同一输入框时恢复），同样存在键盘自己的容器里
+    static var pendingCompositionsURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("AIPinyin/pending_compositions.json")
+    }
+
+    /// 未开启「允许完全访问」时，键盘快捷面板修改的设置保存在键盘自己的容器里
+    static var keyboardSettingsURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("AIPinyin/settings_override.json")
+    }
+
     static func makeEngine(source: LexiconSource?) -> IMEEngine {
         guard let source else {
             #if DEBUG

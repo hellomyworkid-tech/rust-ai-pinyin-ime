@@ -74,6 +74,33 @@ struct IMESettings: Codable, Equatable {
         return load(from: url)
     }
 
+    /// 键盘读取设置：已开完全访问时与 App 共用 App Group 里的 settings.json；
+    /// 未开完全访问且用户在键盘快捷面板里改过开关时，比较 App Group 与键盘容器内覆盖文件的修改时间，取更新的一份。
+    static func loadForKeyboard(sharedURL: URL? = AppGroup.settingsURL, overrideURL: URL?) -> IMESettings {
+        let fm = FileManager.default
+        let hasShared = sharedURL.map { fm.fileExists(atPath: $0.path) } ?? false
+        let hasOverride = overrideURL.map { fm.fileExists(atPath: $0.path) } ?? false
+
+        if hasShared, hasOverride, let sURL = sharedURL, let oURL = overrideURL {
+            // 直接走 FileManager.attributesOfItem（stat），避免 URL.resourceValues 在复用同一 URL 实例时读到旧缓存
+            let sharedDate = ((try? fm.attributesOfItem(atPath: sURL.path))?[.modificationDate] as? Date) ?? .distantPast
+            let overrideDate = ((try? fm.attributesOfItem(atPath: oURL.path))?[.modificationDate] as? Date) ?? .distantPast
+            if overrideDate > sharedDate {
+                return load(from: oURL)
+            }
+            // App 端后来又改过设置：清掉键盘本地的旧覆盖文件，回到同一份配置
+            try? fm.removeItem(at: oURL)
+            return load(from: sURL)
+        }
+        if hasOverride, let oURL = overrideURL {
+            return load(from: oURL)
+        }
+        if let sURL = sharedURL {
+            return load(from: sURL)
+        }
+        return IMESettings()
+    }
+
     /// 从指定文件读取；文件不存在或根本不是 JSON 对象时回到默认设置，个别字段缺失或读不懂只影响那个字段。
     static func load(from url: URL) -> IMESettings {
         guard let data = try? Data(contentsOf: url),
@@ -83,10 +110,24 @@ struct IMESettings: Codable, Equatable {
         return settings
     }
 
-    /// 只应由 App 调用；键盘没有写权限。
+    /// 只应由 App 调用；未开完全访问时键盘对 App Group 没有写权限。
     func save() throws {
         guard let url = AppGroup.settingsURL else { throw CocoaError(.fileNoSuchFile) }
         try save(to: url)
+    }
+
+    /// 键盘快捷面板保存设置：优先直接写进 App Group（开启完全访问时成功，App 打开后也能读到）；
+    /// 未开启完全访问写不了 App Group 时，退回写进键盘自己的容器。
+    func saveFromKeyboard(sharedURL: URL? = AppGroup.settingsURL, overrideURL: URL?) {
+        if let sURL = sharedURL, (try? save(to: sURL)) != nil {
+            if let oURL = overrideURL {
+                try? FileManager.default.removeItem(at: oURL)
+            }
+            return
+        }
+        if let oURL = overrideURL {
+            try? save(to: oURL)
+        }
     }
 
     /// 写到指定文件（目录不存在会先建），原子替换，键盘不会读到写了一半的文件。

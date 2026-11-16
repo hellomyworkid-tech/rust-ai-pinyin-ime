@@ -37,6 +37,7 @@ Keyboard/
     ContextTracker.swift         本地维护的光标前上文（最多 64 字）
     KeyboardLayout.swift / KeyboardGeometry.swift / GridPacking.swift   键位、排布、候选网格排法
     ShiftState.swift / FieldTraits.swift / CompositionModel.swift
+    PendingCompositionStore.swift 按 documentIdentifier 暂存未完成组合快照（切应用、截图、收起键盘后回到同一输入框继续选字）
   AI/
     ChoiceModel.swift            选词模型协议（测试里换假模型）
     AppleChoiceModel.swift       FoundationModels 引导生成选词（只用端侧模型）
@@ -44,7 +45,7 @@ Keyboard/
     LocalModelLoader.swift       本地 GGUF 模型：后台加载、换模型先卸旧的、加载前一刻查内存（110MB 门槛）、
                                  内存警告卸载
     AIController.swift           按 IMESettings.aiMode 接线
-  UI/                            UIKit 视图，手动排布，无 SwiftUI
+  UI/                            UIKit 视图，手动排布，无 SwiftUI（含空闲工具栏快捷设置按钮与二级面板 QuickSettingsPanelView）
 ```
 
 几条和引擎打交道的规则（细节见 `ime_ffi.h` 和各文件的注释）：
@@ -58,8 +59,11 @@ Keyboard/
 - **个人词库**：在键盘自己的容器里（`Application Support/AIPinyin/user_dict.json`），每段输入结束后
   后台写回。键盘每次出现时调用 `reloadUserDictionaryIfChanged()`：别的宿主里的键盘进程写过就重新读入，
   免得这里下次写盘把那边学到的词盖掉。
-- **设置**：App 写 App Group 里的 `settings.json`，键盘每次出现时读。逐个字段解码：缺字段、
-  读不懂的值只让那一个字段回到默认值（加字段的新版本照样读得懂旧文件）。
+- **设置与快捷面板**：App 写 App Group 里的 `settings.json`；键盘空闲工具栏左上角提供两级防误触快捷设置入口（展开键盘内
+  `QuickSettingsPanelView`，可直接切换 AI 选词模式、候选表情、拼写纠错、按键音与触感反馈，也可点击「打开 AI 拼音」经
+  `aipinyin://` URL scheme 跳转到主应用对应页面）。开启「允许完全访问」时键盘直接写回 `settings.json`，主应用回到前台自动刷新；
+  未开启完全访问时退回写入键盘容器内的 `settings_override.json`，读取时按修改时间与 `settings.json` 取较新的一份。逐个字段解码：
+  缺字段、读不懂的值只让那一个字段回到默认值（加字段的新版本照样读得懂旧文件）。
 
 ## 宿主 App 的结构
 
@@ -261,12 +265,12 @@ xcodebuild -project AIPinyin.xcodeproj -scheme AIPinyin \
 UI 测试里，宿主 App 以 `-hostTest` 启动时 `HostTestSetup` 先把设置写成已知状态：`HOST_TEST_AI_MODE=off|apple|local`
 选 AI 方式，`HOST_TEST_MODEL` / `HOST_TEST_MODEL_ID` 放入并选中模型，`HOST_TEST_TEXT` 给输入框预填上文。
 
-- `KeyboardSmokeTests`（11 条）：聚焦输入框后键盘出现、键高不被压矮；打 nihao 点首选得到「你好」；输入中按逗号先上屏整句再插「，」；
+- `KeyboardSmokeTests`（12 条）：聚焦输入框后键盘出现、键高不被压矮；打 nihao 点首选得到「你好」；输入中按逗号先上屏整句再插「，」；
   退格；切英文直接上屏字母；数字页、符号页；点音节进入单音节选词；在点的音节上选字后回到整句、再点这个音节按退格撤销选字；
-  展开候选网格；打 ok 有 👌 🆗；收起键盘再点输入框；上文「宪法保障公民的合法」下
+  点选输错的音节（如 nei）后按键输入（mei）直接删除原音节并在原处改写；展开候选网格；打 ok 有 👌 🆗；收起键盘再点输入框；上文「宪法保障公民的合法」下
   quanli 的首选是带 AI 标记的「权利」（规则重排）；本地模型在键盘进程里加载并把「誓言」提到首位；深色模式；横屏；
   网址输入框从英文开始。
-- **触屏的音节选字**（`KeySession::touch_syllable_editing`，iOS 打开、Windows 关闭）：在点的音节上选完字回到整句，
+- **触屏的音节选字与改写**（`KeySession::touch_syllable_editing`，iOS 打开、Windows 关闭）：点选某个音节时该音节与右侧对应的整句预览字同步标蓝，直接按字母键会删除被选中的音节并在原处改写新拼音（改写出的单音节或多音节及对应预览字持续标蓝，候选保持整句）；在点的音节上选完字回到整句，
   不自动跳到别的音节，首选是按这次选字重新排过的整句（有 AI 时带 ✦）；选到句尾且整句都已选定才直接上屏。
   点着已选定的音节按退格，撤销那里的选字。在候选栏里选前缀词（「他的名字」）仍是逐段选词：接着选剩下的部分。
 - `AppWalkthroughTests`（7 条）：宿主 App 逐屏截图（`build/screenshots/app/`）、下载暂停 / 继续 / 完成 / 删除、

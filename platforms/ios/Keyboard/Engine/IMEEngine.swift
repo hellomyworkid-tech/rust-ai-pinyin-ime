@@ -60,6 +60,8 @@ struct IMECandidate: Decodable, Equatable {
     let tag: String
     /// 是否由 AI 提到首位
     let aiBoosted: Bool
+    /// 常见易读错字词的正确读音提示（如输 `hundun` 出「馄饨」时为 `"馄 (hun) 饨 (tun)"`）；常规词为 nil
+    var pronunciationHint: String? = nil
 }
 
 /// 整句预览里的一段：(文字, 是否已被用户选定锁定)。Rust 侧是元组，JSON 里是 ["文字", true]
@@ -76,6 +78,23 @@ struct IMESentencePart: Decodable, Equatable {
         var container = try decoder.unkeyedContainer()
         text = try container.decode(String.self)
         pinned = try container.decode(Bool.self)
+    }
+}
+
+/// 原始输入串里的一段字节区间 [start, end)，Rust 侧是元组 (usize, usize)，JSON 里是 [start, end]
+struct IMEByteRange: Decodable, Equatable {
+    let start: Int
+    let end: Int
+
+    init(start: Int, end: Int) {
+        self.start = start
+        self.end = end
+    }
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        start = try container.decode(Int.self)
+        end = try container.decode(Int.self)
     }
 }
 
@@ -102,6 +121,8 @@ struct IMEView: Decodable, Equatable {
     var cursorBytePos = 0
     /// 光标所在音节；非 nil 时候选是「这个音节的选词」
     var activeSyllableIndex: Int?
+    /// 触屏模式下正在原处改写的拼音字节区间；非 nil 时落在该区间内的音节及其对应文字标蓝，但候选保持整句
+    var editedByteRange: IMEByteRange?
     /// AI 语境提示（调试 / 状态展示用）
     var aiSemanticHint = ""
     /// 续写建议（目前引擎侧未启用）
@@ -142,6 +163,10 @@ protocol IMEEngine: AnyObject {
     func setContext(_ textBeforeCursor: String?)
     /// 取消当前输入
     func reset()
+    /// 导出当前未完成组合的快照 JSON（用于切换应用、截图或键盘收起后回到同一输入框时恢复）；空闲时返回 nil
+    func compositionSnapshot() -> String?
+    /// 从 compositionSnapshot() 导出的快照恢复未完成组合
+    func restoreComposition(_ snapshot: String) -> IMEResult
     var isComposing: Bool { get }
     /// 当前是否处于英文直通模式
     var isEnglishMode: Bool { get }
@@ -167,4 +192,9 @@ protocol IMEEngine: AnyObject {
     func loadLocalModel(at url: URL) throws
     func unloadLocalModel()
     var isLocalModelLoaded: Bool { get }
+}
+
+extension IMEEngine {
+    func compositionSnapshot() -> String? { nil }
+    func restoreComposition(_ snapshot: String) -> IMEResult { .passThrough }
 }

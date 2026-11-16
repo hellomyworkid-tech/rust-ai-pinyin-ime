@@ -11,6 +11,8 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
     let toolbar = IdleToolbarView()
     let keyboard = KeyboardView()
     let grid = CandidateGridView()
+    let symbolPanel = SymbolPanelView()
+    let settingsPanel = QuickSettingsPanelView()
     let preview = KeyPreviewView()
     /// 撑出键盘高度的隐形视图
     private let heightSpacer = UIView()
@@ -20,6 +22,7 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
         didSet {
             guard isComposing != oldValue else { return }
             updateVisibility()
+            setNeedsLayout()
         }
     }
 
@@ -28,6 +31,21 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
             guard isGridExpanded != oldValue else { return }
             bar.setExpanded(isGridExpanded)
             updateVisibility()
+        }
+    }
+
+    var isSettingsExpanded = false {
+        didSet {
+            guard isSettingsExpanded != oldValue else { return }
+            updateVisibility()
+        }
+    }
+
+    var isSymbolPanelVisible = false {
+        didSet {
+            guard isSymbolPanelVisible != oldValue else { return }
+            updateVisibility()
+            setNeedsLayout()
         }
     }
 
@@ -58,7 +76,7 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
             equalToConstant: Self.preferredHeight(landscape: false, width: frame.width))
         super.init(frame: frame)
         backgroundColor = KeyboardTheme.background
-        for view in [toolbar, strip, bar, keyboard, grid, preview] as [UIView] {
+        for view in [toolbar, strip, bar, keyboard, grid, symbolPanel, settingsPanel, preview] as [UIView] {
             addSubview(view)
         }
         keyboard.preview = preview
@@ -112,19 +130,27 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
         let keysFrame = CGRect(x: 0, y: top, width: width, height: max(0, bounds.height - top))
         keyboard.frame = keysFrame
         grid.frame = keysFrame
+        symbolPanel.frame = isComposing ? keysFrame : bounds
+        settingsPanel.frame = keysFrame
         toolbar.horizontalInset = inset
         strip.horizontalInset = inset
         bar.horizontalInset = inset
         grid.horizontalInset = inset
+        symbolPanel.horizontalInset = inset
+        settingsPanel.horizontalInset = inset
         keyboard.horizontalInset = inset
     }
 
     private func updateVisibility() {
-        toolbar.isHidden = isComposing
+        let showSettings = !isComposing && isSettingsExpanded
+        let showSymbols = isSymbolPanelVisible && !showSettings && !(isComposing && isGridExpanded)
+        toolbar.isHidden = isComposing || showSymbols
         strip.isHidden = !isComposing
         bar.isHidden = !isComposing
         grid.isHidden = !(isComposing && isGridExpanded)
-        keyboard.isHidden = isComposing && isGridExpanded
+        symbolPanel.isHidden = !showSymbols
+        settingsPanel.isHidden = !showSettings
+        keyboard.isHidden = (isComposing && isGridExpanded) || showSettings || showSymbols
         if keyboard.isHidden { preview.hide() }
     }
 }

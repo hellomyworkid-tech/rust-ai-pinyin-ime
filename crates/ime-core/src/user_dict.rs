@@ -542,6 +542,59 @@ impl UserDict {
         matches.into_iter().map(|(_, _, r)| r).collect()
     }
 
+    /// 根据末尾尚未输完的半截全拼前缀（如用户输入过 `xionghan -> 凶悍` 后敲 `xiongh`，或输入过 `wuzengji -> 武增吉` 后敲 `wuzengj`）
+    /// 检索个人词库中的历史词条，同一个词只保留排最前的一条。
+    pub fn top_prefix_records(&self, prefix_query: &str) -> Vec<UserWordRecord> {
+        let mut seen = std::collections::HashSet::new();
+        self.prefix_matches(prefix_query)
+            .into_iter()
+            .filter(|r| seen.insert(r.text.clone()))
+            .collect()
+    }
+
+    /// 末尾未完成音节前缀 `prefix_query` 匹配到的全部个人词库记录（不去重，供 AI 先验裁决与解码器共同使用）。
+    ///
+    /// 仅当 `prefix_query` 至少 3 个小写字母、且自身不能切分为完整全拼音节（即末尾确实停在未敲完的声母/半截韵母上，
+    /// 如 `xiongh`、`wuzengj`、`rengongzhin`）时触发，避免输入完整单音节 `xiong` 时把双音节习惯词提前置顶。
+    pub fn prefix_matches(&self, prefix_query: &str) -> Vec<UserWordRecord> {
+        let norm_q = Self::normalize_key(prefix_query);
+        if norm_q.len() < 3
+            || !norm_q.bytes().all(|b| b.is_ascii_lowercase())
+            || crate::pinyin::can_segment_as_clean_full_syllables(&norm_q)
+        {
+            return Vec::new();
+        }
+        let now_secs = Self::now_secs();
+        let mut matches: Vec<(f32, UserWordRecord)> = Vec::new();
+        for rec in self.records.values() {
+            if Self::is_polluted_entry(&rec.code_key, &rec.text) {
+                continue;
+            }
+            let rec_norm = Self::normalize_key(&rec.code_key);
+            if rec_norm.len() <= norm_q.len()
+                || rec_norm.len() > norm_q.len() + 5
+                || !rec_norm.starts_with(&norm_q)
+            {
+                continue;
+            }
+            let elapsed = now_secs.saturating_sub(rec.last_updated_secs) as f32;
+            let decayed = rec.dynamic_score * (-self.decay_lambda * elapsed).exp() * 0.90;
+            if decayed <= 0.0 {
+                continue;
+            }
+            let mut cloned = rec.clone();
+            cloned.dynamic_score = decayed;
+            matches.push((decayed, cloned));
+        }
+        matches.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.commit_count.cmp(&a.1.commit_count))
+                .then_with(|| b.1.last_seq.cmp(&a.1.last_seq))
+        });
+        matches.into_iter().map(|(_, r)| r).collect()
+    }
+
     /// 获取某编码下按用户记忆强度排序的所有历史候选记录（最高频/最近使用的排最前）
     pub fn top_user_records(&self, code_key: &str) -> Vec<UserWordRecord> {
         let normalized_key = Self::normalize_key(code_key);

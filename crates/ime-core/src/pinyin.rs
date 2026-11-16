@@ -41,6 +41,67 @@ pub fn is_valid_syllable(s: &str) -> bool {
     syllable_set().contains(s)
 }
 
+/// 判断小写字母串是否为单个合法完整拼音音节（含常用零代价等价写法 `lue`/`nue` -> `lve`/`nve`）
+#[inline]
+pub fn is_valid_or_alias_syllable(s: &str) -> bool {
+    is_valid_syllable(s) || matches!(s, "lue" | "nue")
+}
+
+/// 将零代价等价拼写别名（`lue`/`nue`）归一为词库标准音节键（`lve`/`nve`）
+#[inline]
+pub fn canonical_syllable(s: &str) -> &str {
+    match s {
+        "lue" => "lve",
+        "nue" => "nve",
+        _ => s,
+    }
+}
+
+/// 判断输入子串 `raw_slice`（不含显式隔音符 `'`）本身是否构成单个合法完整拼音音节。
+/// 当多音节词条覆盖该区间却未输入 `'`（如 `jie -> ji'e`、`yue -> yu'e`、`tuan -> tu'an`）时，
+/// 属于无隔音符强拆合法单音节，在解码与候选分层时不应压倒原样单音节汉字。
+#[inline]
+pub fn is_unapostrophed_single_syllable(raw_slice: &str) -> bool {
+    !raw_slice.is_empty()
+        && !raw_slice.contains('\'')
+        && raw_slice.bytes().all(|b| b.is_ascii_lowercase())
+        && is_valid_or_alias_syllable(raw_slice)
+}
+
+/// 判断小写字母串 `s` 是否能完全切分为 1 个或多个标准完整拼音音节（不含单辅音声母简拼）。
+///
+/// 例如 `"zaya"`（`za + ya`）、`"gonghu"`（`gong + hu`）、`"jiewa"`（`jie + wa`）返回 `true`；
+/// `"wzj"`、`"jsj"`、`"xiongh"` 返回 `false`。用于区分真正的多音节全拼输入与纯简拼/未完前缀输入。
+pub fn can_segment_as_clean_full_syllables(s: &str) -> bool {
+    fn dfs(rem: &str, depth: usize) -> bool {
+        if rem.is_empty() {
+            return depth > 0;
+        }
+        if depth >= 16 {
+            return false;
+        }
+        let lead = rem.bytes().take_while(|&b| b == b'\'').count();
+        let clean = &rem[lead..];
+        if clean.is_empty() {
+            return depth > 0;
+        }
+        if !clean.as_bytes()[0].is_ascii_lowercase() {
+            return false;
+        }
+        let max_len = clean.len().min(6);
+        for len in (2..=max_len).rev() {
+            if is_valid_or_alias_syllable(&clean[..len]) && dfs(&clean[len..], depth + 1) {
+                return true;
+            }
+        }
+        if matches!(clean.as_bytes()[0], b'a' | b'e' | b'o') && dfs(&clean[1..], depth + 1) {
+            return true;
+        }
+        false
+    }
+    !s.is_empty() && dfs(s, 0)
+}
+
 /// 模糊音与拼写纠错配置（支持平翘舌、前后鼻音、鼻边音、f/h 模糊及常见按键顺序倒置纠错）
 ///
 /// 代价设计原则：「正确输入永远优先」。

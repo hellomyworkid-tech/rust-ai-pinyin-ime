@@ -187,6 +187,16 @@ impl DualModeAiOrchestrator {
         let inprocess_ref = Arc::clone(&inprocess);
 
         std::thread::spawn(move || {
+            #[cfg(target_vendor = "apple")]
+            {
+                // QOS_CLASS_USER_INITIATED = 0x19：确保端侧模型推理运行在性能核（P-core），避免继承默认/后台线程优先级掉进能效核
+                extern "C" {
+                    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+                }
+                unsafe {
+                    let _ = pthread_set_qos_class_self_np(0x19, 0);
+                }
+            }
             while let Ok(mut job) = rx.recv() {
                 // 若用户在模型思考期间继续快速打字，直接跳过积压的旧拼音，只推理最新一帧
                 while let Ok(newer) = rx.try_recv() {
@@ -656,6 +666,7 @@ mod tests {
             final_score: score,
             ai_boosted: false,
             tag: String::new(),
+            pronunciation_hint: None,
             segments: segments.iter().map(|s| s.to_string()).collect(),
             segment_spans: Vec::new(),
             syllable_spans: Vec::new(),
@@ -834,6 +845,7 @@ mod tests {
                 final_score: 99.0,
                 ai_boosted: false,
                 tag: String::new(),
+                pronunciation_hint: None,
                 segments: vec!["技术".to_string()],
                 segment_spans: Vec::new(),
                 syllable_spans: Vec::new(),
@@ -846,6 +858,7 @@ mod tests {
                 final_score: 98.0,
                 ai_boosted: false,
                 tag: String::new(),
+                pronunciation_hint: None,
                 segments: vec!["级数".to_string()],
                 segment_spans: Vec::new(),
                 syllable_spans: Vec::new(),

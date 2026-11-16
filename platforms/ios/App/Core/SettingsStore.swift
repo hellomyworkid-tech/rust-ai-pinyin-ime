@@ -29,4 +29,12 @@ final class SettingsStore: ObservableObject {
             saveError = "设置没有保存成功：\(error.localizedDescription)"
         }
     }
+
+    /// App 回到前台时重读一次设置（开启完全访问后，用户可能在键盘快捷面板里改过开关）
+    func reload(using loader: () -> IMESettings = { IMESettings.load() }) {
+        let latest = loader()
+        if latest != settings {
+            settings = latest
+        }
+    }
 }

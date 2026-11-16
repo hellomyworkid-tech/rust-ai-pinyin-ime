@@ -7,12 +7,14 @@ enum KeyboardPage: Equatable {
     case symbols
 }
 
-/// 一个键按下后做什么
+/// 一个键按下或上划后做什么
 enum KeyAction: Equatable {
     /// 字母（小写；大小写由上档键决定）
     case letter(Character)
     /// 数字或标点，按 ASCII 定义，中文模式下经 PunctuationMap 换成中文标点
     case symbol(String)
+    /// 原样上屏的字符（中英文模式都不做全角转换，如 x 上划输入半角 `.`）
+    case literal(String)
     case shift
     case backspace
     case space
@@ -31,17 +33,19 @@ enum KeyWidth: Equatable {
 
 struct KeySpec: Equatable {
     let action: KeyAction
+    let swipeUpAction: KeyAction?
     let width: KeyWidth
 
-    init(_ action: KeyAction, _ width: KeyWidth = .unit(1)) {
+    init(_ action: KeyAction, swipeUp: KeyAction? = nil, _ width: KeyWidth = .unit(1)) {
         self.action = action
+        self.swipeUpAction = swipeUp
         self.width = width
     }
 
     /// 字母键和字符键按下时显示放大气泡
     var showsPreview: Bool {
         switch action {
-        case .letter, .symbol: return true
+        case .letter, .symbol, .literal: return true
         default: return false
         }
     }
@@ -49,7 +53,7 @@ struct KeySpec: Equatable {
     /// 功能键用深一点的底色
     var isFunctionKey: Bool {
         switch action {
-        case .letter, .symbol, .space: return false
+        case .letter, .symbol, .literal, .space, .toggleLanguage: return false
         default: return true
         }
     }
@@ -65,30 +69,63 @@ enum KeyboardLayout {
         }
     }
 
-    private static func letters(_ s: String) -> [KeySpec] {
-        s.map { KeySpec(.letter($0)) }
-    }
-
     private static func symbols(_ list: [String], width: KeyWidth = .unit(1)) -> [KeySpec] {
         list.map { KeySpec(.symbol($0), width) }
     }
 
     private static func letterRows(showsGlobe: Bool) -> [[KeySpec]] {
-        var bottom = [KeySpec(.page(.numbers), .unit(1.25))]
-        if showsGlobe { bottom.append(KeySpec(.globe, .unit(1.25))) }
+        let row1: [KeySpec] = [
+            KeySpec(.letter("q"), swipeUp: .symbol("1")),
+            KeySpec(.letter("w"), swipeUp: .symbol("2")),
+            KeySpec(.letter("e"), swipeUp: .symbol("3")),
+            KeySpec(.letter("r"), swipeUp: .symbol("4")),
+            KeySpec(.letter("t"), swipeUp: .symbol("5")),
+            KeySpec(.letter("y"), swipeUp: .symbol("6")),
+            KeySpec(.letter("u"), swipeUp: .symbol("7")),
+            KeySpec(.letter("i"), swipeUp: .symbol("8")),
+            KeySpec(.letter("o"), swipeUp: .symbol("9")),
+            KeySpec(.letter("p"), swipeUp: .symbol("0")),
+        ]
+        let row2: [KeySpec] = [
+            KeySpec(.letter("a"), swipeUp: .symbol("`")),
+            KeySpec(.letter("s"), swipeUp: .symbol("/")),
+            KeySpec(.letter("d"), swipeUp: .symbol(":")),
+            KeySpec(.letter("f"), swipeUp: .symbol(";")),
+            KeySpec(.letter("g"), swipeUp: .symbol("(")),
+            KeySpec(.letter("h"), swipeUp: .symbol(")")),
+            KeySpec(.letter("j"), swipeUp: .symbol("~")),
+            KeySpec(.letter("k"), swipeUp: .symbol("“")),
+            KeySpec(.letter("l"), swipeUp: .symbol("”")),
+        ]
+        let row3Letters: [KeySpec] = [
+            KeySpec(.letter("z"), swipeUp: .symbol("@")),
+            KeySpec(.letter("x"), swipeUp: .literal(".")),
+            KeySpec(.letter("c"), swipeUp: .symbol("#")),
+            KeySpec(.letter("v"), swipeUp: .symbol("\\")),
+            KeySpec(.letter("b"), swipeUp: .symbol("?")),
+            KeySpec(.letter("n"), swipeUp: .symbol("!")),
+            KeySpec(.letter("m"), swipeUp: .symbol("...")),
+        ]
+        let row3 = [KeySpec(.shift, .flexible)] + row3Letters + [KeySpec(.backspace, .flexible)]
+
+        var bottom: [KeySpec]
+        if showsGlobe {
+            bottom = [
+                KeySpec(.page(.numbers), .unit(1.35)),
+                KeySpec(.globe, .unit(1.15)),
+            ]
+        } else {
+            bottom = [
+                KeySpec(.page(.numbers), .unit(1.85)),
+            ]
+        }
         bottom += [
-            KeySpec(.toggleLanguage, .unit(1.25)),
-            KeySpec(.symbol(","), .unit(1)),
+            KeySpec(.symbol(","), swipeUp: .symbol("."), .unit(1)),
             KeySpec(.space, .flexible),
-            KeySpec(.symbol("."), .unit(1)),
-            KeySpec(.returnKey, .unit(2)),
+            KeySpec(.toggleLanguage, .unit(1)),
+            KeySpec(.returnKey, .unit(1.85)),
         ]
-        return [
-            letters("qwertyuiop"),
-            letters("asdfghjkl"),
-            [KeySpec(.shift, .flexible)] + letters("zxcvbnm") + [KeySpec(.backspace, .flexible)],
-            bottom,
-        ]
+        return [row1, row2, row3, bottom]
     }
 
     private static func pageBottomRow(showsGlobe: Bool) -> [KeySpec] {

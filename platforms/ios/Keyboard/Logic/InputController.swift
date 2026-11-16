@@ -121,11 +121,29 @@ final class InputController {
 
     // MARK: - 输入框变化
 
-    /// 换了一个输入框（或键盘重新出现）：清掉输入，按输入框类型决定中英文
-    func beginField(_ traits: FieldTraits) {
+    /// 当前未完成组合的快照；空闲时返回 nil
+    func compositionSnapshot() -> String? {
+        guard let engine, engine.isComposing else { return nil }
+        return engine.compositionSnapshot()
+    }
+
+    /// 换了一个输入框（或键盘重新出现）：清掉输入，按输入框类型决定中英文；
+    /// 若同一输入框有暂存的未完成组合快照且不强制英文，则恢复该组合继续选字
+    func beginField(_ traits: FieldTraits, restoring snapshot: String? = nil) {
         resetComposition()
         context.invalidate()
         forcedEnglish = traits.startsInEnglish
+        if let snapshot, !snapshot.isEmpty, !forcedEnglish {
+            prefersChinese = true
+            let engine = ensureEngine()
+            // 先换成当前输入框的上文再恢复：快照不带上文，恢复后的候选按这个输入框的上文重排
+            context.refresh(from: output?.documentContextBeforeInput)
+            engine.setContext(context.text ?? "")
+            if case .update(let restoredView) = engine.restoreComposition(snapshot) {
+                setView(restoredView)
+                return
+            }
+        }
         guard let engine else {
             onChange?()
             return
@@ -175,6 +193,14 @@ final class InputController {
         insert(PunctuationMap.output(for: ascii, chineseMode: chinese, contextBefore: context.text))
     }
 
+    /// 原样上屏的字符（中英文模式都不经全角转换，如 x 上划输入半角小数点 `.`）
+    func typeLiteral(_ text: String) {
+        if let engine, engine.isComposing {
+            apply(engine.commitFullSentence())
+        }
+        insert(text)
+    }
+
     func space() {
         send(.space) { insert(" ") }
     }
@@ -196,9 +222,9 @@ final class InputController {
         if !forcedEnglish, engine.isEnglishMode != wasEnglish { prefersChinese = !engine.isEnglishMode }
     }
 
-    /// 点选候选，globalIndex 是 pager.candidates 里的下标
-    func selectCandidate(at globalIndex: Int) {
-        guard let engine, engine.isComposing else { return }
+    /// 点选候选，index 是 pager.candidates 里的下标（不一定等于引擎的全局下标，见 CandidatePager）
+    func selectCandidate(at index: Int) {
+        guard let engine, engine.isComposing, let globalIndex = pager.engineIndex(at: index) else { return }
         apply(engine.selectCandidate(at: globalIndex))
     }
 
@@ -207,14 +233,21 @@ final class InputController {
         apply(engine.tapSyllable(at: index))
     }
 
-    /// 往后再取一批候选（一页的量），接在列表后面。不翻引擎的页。取到新候选返回 true
+    /// 往后再取一批候选（一页的量），接在列表后面。不翻引擎的页。取到能显示的新候选返回 true
     @discardableResult
     func loadMoreCandidates() -> Bool {
-        guard let engine, engine.isComposing, pager.hasMore else { return false }
-        let offset = pager.candidates.count
-        let more = engine.candidates(from: offset, count: max(1, pager.pageSize))
-        pager.append(more, at: offset)
-        guard pager.candidates.count > offset else { return false }
+        guard let engine, engine.isComposing else { return false }
+        let shownBefore = pager.candidates.count
+        // 一批全是显示不出来的生僻字时接着取下一批，免得列表停在那里滚不动
+        var attempts = 0
+        while pager.hasMore && pager.candidates.count == shownBefore && attempts < 8 {
+            attempts += 1
+            let offset = pager.fetchedCount
+            let more = engine.candidates(from: offset, count: max(1, pager.pageSize))
+            pager.append(more, at: offset)
+            guard pager.fetchedCount > offset else { break }
+        }
+        guard pager.candidates.count > shownBefore else { return false }
         onChange?()
         return true
     }
@@ -226,6 +259,12 @@ final class InputController {
         pendingAIRefresh = false
         guard let engine, engine.isComposing else { return }
         setView(engine.refreshAfterAI())
+    }
+
+    /// 宿主那边（如本地模型刚加载好）要求按 AI 重排：用户正在看候选列表时先压着，松手或收起后再刷新，
+    /// 不在手指底下换掉候选
+    func requestAIRefresh() {
+        asyncUpdateArrived()
     }
 
     /// 用户正在看候选列表：手指按着候选、往后加载过候选，或者展开了网格

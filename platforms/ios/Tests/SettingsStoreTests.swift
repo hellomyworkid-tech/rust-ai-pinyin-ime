@@ -138,4 +138,67 @@ final class SettingsStoreTests: XCTestCase {
         store.update { $0.haptics = true }
         XCTAssertNil(store.saveError)
     }
+
+    func testKeyboardSaveAndLoadPrefersSharedWhenWritableAndCleansOverride() throws {
+        let overrideURL = directory.appendingPathComponent("KeyboardContainer/settings_override.json")
+        var stale = IMESettings()
+        stale.emojiCandidates = false
+        try stale.save(to: overrideURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: overrideURL.path))
+
+        var updated = IMESettings()
+        updated.aiMode = .off
+        updated.emojiCandidates = true
+        updated.saveFromKeyboard(sharedURL: fileURL, overrideURL: overrideURL)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: overrideURL.path), "写进共享文件成功后应清理旧覆盖文件")
+        XCTAssertEqual(IMESettings.loadForKeyboard(sharedURL: fileURL, overrideURL: overrideURL), updated)
+    }
+
+    func testKeyboardSaveFallsBackToOverrideAndNewerSharedWins() throws {
+        let fm = FileManager.default
+        let roDir = directory.appendingPathComponent("ReadOnlyGroup", isDirectory: true)
+        try fm.createDirectory(at: roDir, withIntermediateDirectories: true)
+        let roSharedURL = roDir.appendingPathComponent("settings.json")
+        let overrideURL = directory.appendingPathComponent("KeyboardContainer/settings_override.json")
+        defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: roDir.path) }
+
+        let initial = IMESettings()
+        try initial.save(to: roSharedURL)
+        try fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -20)], ofItemAtPath: roSharedURL.path)
+        // 模拟未开启完全访问：共享目录不可写
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: roDir.path)
+
+        var fromKeyboard = IMESettings()
+        fromKeyboard.aiMode = .off
+        fromKeyboard.emojiCandidates = false
+        fromKeyboard.fuzzy.typoCorrection = false
+        fromKeyboard.saveFromKeyboard(sharedURL: roSharedURL, overrideURL: overrideURL)
+
+        XCTAssertTrue(fm.fileExists(atPath: overrideURL.path), "共享目录不可写时应回退写入键盘容器")
+        XCTAssertEqual(IMESettings.loadForKeyboard(sharedURL: roSharedURL, overrideURL: overrideURL), fromKeyboard)
+
+        // 随后用户在宿主 App 里修改了设置：共享文件更新时间更晚，应以共享文件为准并清理旧覆盖文件
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: roDir.path)
+        var fromApp = IMESettings()
+        fromApp.aiMode = .local
+        fromApp.localModelID = "qwen2.5-0.5b-q4km"
+        fromApp.emojiCandidates = true
+        try fromApp.save(to: roSharedURL)
+        try fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 20)], ofItemAtPath: roSharedURL.path)
+
+        XCTAssertEqual(IMESettings.loadForKeyboard(sharedURL: roSharedURL, overrideURL: overrideURL), fromApp)
+        XCTAssertFalse(fm.fileExists(atPath: overrideURL.path), "共享文件更新后应清理过期的本地覆盖文件")
+    }
+
+    func testSettingsStoreReloadPicksUpExternalKeyboardChanges() throws {
+        let store = SettingsStore(initial: IMESettings(), persist: { try $0.save(to: self.fileURL) })
+        var external = IMESettings()
+        external.aiMode = .off
+        external.emojiCandidates = false
+        try external.save(to: fileURL)
+
+        store.reload(using: { IMESettings.load(from: self.fileURL) })
+        XCTAssertEqual(store.settings, external)
+    }
 }
