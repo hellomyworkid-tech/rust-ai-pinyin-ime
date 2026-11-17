@@ -1764,6 +1764,41 @@ fn is_single_char_measure_word(w: &str) -> bool {
     )
 }
 
+#[inline]
+fn is_aspectual_preverb_adverb(w: &str) -> bool {
+    matches!(
+        w,
+        "刚" | "刚刚" | "先" | "快" | "已经" | "已" | "终于" | "总算" | "还没"
+    )
+}
+
+#[inline]
+fn is_telic_action_verb(w: &str) -> bool {
+    matches!(
+        w,
+        "收拾" | "整理" | "处理" | "讨论" | "编译" | "构建" | "部署" | "测试" | "调试"
+            | "排查" | "修改" | "优化" | "重构" | "检查" | "核对" | "统计" | "汇报"
+            | "沟通" | "准备" | "研究" | "复习" | "预习" | "洗漱" | "洗澡" | "洗碗"
+            | "洗衣" | "做饭" | "打扫" | "清洁" | "消毒" | "装修" | "搬家" | "打包"
+            | "发货" | "派送" | "审批" | "报销" | "结算" | "对账" | "盘点" | "清点"
+            | "录入" | "备份" | "更新" | "升级" | "安装" | "下载" | "上传" | "导出"
+            | "导入" | "打印" | "复印" | "扫描" | "录制" | "剪辑" | "渲染" | "修图"
+            | "排版" | "校对" | "翻译" | "阅读" | "交代" | "安排" | "布置" | "分配"
+            | "协调" | "解决" | "回复" | "填写" | "签署" | "办理"
+    )
+}
+
+#[inline]
+fn is_place_or_play_prefix(w: &str) -> bool {
+    matches!(
+        w,
+        "出去" | "出来" | "回来" | "过来" | "过去" | "下去" | "上去" | "进来" | "一起"
+            | "一块" | "好好" | "陪你" | "带你" | "找你" | "到处" | "四处" | "怎么"
+            | "这么" | "那么" | "很好" | "喜欢" | "开始" | "继续" | "公园" | "海边"
+            | "家里" | "外面" | "游乐"
+    ) || w.ends_with(['园', '院', '馆', '店', '场', '校', '家', '边', '外', '里'])
+}
+
 /// 计算相邻两词块（`prev_word` -> `edge`）的构词法与量词-名词搭配奖励，供整句 Beam Search 与逐段分步选词共同复用
 pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -> f32 {
     if prev_word.is_empty() {
@@ -1817,6 +1852,32 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
         && !edge.is_fuzzy
     {
         bonus += 1.55;
+    } else if is_aspectual_preverb_adverb(prev_word)
+        && edge.kind == EdgeKind::ChineseWord
+        && edge.syllable_count == 2
+        && !edge.is_fuzzy
+        && !is_chinese_numeral_word(w)
+        && !is_strict_unit_word(w)
+    {
+        bonus += if is_telic_action_verb(w) { 3.15 } else { 1.85 };
+    }
+
+    // 1c. 动结式结果补语「动词 + 完」（如「收拾+完」「编译+完」「先整理+完」）与错切「*手/边/感受 + 十万/一万」抑制
+    let ends_with_telic_verb = is_telic_action_verb(prev_word)
+        || (prev_word.chars().count() >= 3
+            && ["刚刚", "已经", "终于", "总算", "还没", "刚", "先", "快", "已"]
+                .iter()
+                .find_map(|p| prev_word.strip_prefix(p))
+                .is_some_and(is_telic_action_verb));
+    if !edge.is_fuzzy && w == "完" && ends_with_telic_verb {
+        bonus += 3.35;
+    } else if matches!(w, "十万" | "一万" | "百万" | "千万")
+        && (matches!(prev_word, "手" | "边" | "感受" | "干洗")
+            || (prev_word.chars().count() >= 2
+                && prev_word.ends_with('手')
+                && !matches!(prev_word, "到手" | "入手" | "出手" | "转手" | "脱手")))
+    {
+        bonus -= 2.45;
     }
 
     // 1b. 现代汉语高产名词性类后缀（[多字实词] + 区/饭/费/群/店/馆/站/卡/券/感/圈/风/版/号/户/娃）构词补偿，
@@ -2235,9 +2296,44 @@ fn grammar_transition_bonus(
         }
     }
 
-    // 3. 结构助词/时态助词（的/了/着/过/地/得）紧接多字实词或多词短语后的黏着补偿：
-    // 词库中部分形容词自带预组三字词（如「狭窄的」作为单条词只计 1 次步长），而大多数动词/名词短语（如「下载」「吃+公家+饭」）
-    // 需多步组合（额外承担单字 cost 与 1.75 步长惩罚）。对此给予语法黏着补偿，使其与预组多字词处于同一量级。
+    // 3. 结构助词/时态助词（的/了/着/过/地/得）与动结补语框架（刚/先/快 + V + 完）的黏着与步长补偿：
+    // 词库中部分词自带预组三字词（如「处理完」「下载完」「狭窄的」作为单条词只计 1 次步长），而同构高频短语
+    // （如「刚+收拾+完」「先+整理+完」「编译+完」）需多步组合（额外承担单字 cost 与 3.25 步长惩罚）。
+    if !has_common_exact_whole_word && !edge.is_fuzzy {
+        if is_aspectual_preverb_adverb(prev_word)
+            && edge.kind == EdgeKind::ChineseWord
+            && edge.syllable_count == 2
+            && !is_chinese_numeral_word(w)
+            && !is_strict_unit_word(w)
+        {
+            bonus += 2.25;
+        } else if w == "完" && prev_word.chars().count() >= 2 && !prev_word.is_ascii() {
+            let stripped_telic = prev_word.chars().count() >= 3
+                && ["刚刚", "已经", "终于", "总算", "还没", "刚", "先", "快", "已"]
+                    .iter()
+                    .find_map(|p| prev_word.strip_prefix(p))
+                    .is_some_and(is_telic_action_verb);
+            let preceded_by_aspect_adv = stripped_telic
+                || state
+                    .edges
+                    .iter()
+                    .rev()
+                    .filter(|e| !e.text.is_empty())
+                    .nth(1)
+                    .is_some_and(|e| is_aspectual_preverb_adverb(&e.text));
+            if is_telic_action_verb(prev_word) || stripped_telic {
+                bonus += if preceded_by_aspect_adv { 3.65 } else { 2.95 };
+            } else if prev_word.chars().count() == 2
+                && preceded_by_aspect_adv
+                && !is_place_or_play_prefix(prev_word)
+                && !is_chinese_numeral_word(prev_word)
+                && !is_classifier_phrase(prev_word)
+                && !matches!(prev_word, "刚正" | "现正")
+            {
+                bonus += 4.35;
+            }
+        }
+    }
     if prev_word.chars().count() >= 2 || state.edges.len() >= 2 {
         if w == "的" {
             bonus += 2.25;
@@ -2530,6 +2626,48 @@ fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan
     let total_syl_len: usize = syls.iter().map(|s| s.len()).sum();
     let span_len = edge.end.saturating_sub(edge.start);
 
+    // 若该边包含模糊音/纠错、半拼补全或显式隔音符，导致各音节与原输入字节并非逐段等长（例如 `gangshou` 模糊匹配到
+    // `gan'shou` 时，贪心 `starts_with("gan")` 会把 `gang` 的韵尾 `g` 错误粘到后一音节成 `gshou`；
+    // 又如 `gangsou` 匹配 `gan'shou` 时总长虽同为 7，但真实切分应为 `4 + 3` 而非 `3 + 4`），
+    // 先在整条边内部做全音节回溯对齐，保证每个音节切在真实拼音边界上。
+    let raw_edge_slice = input.get(edge.start..edge.end).unwrap_or("");
+    let need_backtrack_align = !raw_edge_slice.is_empty()
+        && edge.kind != EdgeKind::AbbrevPinyin
+        && span_len != syls.len()
+        && (edge.is_fuzzy || total_syl_len != span_len || raw_edge_slice.contains('\''));
+    if need_backtrack_align {
+        let fuzzy = crate::pinyin::FuzzyPinyinConfig::default();
+        if let Some(aligned_ranges) = align_edge_syllables(raw_edge_slice, &syls, &fuzzy) {
+            let mut aligned_out = Vec::with_capacity(aligned_ranges.len());
+            for (idx, (rel_s, rel_e)) in aligned_ranges.into_iter().enumerate() {
+                let s = edge.start + rel_s;
+                let e = edge.start + rel_e;
+                let actual_code = input
+                    .get(s..e)
+                    .unwrap_or(syls[idx])
+                    .trim_matches('\'')
+                    .to_string();
+                let ch_text = chars
+                    .get(idx)
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| edge.text.clone());
+                aligned_out.push(SegmentSpan {
+                    start: s,
+                    end: e,
+                    text: ch_text,
+                    code_key: if actual_code.is_empty() {
+                        syls[idx].to_string()
+                    } else {
+                        actual_code
+                    },
+                });
+            }
+            if !aligned_out.is_empty() {
+                return aligned_out;
+            }
+        }
+    }
+
     let mut out = Vec::with_capacity(syls.len());
     let mut cur = edge.start;
 
@@ -2619,5 +2757,87 @@ fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan
         });
     }
     out
+}
+
+/// 在单条多音节边内部对原始输入切片 `raw` 与目标拼音序列 `syls` 做回溯边界对齐，
+/// 返回每个音节在 `raw` 内的相对字节区间 `(start, end)`，杜绝前后鼻音模糊时把 `gang` 切成 `gan + g...`。
+fn align_edge_syllables(
+    raw: &str,
+    syls: &[&str],
+    fuzzy: &crate::pinyin::FuzzyPinyinConfig,
+) -> Option<Vec<(usize, usize)>> {
+    fn piece_matches(
+        piece: &str,
+        target: &str,
+        fuzzy: &crate::pinyin::FuzzyPinyinConfig,
+    ) -> u8 {
+        if piece == target {
+            3
+        } else if piece.len() >= 2 && fuzzy.expand_fuzzy(piece).iter().any(|(s, _)| s == target) {
+            2
+        } else if !piece.is_empty() && target.starts_with(piece) {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn dfs(
+        raw: &str,
+        pos: usize,
+        syls: &[&str],
+        fuzzy: &crate::pinyin::FuzzyPinyinConfig,
+        out: &mut Vec<(usize, usize)>,
+    ) -> bool {
+        let mut cur = pos;
+        while cur < raw.len() && raw.as_bytes()[cur] == b'\'' {
+            cur += 1;
+        }
+        if syls.is_empty() {
+            return cur >= raw.len();
+        }
+        let target = syls[0];
+        if syls.len() == 1 {
+            let piece = raw[cur..].trim_end_matches('\'');
+            if piece_matches(piece, target, fuzzy) > 0 {
+                out.push((cur, raw.len()));
+                return true;
+            }
+            return false;
+        }
+        let rem = &raw[cur..];
+        let rem_after = syls.len() - 1;
+        let max_try = rem.len().saturating_sub(rem_after).min(6);
+        if max_try == 0 {
+            return false;
+        }
+        // 按匹配质量（3=精确音节，2=模糊音/手误音节，1=简拼/半音节前缀）分轮回溯，优先采用高置信切分
+        for tier in [3u8, 2, 1] {
+            for try_len in (1..=max_try).rev() {
+                if !rem.is_char_boundary(try_len) {
+                    continue;
+                }
+                let piece = &rem[..try_len];
+                if piece.contains('\'') {
+                    continue;
+                }
+                if piece_matches(piece, target, fuzzy) == tier {
+                    out.push((cur, cur + try_len));
+                    if dfs(raw, cur + try_len, &syls[1..], fuzzy, out) {
+                        return true;
+                    }
+                    out.pop();
+                }
+            }
+        }
+        false
+    }
+
+    let mut out = Vec::with_capacity(syls.len());
+    if dfs(raw, 0, syls, fuzzy, &mut out) {
+        Some(out)
+    } else {
+        None
+    }
 }
 

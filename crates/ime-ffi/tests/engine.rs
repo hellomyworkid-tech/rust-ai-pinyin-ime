@@ -1924,3 +1924,38 @@ fn si_prioritizes_four_and_numeral_unit_phrases_rank_first() {
         }
     }
 }
+
+#[test]
+fn fuzzy_nasal_syllable_spans_never_strand_g_and_gangshoushiwan_ranks_first() {
+    let engine = engine();
+
+    // 1) 当输入 `gangshou` 首选落入前后鼻音纠错 `gan'shou`（「感受」）时，
+    //    音节栏切分必须是 `gang` (0..4) + `shou` (4..8)，绝不能把 `g` 粘到后一音节成 `gan` + `gshou`
+    let gs = type_letters(&engine, "gangshou");
+    let spans = gs["view"]["syllable_spans"].as_array().unwrap();
+    let codes: Vec<&str> = spans.iter().map(|s| s["code_key"].as_str().unwrap()).collect();
+    assert_eq!(codes, vec!["gang", "shou"]);
+    assert_eq!(spans[0]["start"], 0);
+    assert_eq!(spans[0]["end"], 4);
+    assert_eq!(spans[1]["start"], 4);
+    assert_eq!(spans[1]["end"], 8);
+    assert_eq!(gs["view"]["preedit_text"], "gang'shou");
+    engine.reset();
+
+    // 2) 动结补语构式「刚/先/快 + 动词 + 完」首选与音节切分验证
+    for (py, want, want_preedit) in [
+        ("gangshoushiwan", "刚收拾完", "gang'shou'shi'wan"),
+        ("kuaishoushiwan", "快收拾完", "kuai'shou'shi'wan"),
+        ("xianshoushiwan", "先收拾完", "xian'shou'shi'wan"),
+        ("gangzhengliwan", "刚整理完", "gang'zheng'li'wan"),
+        ("xianzhengliwan", "先整理完", "xian'zheng'li'wan"),
+        ("gangtaolunwan", "刚讨论完", "gang'tao'lun'wan"),
+        ("shoushiwan", "收拾完", "shou'shi'wan"),
+        ("bianyiwan", "编译完", "bian'yi'wan"),
+    ] {
+        let out = type_letters(&engine, py);
+        assert_eq!(top_text(&out), want, "{py}");
+        assert_eq!(out["view"]["preedit_text"], want_preedit, "{py} preedit");
+        engine.reset();
+    }
+}
