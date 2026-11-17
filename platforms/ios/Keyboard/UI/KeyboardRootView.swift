@@ -10,10 +10,48 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
     let bar = CandidateBarView()
     let toolbar = IdleToolbarView()
     let keyboard = KeyboardView()
-    let grid = CandidateGridView()
-    let symbolPanel = SymbolPanelView()
-    let settingsPanel = QuickSettingsPanelView()
     let preview = KeyPreviewView()
+
+    /// 展开候选网格、符号面板、快捷设置面板均按需懒加载：
+    /// 冷启动唤起键盘（99% 处于主字母页）时不创建任何 UICollectionView 或 SwiftUI UIHostingController，首帧毫秒级上屏。
+    private(set) var gridIfLoaded: CandidateGridView?
+    private(set) var symbolPanelIfLoaded: SymbolPanelView?
+    private(set) var settingsPanelIfLoaded: QuickSettingsPanelView?
+
+    var onCreateGrid: ((CandidateGridView) -> Void)?
+    var onCreateSymbolPanel: ((SymbolPanelView) -> Void)?
+    var onCreateSettingsPanel: ((QuickSettingsPanelView) -> Void)?
+
+    var grid: CandidateGridView {
+        if let existing = gridIfLoaded { return existing }
+        let created = CandidateGridView()
+        gridIfLoaded = created
+        insertSubview(created, belowSubview: preview)
+        onCreateGrid?(created)
+        setNeedsLayout()
+        return created
+    }
+
+    var symbolPanel: SymbolPanelView {
+        if let existing = symbolPanelIfLoaded { return existing }
+        let created = SymbolPanelView()
+        symbolPanelIfLoaded = created
+        insertSubview(created, belowSubview: preview)
+        onCreateSymbolPanel?(created)
+        setNeedsLayout()
+        return created
+    }
+
+    var settingsPanel: QuickSettingsPanelView {
+        if let existing = settingsPanelIfLoaded { return existing }
+        let created = QuickSettingsPanelView()
+        settingsPanelIfLoaded = created
+        insertSubview(created, belowSubview: preview)
+        onCreateSettingsPanel?(created)
+        setNeedsLayout()
+        return created
+    }
+
     /// 撑出键盘高度的隐形视图
     private let heightSpacer = UIView()
     private let heightConstraint: NSLayoutConstraint
@@ -76,7 +114,7 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
             equalToConstant: Self.preferredHeight(landscape: false, width: frame.width))
         super.init(frame: frame)
         backgroundColor = KeyboardTheme.background
-        for view in [toolbar, strip, bar, keyboard, grid, symbolPanel, settingsPanel, preview] as [UIView] {
+        for view in [toolbar, strip, bar, keyboard, preview] as [UIView] {
             addSubview(view)
         }
         keyboard.preview = preview
@@ -129,28 +167,32 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
         bar.frame = CGRect(x: 0, y: stripHeight + 1, width: width, height: top - stripHeight - 1)
         let keysFrame = CGRect(x: 0, y: top, width: width, height: max(0, bounds.height - top))
         keyboard.frame = keysFrame
-        grid.frame = keysFrame
-        symbolPanel.frame = isComposing ? keysFrame : bounds
-        settingsPanel.frame = keysFrame
+        gridIfLoaded?.frame = keysFrame
+        symbolPanelIfLoaded?.frame = isComposing ? keysFrame : bounds
+        settingsPanelIfLoaded?.frame = keysFrame
         toolbar.horizontalInset = inset
         strip.horizontalInset = inset
         bar.horizontalInset = inset
-        grid.horizontalInset = inset
-        symbolPanel.horizontalInset = inset
-        settingsPanel.horizontalInset = inset
+        gridIfLoaded?.horizontalInset = inset
+        symbolPanelIfLoaded?.horizontalInset = inset
+        settingsPanelIfLoaded?.horizontalInset = inset
         keyboard.horizontalInset = inset
     }
 
     private func updateVisibility() {
+        let showGrid = isComposing && isGridExpanded
         let showSettings = !isComposing && isSettingsExpanded
-        let showSymbols = isSymbolPanelVisible && !showSettings && !(isComposing && isGridExpanded)
+        let showSymbols = isSymbolPanelVisible && !showSettings && !showGrid
         toolbar.isHidden = isComposing || showSymbols
         strip.isHidden = !isComposing
         bar.isHidden = !isComposing
-        grid.isHidden = !(isComposing && isGridExpanded)
-        symbolPanel.isHidden = !showSymbols
-        settingsPanel.isHidden = !showSettings
-        keyboard.isHidden = (isComposing && isGridExpanded) || showSettings || showSymbols
+        if showGrid { _ = grid }
+        if showSymbols { _ = symbolPanel }
+        if showSettings { _ = settingsPanel }
+        gridIfLoaded?.isHidden = !showGrid
+        symbolPanelIfLoaded?.isHidden = !showSymbols
+        settingsPanelIfLoaded?.isHidden = !showSettings
+        keyboard.isHidden = showGrid || showSettings || showSymbols
         if keyboard.isHidden { preview.hide() }
     }
 }

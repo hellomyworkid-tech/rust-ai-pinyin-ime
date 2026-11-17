@@ -38,10 +38,15 @@ final class AppleModelChooser {
     }
 
     var isAvailable: Bool { model.isAvailable }
+    var knownAvailability: Bool? { model.knownAvailability }
     var isBusy: Bool { running != nil }
 
+    func refreshAvailability() async -> Bool {
+        await model.refreshAvailability()
+    }
+
     func prewarm() {
-        guard model.isAvailable else { return }
+        if model.knownAvailability == false { return }
         model.prewarm()
     }
 
@@ -52,7 +57,7 @@ final class AppleModelChooser {
             cancelledAhead = nil
             return
         }
-        guard model.isAvailable, request.candidates.count >= 2 else {
+        guard model.knownAvailability != false, request.candidates.count >= 2 else {
             deliver?(request.id, nil)
             return
         }

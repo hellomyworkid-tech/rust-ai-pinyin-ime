@@ -455,6 +455,7 @@ impl BilingualDecoder {
                         }
                     }
                     bg_bonus += grammar_transition_bonus(
+                        lexicon,
                         state,
                         prev_word,
                         edge,
@@ -735,21 +736,22 @@ impl BilingualDecoder {
         const MAX_PREFIX_CHARS: usize = 200;
         /// 拆短前缀音节（如 `jie` 里的 `ji`）的单字另算上限，只在单音节或句末仅剩一个音节时出现
         const MAX_SPLIT_PREFIX_CHARS: usize = 200;
-        let prev_pinned_word: Option<&str> = if unpinned_start > 0 {
+        let prev_pinned_entry: Option<(&str, &str)> = if unpinned_start > 0 {
             pinned_segments
                 .iter()
                 .filter(|(_, (end, _))| *end <= unpinned_start)
                 .max_by_key(|(_, (end, _))| *end)
-                .map(|(_, (_, txt))| txt.as_str())
+                .map(|(&start, &(end, ref txt))| (txt.as_str(), &lattice.input[start..end]))
         } else {
-            context_tail.last().map(|s| s.as_str())
+            context_tail.last().map(|s| (s.as_str(), ""))
         };
         let rank_cost = |e: &LatticeEdge| -> f32 {
             let raw = &lattice.input[e.start..e.end];
-            let ctx_bonus = if let Some(pw) = prev_pinned_word {
+            let ctx_bonus = if let Some((pw, pw_raw)) = prev_pinned_entry {
                 lexicon.bigram_bonus(pw, &e.text)
                     + user_dict.bigram_boost(pw, &e.text)
                     + word_pair_collocation_bonus(pw, e)
+                    + separable_vo_bonus_from_code(lexicon, pw, pw_raw, e)
             } else {
                 0.0
             };
@@ -2119,8 +2121,106 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
     bonus
 }
 
+#[inline]
+fn is_separable_vo_verb_char(c: char) -> bool {
+    matches!(
+        c,
+        '交' | '缴' | '报' | '退' | '免' | '逃' | '补' | '付' | '收' | '汇' | '贷' | '存'
+            | '取' | '还' | '借' | '赚' | '挣' | '赔' | '亏' | '花' | '省' | '罚' | '捐'
+            | '充' | '续' | '欠' | '请' | '休' | '放' | '开' | '散' | '聚' | '赴' | '上'
+            | '下' | '加' | '值' | '排' | '插' | '签' | '写' | '填' | '辞' | '离' | '结'
+            | '求' | '订' | '办' | '领' | '挂' | '销' | '买' | '卖' | '打' | '刷' | '发'
+            | '验' | '洗' | '泡' | '冲' | '睡' | '理' | '烫' | '染' | '剪' | '跑' | '跳'
+            | '唱' | '游' | '吵' | '帮' | '吃' | '受' | '生' | '出' | '回' | '入' | '毕'
+            | '创' | '停' | '超' | '租' | '住' | '搬' | '投' | '检' | '记' | '算' | '对'
+            | '转'
+    )
+}
+
+#[inline]
+fn is_separable_vo_object_char(c: char) -> bool {
+    matches!(
+        c,
+        '税' | '费' | '款' | '钱' | '账' | '单' | '票' | '价' | '货' | '假' | '班' | '会'
+            | '课' | '学' | '业' | '职' | '差' | '婚' | '礼' | '澡' | '觉' | '脸' | '头'
+            | '发' | '牙' | '步' | '舞' | '歌' | '泳' | '球' | '牌' | '架' | '警' | '名'
+            | '号' | '队' | '卡' | '字' | '约' | '证' | '险' | '车' | '房' | '院' | '门'
+            | '国' | '忙' | '亏' | '当' | '罪' | '气' | '火'
+    )
+}
+
+/// 现代汉语动宾离合词拆插还原（如「交了+税」←「交税」、「请了+假」←「请假」、「开了+会」←「开会」、「辞了+职」←「辞职」）：
+/// 直接在零拷贝词库 `lexicon` 中验证还原后的双字词 `VO` 是否为真实高频词条（`cost < 12.6`），
+/// 无需手工穷举离合词表，同时自动排除非离合假搭配（如 `*交睡`、`*请加`、`*开回`、`*辞值` 均不在词库中）。
+fn separable_vo_bonus_from_code(
+    lexicon: &CompiledLexicon,
+    prev_word: &str,
+    prev_code: &str,
+    edge: &LatticeEdge,
+) -> f32 {
+    if edge.is_fuzzy || edge.syllable_count != 1 || edge.kind != EdgeKind::ChineseChar {
+        return 0.0;
+    }
+    let mut pw_chars = prev_word.chars();
+    let (Some(v_char), Some(asp_char), None) =
+        (pw_chars.next(), pw_chars.next(), pw_chars.next())
+    else {
+        return 0.0;
+    };
+    if !matches!(asp_char, '了' | '过' | '完' | '着') || !is_separable_vo_verb_char(v_char) {
+        return 0.0;
+    }
+    let mut o_chars = edge.text.chars();
+    let (Some(o_char), None) = (o_chars.next(), o_chars.next()) else {
+        return 0.0;
+    };
+    if !is_separable_vo_object_char(o_char) {
+        return 0.0;
+    }
+
+    let clean_prev = prev_code.trim_matches('\'');
+    let v_syl = if let Some((first, _)) = clean_prev.split_once('\'') {
+        first
+    } else {
+        let asp_suf = match asp_char {
+            '了' => "le",
+            '过' => "guo",
+            '完' => "wan",
+            '着' => "zhe",
+            _ => return 0.0,
+        };
+        match clean_prev.strip_suffix(asp_suf) {
+            Some(s) if !s.is_empty() => s,
+            _ => return 0.0,
+        }
+    };
+    let o_syl = edge.code_key.trim_matches('\'');
+    if v_syl.is_empty() || o_syl.is_empty() {
+        return 0.0;
+    }
+    let vo_key = format!("{v_syl}'{o_syl}");
+    let vo_text = format!("{v_char}{o_char}");
+    for id in lexicon.syllable_trie().exact_lookup(&vo_key) {
+        let entry = lexicon.entry(id);
+        if entry.text() == vo_text {
+            let vo_cost = crate::lattice::calibrated_word_cost(
+                entry.text(),
+                entry.syllable_key(),
+                entry.cost(),
+            );
+            if vo_cost < 12.6 {
+                let cond_cost = (vo_cost - 8.80).max(1.80);
+                return (edge.base_cost + 2.70 - cond_cost).clamp(3.20, 11.80);
+            }
+            break;
+        }
+    }
+    0.0
+}
+
 /// 现代汉语语法结构与虚词同音搭配奖励（在 Beam Search 转移时实时消歧「再/在」「吧/把」「的/地/得」「了/乐」）
 fn grammar_transition_bonus(
+    lexicon: &CompiledLexicon,
     state: &BeamState,
     prev_word: &str,
     edge: &LatticeEdge,
@@ -2130,6 +2230,48 @@ fn grammar_transition_bonus(
     let mut bonus = word_pair_collocation_bonus(prev_word, edge);
     let w = edge.text.as_str();
     let is_end = edge.end == n && edge.start > 0;
+
+    // 0a. 动宾离合词拆插（`V了/V过/V完 + O` 或分字锁定 `V + 了/过/完 + O`，如「交了+税」「请了+假」「开了+会」「辞了+职」）
+    //     与句末双「了」构式（`V了O了`，如「交了税了」）
+    if !has_common_exact_whole_word {
+        let state_vo_bonus = |st_edges: &[LatticeEdge], target: &LatticeEdge| -> f32 {
+            let mut rev = st_edges.iter().rev().filter(|e| !e.text.is_empty());
+            let Some(last_e) = rev.next() else {
+                return 0.0;
+            };
+            let direct = separable_vo_bonus_from_code(lexicon, &last_e.text, &last_e.code_key, target);
+            if direct > 0.0 {
+                return direct;
+            }
+            if matches!(last_e.text.as_str(), "了" | "过" | "完" | "着") {
+                if let Some(v_e) = rev.next() {
+                    if v_e.text.chars().count() == 1 {
+                        let combined_word = format!("{}{}", v_e.text, last_e.text);
+                        let combined_code = format!("{}'{}", v_e.code_key, last_e.code_key);
+                        return separable_vo_bonus_from_code(
+                            lexicon,
+                            &combined_word,
+                            &combined_code,
+                            target,
+                        );
+                    }
+                }
+            }
+            0.0
+        };
+
+        let vo_b = state_vo_bonus(&state.edges, edge);
+        if vo_b > 0.0 {
+            bonus += vo_b;
+        } else if w == "了" && is_end && !edge.is_fuzzy {
+            if let Some(o_pos) = state.edges.iter().rposition(|e| !e.text.is_empty()) {
+                let o_edge = &state.edges[o_pos];
+                if state_vo_bonus(&state.edges[..o_pos], o_edge) > 0.0 {
+                    bonus += 2.65;
+                }
+            }
+        }
+    }
 
     // 0. 封闭类「数词 + 多音节单位词 / 单字度量词 + 名词」独立性偏差补偿（PMI Compensation）：
     //    词库仅预组了极少数数字+单位（如仅收「十平方」未收「四平方/五平方/七平方」），多段拼接天然比预组整词多计一次

@@ -512,4 +512,89 @@ final class AIWiringTests: XCTestCase {
         XCTAssertEqual(loader1.state, .idle)
         XCTAssertEqual(loader2.state, .unloadedForMemory)
     }
+
+    @MainActor
+    private final class ColdStartChoiceModel: ChoiceModel {
+        var knownAvailability: Bool?
+        var resolvedAvailability = true
+        var prewarmCount = 0
+        private var pendingResult: Bool?
+        private var continuation: CheckedContinuation<Bool, Never>?
+
+        var isAvailable: Bool {
+            XCTFail("冷启动未知可用性时不应在主线程同步读取 isAvailable")
+            return resolvedAvailability
+        }
+
+        func refreshAvailability() async -> Bool {
+            let value: Bool
+            if let pending = pendingResult {
+                pendingResult = nil
+                value = pending
+            } else {
+                value = await withCheckedContinuation { cont in
+                    continuation = cont
+                }
+            }
+            knownAvailability = value
+            return value
+        }
+
+        func resolve(_ available: Bool) {
+            resolvedAvailability = available
+            if let cont = continuation {
+                continuation = nil
+                cont.resume(returning: available)
+            } else {
+                pendingResult = available
+            }
+        }
+
+        func prewarm() {
+            prewarmCount += 1
+        }
+
+        func choose(_ request: IMEChoiceRequest) async throws -> String? {
+            request.candidates.first
+        }
+    }
+
+    func testColdStartAppleModeProbesAvailabilityWithoutBlockingMainThread() async {
+        let model = ColdStartChoiceModel()
+        let ai = AIController(chooser: AppleModelChooser(model: model))
+        let engine = RecordingEngine()
+        var settings = IMESettings()
+        settings.aiMode = .apple
+
+        ai.attach(engine)
+        ai.apply(settings)
+        // 后台探测完成前：主线程零阻塞返回，状态显示准备中，不提前触发 isAvailable
+        XCTAssertEqual(ai.statusText, "AI 选词准备中…")
+        XCTAssertNil(engine.onChoiceRequest)
+
+        let ready = expectation(description: "异步可用性探测完成")
+        ai.onStatusChange = { status in
+            if status == "AI 选词 · Apple 端侧模型" { ready.fulfill() }
+        }
+        await Task.yield()
+        model.resolve(true)
+        await fulfillment(of: [ready], timeout: 2)
+        XCTAssertNotNil(engine.onChoiceRequest)
+        XCTAssertEqual(model.prewarmCount, 1)
+    }
+
+    func testPendingCompositionStoreSkipsHostXPCWhenNoSnapshotExists() {
+        let missingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nonexistent-\(UUID().uuidString).json")
+        let store = PendingCompositionStore(fileURL: missingURL)
+        XCTAssertFalse(store.mayHaveEntries)
+
+        let docID = UUID()
+        store.save("{\"buf\":\"ni\"}", for: docID)
+        XCTAssertTrue(store.mayHaveEntries)
+
+        store.remove(for: docID)
+        try? FileManager.default.removeItem(at: missingURL)
+        XCTAssertFalse(store.mayHaveEntries)
+    }
 }

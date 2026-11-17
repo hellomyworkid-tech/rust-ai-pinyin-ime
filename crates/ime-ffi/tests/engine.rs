@@ -1959,3 +1959,60 @@ fn fuzzy_nasal_syllable_spans_never_strand_g_and_gangshoushiwan_ranks_first() {
         engine.reset();
     }
 }
+
+#[test]
+fn separable_verb_object_phrases_rank_first_unpinned_and_pinned() {
+    let engine = engine();
+
+    for (py, want) in [
+        ("jiaoleshuile", "交了税了"),
+        ("jiaoleshui", "交了税"),
+        ("baoleshui", "报了税"),
+        ("tuileshui", "退了税"),
+        ("jiaolefeile", "交了费了"),
+        ("qinglejiale", "请了假了"),
+        ("kailehuile", "开了会了"),
+        ("qianlezile", "签了字了"),
+        ("cilezhile", "辞了职了"),
+        ("baolejingle", "报了警了"),
+        ("tuilehuole", "退了货了"),
+        ("falehuole", "发了货了"),
+        ("shuilejiaole", "睡了觉了"),
+        ("gualehaole", "挂了号了"),
+    ] {
+        let out = type_letters(&engine, py);
+        assert_eq!(top_text(&out), want, "{py}");
+        engine.reset();
+    }
+
+    // 场景 A：用户先点选双字前缀「交了」固定前两音节，整句预览为「交了税了」，剩余 `shuile` 首选为「税了」
+    let first = type_letters(&engine, "jiaoleshuile");
+    let cands = first["view"]["visible_candidates"].as_array().unwrap();
+    let jiaole_idx = cands.iter().position(|c| c["text"] == "交了").unwrap();
+    let after_pin = json(&engine.select_candidate(jiaole_idx));
+    assert_eq!(after_pin["view"]["composed_full_sentence"], "交了税了");
+    assert_eq!(top_text(&after_pin), "税了");
+    engine.reset();
+
+    // 场景 B：触屏逐音节点击固定 `jiao` ->「交」、`le` ->「了」（复现截图里两个独立单字固定态），回到整句模式首选仍为「交了税了」
+    type_letters(&engine, "jiaoleshuile");
+    let s0 = json(&engine.tap_syllable(0));
+    let jiao_idx = s0["view"]["visible_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|c| c["text"] == "交")
+        .unwrap();
+    engine.select_candidate(jiao_idx);
+    let s1 = json(&engine.tap_syllable(1));
+    let le_idx = s1["view"]["visible_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|c| c["text"] == "了")
+        .unwrap();
+    let after_two_syl_pins = json(&engine.select_candidate(le_idx));
+    assert_eq!(after_two_syl_pins["view"]["composed_full_sentence"], "交了税了");
+    assert_eq!(top_text(&after_two_syl_pins), "交了税了");
+    engine.reset();
+}

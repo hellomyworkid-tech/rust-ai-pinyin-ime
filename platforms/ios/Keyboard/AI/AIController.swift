@@ -21,6 +21,8 @@ final class AIController {
 
     /// Apple 模式下这次出现走哪条路
     private enum AppleRoute: Equatable {
+        /// 后台正在探测 Apple 端侧模型是否可用（冷启动守护进程休眠时不阻塞主线程）
+        case probing
         /// Apple 端侧模型回答选词请求
         case apple
         /// Apple 端侧模型用不了，改用设置里选中的本地模型
@@ -33,6 +35,8 @@ final class AIController {
     /// 否则可用性中途变好后，本地模型一有状态变化（加载完、内存警告卸掉），状态就会说成在用 Apple 端侧模型，
     /// 而选词器其实没有接上
     private var appleRoute = AppleRoute.rules
+    private var applyGeneration: UInt64 = 0
+    private var probeTask: Task<Void, Never>?
 
     init(chooser: AppleModelChooser, localLoader: LocalModelLoader = LocalModelLoader(),
          localModelURL: @escaping (IMESettings) -> URL? = { ModelCatalog.find($0.localModelID)?.localURL }) {
@@ -42,9 +46,9 @@ final class AIController {
         localLoader.onStateChange = { [weak self] _ in self?.statusChanged() }
     }
 
-    /// 看一次 Apple 端侧模型的可用性，定下 Apple 模式的路线
-    private func chooseAppleRoute(_ settings: IMESettings) -> AppleRoute {
-        if chooser.isAvailable { return .apple }
+    /// 根据给定的可用性结果定下 Apple 模式的路线
+    private func resolveAppleRoute(_ settings: IMESettings, available: Bool) -> AppleRoute {
+        if available { return .apple }
         if settings.localModelID != nil, let url = localModelURL(settings) { return .localFallback(url) }
         return .rules
     }
@@ -76,26 +80,42 @@ final class AIController {
     /// 键盘每次出现（首帧之后）调用
     func apply(_ newSettings: IMESettings) {
         settings = newSettings
-        // 引擎还没建好时也先定下来：状态文字要用（引擎建好后 attach 会再调一次 apply）
-        appleRoute = newSettings.aiMode == .apple ? chooseAppleRoute(newSettings) : .rules
+        applyGeneration &+= 1
+        probeTask?.cancel()
+        probeTask = nil
+
+        if newSettings.aiMode == .apple {
+            if let known = chooser.knownAvailability {
+                appleRoute = resolveAppleRoute(newSettings, available: known)
+                // 顺便在后台静默刷新一次缓存，供下一次键盘出现使用（绝不改变本次已锁定的 appleRoute）
+                let chooser = self.chooser
+                Task { _ = await chooser.refreshAvailability() }
+            } else {
+                // 冷启动首次尚无可用性缓存：先走非阻塞 probing，等后台探测返回后再锁定本次路线
+                appleRoute = .probing
+                let generation = applyGeneration
+                probeTask = Task { [weak self] in
+                    guard let self else { return }
+                    let available = await self.chooser.refreshAvailability()
+                    guard !Task.isCancelled,
+                          self.applyGeneration == generation,
+                          self.settings.aiMode == .apple else { return }
+                    self.appleRoute = self.resolveAppleRoute(self.settings, available: available)
+                    if let engine = self.engine {
+                        self.wireAppleRoute(into: engine)
+                    }
+                    self.statusChanged()
+                }
+            }
+        } else {
+            appleRoute = .rules
+        }
+
         defer { statusChanged() }
         guard let engine else { return }
         switch newSettings.aiMode {
         case .apple:
-            switch appleRoute {
-            case .apple:
-                localLoader.unload(into: engine)
-                engine.onChoiceRequest = { [weak self] request in self?.chooser.request(request) }
-                chooser.prewarm()
-            case .localFallback(let url):
-                engine.onChoiceRequest = nil
-                chooser.cancel()
-                localLoader.keyboardWillAppear()
-                localLoader.load(url, into: engine)
-            case .rules:
-                localLoader.unload(into: engine)
-                engine.onChoiceRequest = nil
-            }
+            wireAppleRoute(into: engine)
         case .local:
             engine.onChoiceRequest = nil
             chooser.cancel()
@@ -105,6 +125,25 @@ final class AIController {
             engine.onChoiceRequest = nil
             chooser.cancel()
             localLoader.unload(into: engine)
+        }
+    }
+
+    private func wireAppleRoute(into engine: IMEEngine) {
+        switch appleRoute {
+        case .probing:
+            engine.onChoiceRequest = nil
+        case .apple:
+            localLoader.unload(into: engine)
+            engine.onChoiceRequest = { [weak self] request in self?.chooser.request(request) }
+            chooser.prewarm()
+        case .localFallback(let url):
+            engine.onChoiceRequest = nil
+            chooser.cancel()
+            localLoader.keyboardWillAppear()
+            localLoader.load(url, into: engine)
+        case .rules:
+            localLoader.unload(into: engine)
+            engine.onChoiceRequest = nil
         }
     }
 
@@ -139,6 +178,8 @@ final class AIController {
             return "AI 选词已关闭"
         case .apple:
             switch appleRoute {
+            case .probing:
+                return "AI 选词准备中…"
             case .apple:
                 return "AI 选词 · Apple 端侧模型"
             case .localFallback:

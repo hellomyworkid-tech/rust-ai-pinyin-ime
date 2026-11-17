@@ -840,19 +840,37 @@ impl Drop for ImeEngine {
     }
 }
 
-/// 在后台把词库文件的页读进内存，免得头几次按键各自去等缺页。
+/// 在后台以低优先级分批把词库文件的页读进内存，免得冷启动时与首帧渲染或模型加载争抢闪存带宽。
 /// 这些是只读文件页，不计入进程的内存配额，内存紧张时系统可以随时丢弃
 fn spawn_page_warmup(lexicon: CompiledLexicon) {
     let _ = std::thread::Builder::new()
         .name("ime-lexicon-warmup".to_string())
         .spawn(move || {
+            #[cfg(target_vendor = "apple")]
+            {
+                // QOS_CLASS_UTILITY = 0x11：降低磁盘 I/O 与调度优先级，绝不抢占 UI 线程或用户首次按键
+                extern "C" {
+                    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+                }
+                unsafe {
+                    let _ = pthread_set_qos_class_self_np(0x11, 0);
+                }
+            }
+            // 让出冷启动首帧提交窗口
+            std::thread::sleep(Duration::from_millis(120));
             const PAGE: usize = 4096;
+            const CHUNK_PAGES: usize = 1024; // 每预热 4 MiB 短暂让步一次 I/O
             let bytes = lexicon.as_bytes();
             let mut acc = 0u8;
             let mut offset = 0usize;
+            let mut pages = 0usize;
             while offset < bytes.len() {
                 acc = acc.wrapping_add(bytes[offset]);
                 offset += PAGE;
+                pages += 1;
+                if pages % CHUNK_PAGES == 0 {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
             std::hint::black_box(acc);
         });

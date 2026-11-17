@@ -29,9 +29,6 @@ final class KeyboardViewController: UIInputViewController {
     private var panelNotice: String?
     /// 键盘当前是否处在显示周期内（viewDidAppear 到 viewWillDisappear 之间）
     private var isVisible = false
-    /// 键盘正处在弹出动画或已可见状态（viewWillAppear 到 viewWillDisappear 之间）：
-    /// 让后台本地模型加载在约 300ms 的键盘上滑动画期间就开始并行执行，而不必白等动画结束后的 viewDidAppear
-    private var isAppearingOrVisible = false
     /// 本地模型上一次状态回调时是否已加载：只在「刚加载好」那一下请求按 AI 重排
     private var localModelWasLoaded = false
     /// 快捷设置面板打开的时刻。刚打开的一小段时间内忽略面板上的点按：
@@ -73,11 +70,18 @@ final class KeyboardViewController: UIInputViewController {
         feedback = KeyFeedback(view: rootView)
         rootView.keyboard.delegate = self
         rootView.bar.delegate = self
-        rootView.grid.delegate = self
         rootView.strip.delegate = self
-        rootView.symbolPanel.delegate = self
-        rootView.settingsPanel.delegate = self
-        rootView.settingsPanel.installLinkHosts(in: self)
+        rootView.onCreateGrid = { [weak self] grid in
+            grid.delegate = self
+        }
+        rootView.onCreateSymbolPanel = { [weak self] panel in
+            panel.delegate = self
+        }
+        rootView.onCreateSettingsPanel = { [weak self] panel in
+            guard let self else { return }
+            panel.delegate = self
+            panel.installLinkHosts(in: self)
+        }
         rootView.toolbar.onToggleSettings = { [weak self] in
             guard let self else { return }
             self.feedback.keyDown()
@@ -117,7 +121,6 @@ final class KeyboardViewController: UIInputViewController {
                 self.hostDidBecomeActive()
             }
         ]
-        pendingCompositions.purgeExpired()
 
         // 键盘高度由根视图里的内容约束决定（见 KeyboardRootView.updateHeight）
         rootView.updateHeight(landscape: false, width: view.bounds.width)
@@ -167,7 +170,6 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        isAppearingOrVisible = true
         // settings.json 只有几百字节，读一次很快；未开完全访问但快捷面板改过开关时合并读取本地覆盖配置
         settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
         setSettingsExpanded(false)
@@ -176,17 +178,21 @@ final class KeyboardViewController: UIInputViewController {
         // 先同步词库和个人词库，再恢复或初始化当前输入框（否则词库变化丢掉旧引擎时会冲掉刚恢复的组合）
         input.keyboardWillAppear()
         syncField()
-        // 首帧排版提交后立即在下一拍启动引擎与后台模型加载（与系统约 300ms 的键盘弹出动画并行）
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.isAppearingOrVisible else { return }
-            self.ensureEngineAndAI()
+        // 关键区分：
+        // - 热启动（当前扩展进程已驻留且引擎已创建，如跨 App 切换输入框）：在下一拍立即接回 AI，利用 SHARED_LLM 亚毫秒复用；
+        // - 冷启动（长时间未用后首次拉起进程，input.engine == nil）：viewWillAppear 阶段绝不创建引擎或触发任何模型/XPC 预热，
+        //   保证宿主远程窗口（remoteKeyboardWindow）零阻塞瞬间弹出，全部初始化放到 viewDidAppear 首帧显示完成之后。
+        if input.engine != nil {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.input.engine != nil else { return }
+                self.ensureEngineAndAI()
+            }
         }
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         isVisible = true
-        isAppearingOrVisible = true
 
         if currentDocumentID != nil, currentDocumentID != documentID {
             syncField()
@@ -196,13 +202,15 @@ final class KeyboardViewController: UIInputViewController {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isVisible else { return }
             self.ensureEngineAndAI()
+            if self.pendingCompositions.mayHaveEntries {
+                self.pendingCompositions.purgeExpired()
+            }
         }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         isVisible = false
-        isAppearingOrVisible = false
         hostInterrupted = true
         saveCurrentComposition()
         documentID = nil
@@ -301,7 +309,7 @@ final class KeyboardViewController: UIInputViewController {
         setGridExpanded(false)
         setSettingsExpanded(false)
         let snapshot: String?
-        if let newID, !newTraits.startsInEnglish {
+        if let newID, !newTraits.startsInEnglish, pendingCompositions.mayHaveEntries {
             // 同一屏幕直接从输入框 A 点到另一个同类型输入框 B 时（previousDocID 非空且未经过收起 / 失活），
             // 排除刚存下的 A，不把 A 的未完成拼音带到 B；等稍后点回 A 时再恢复
             let excluded = (!wasInterrupted && previousDocID != newID) ? previousDocID : nil
@@ -348,7 +356,7 @@ final class KeyboardViewController: UIInputViewController {
                 rootView.grid.show(pager.candidates, hasMore: pager.hasMore, landscape: landscape)
             }
         } else {
-            if let docID = documentID {
+            if pendingCompositions.mayHaveEntries, let docID = documentID {
                 pendingCompositions.remove(for: docID)
             }
             setGridExpanded(false)
@@ -415,7 +423,7 @@ final class KeyboardViewController: UIInputViewController {
                 self.rootView.settingsPanel.setLinksInteractive(true)
             }
         } else if !expanded {
-            rootView.settingsPanel.setLinksInteractive(false)
+            rootView.settingsPanelIfLoaded?.setLinksInteractive(false)
         }
         rootView.isSettingsExpanded = expanded
     }

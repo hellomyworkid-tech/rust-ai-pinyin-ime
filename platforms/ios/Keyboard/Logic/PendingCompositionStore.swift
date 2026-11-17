@@ -40,6 +40,17 @@ final class PendingCompositionStore {
         self.maxEntries = max(1, maxEntries)
     }
 
+    /// 快速判断是否可能存在未完成快照：无文件时直接返回 false，冷启动无需触发宿主进程 `documentContextBeforeInput` XPC
+    var mayHaveEntries: Bool {
+        if loadedFromDisk && entries.isEmpty {
+            guard let fileURL else { return false }
+            return FileManager.default.fileExists(atPath: fileURL.path)
+        }
+        if !entries.isEmpty { return true }
+        guard let fileURL else { return false }
+        return FileManager.default.fileExists(atPath: fileURL.path)
+    }
+
     /// 保存某个输入框当前的未完成组合快照
     func save(_ snapshot: String, for documentID: UUID, traits: FieldTraits = FieldTraits(),
               contextBefore: String? = nil, now: Date = Date()) {

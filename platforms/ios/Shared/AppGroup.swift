@@ -7,14 +7,10 @@ import Foundation
 enum AppGroup {
     static let identifier = "group.com.zengji.aipinyin"
 
-    static var root: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: identifier)
-    }
+    static let root: URL? = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: identifier)
 
     /// App 写、键盘读的数据目录（设置、下载的模型）
-    static var sharedDirectory: URL? {
-        root?.appendingPathComponent("Library/Application Support/AIPinyin", isDirectory: true)
-    }
+    static let sharedDirectory: URL? = root?.appendingPathComponent("Library/Application Support/AIPinyin", isDirectory: true)
 
     static var settingsURL: URL? { sharedDirectory?.appendingPathComponent("settings.json") }
     static var modelsDirectory: URL? { sharedDirectory?.appendingPathComponent("Models", isDirectory: true) }
