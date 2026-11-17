@@ -176,6 +176,15 @@ impl BilingualDecoder {
                     .iter()
                     .any(|e| e.end == n && !e.is_fuzzy && e.kind == EdgeKind::ChineseWord)
             });
+        let has_common_exact_whole_word = pinned_segments.is_empty()
+            && lattice.edges_from.first().is_some_and(|edges| {
+                edges.iter().any(|e| {
+                    e.end == n
+                        && !e.is_fuzzy
+                        && e.kind == EdgeKind::ChineseWord
+                        && e.base_cost < 13.0
+                })
+            });
         let mut beams: Vec<Vec<BeamState>> = vec![Vec::new(); n + 1];
         beams[0].push(BeamState {
             edges: Vec::new(),
@@ -445,7 +454,13 @@ impl BilingualDecoder {
                             bg_bonus = bg_bonus.max(lexicon.bigram_bonus(ctx_w, &edge.text));
                         }
                     }
-                    bg_bonus += grammar_transition_bonus(state, prev_word, edge, n);
+                    bg_bonus += grammar_transition_bonus(
+                        state,
+                        prev_word,
+                        edge,
+                        n,
+                        has_common_exact_whole_word,
+                    );
 
                     let mut next_edges = state.edges.clone();
                     next_edges.push(edge.clone());
@@ -1622,9 +1637,31 @@ pub fn is_classifier_phrase(w: &str) -> bool {
     ) {
         return true;
     }
-    w.chars().count() == 2
+    if w.chars().count() == 2
         && w.ends_with('个')
         && !matches!(w, "各个" | "挨个" | "逐个" | "真个" | "高个" | "大个" | "小个" | "矮个")
+    {
+        return true;
+    }
+    is_numeral_measure_phrase(w)
+}
+
+/// 判断是否为预组的「数词 + 实体度量/容器/个体量词」短语（如「三斤」「三亩」「四瓶」「两箱」「五盒」「两辆」「三张」）
+#[inline]
+fn is_numeral_measure_phrase(w: &str) -> bool {
+    let Some(last_c) = w.chars().next_back() else {
+        return false;
+    };
+    let prefix = &w[..w.len() - last_c.len_utf8()];
+    !prefix.is_empty()
+        && is_chinese_numeral_word(prefix)
+        && matches!(
+            last_c,
+            '斤' | '两' | '克' | '吨' | '亩' | '升' | '尺' | '寸' | '丈' | '瓶' | '杯' | '碗'
+                | '盘' | '盒' | '箱' | '袋' | '包' | '桶' | '罐' | '双' | '套' | '台' | '辆'
+                | '本' | '篇' | '张' | '条' | '件' | '栋' | '座' | '间' | '棵' | '朵' | '颗'
+                | '粒' | '滴' | '只' | '匹' | '艘' | '架' | '扇'
+        )
 }
 
 /// 判断单字是否为不能跟在「这个/一个/那个」等量词短语后面的文言代词、语气词、连词、介词、粘着语素或纯动量词/度量词（如 `*这个此`、`*这个次`、`*这个子`、`*一个之`、`*那个着`）
@@ -1674,6 +1711,56 @@ pub fn is_countable_single_noun(ch: &str) -> bool {
             | "关" | "坎" | "鬼" | "神" | "仙" | "妖" | "魔" | "怪" | "佛" | "王" | "帝"
             | "皇" | "官" | "将" | "兵" | "贼" | "敌" | "友" | "客" | "主" | "徒" | "师"
             | "匠" | "医" | "生" | "员"
+    )
+}
+
+#[inline]
+fn is_chinese_numeral_word(w: &str) -> bool {
+    !w.is_empty() && w.chars().all(crate::lattice::is_pure_numeral_char)
+}
+
+#[inline]
+fn is_multi_char_unit_word(w: &str) -> bool {
+    matches!(
+        w,
+        "平方" | "平方米" | "平米" | "平方公里" | "平方千米" | "平方厘米" | "平方毫米"
+            | "平方分米" | "平方英尺" | "平方英寸" | "平方英里" | "平方公尺" | "平方公分"
+            | "立方" | "立方米" | "立方厘米" | "立方毫米" | "公里" | "千米" | "厘米" | "毫米"
+            | "分米" | "微米" | "纳米" | "海里" | "英里" | "英尺" | "英寸" | "公尺" | "公分"
+            | "光年" | "公顷" | "公斤" | "千克" | "毫克" | "微克" | "克拉" | "毫升" | "千升"
+            | "加仑" | "盎司" | "小时" | "钟头" | "分钟" | "毫秒" | "微秒" | "星期" | "礼拜"
+            | "个月" | "周年" | "世纪" | "季度" | "辈子" | "昼夜" | "块钱" | "毛钱" | "分钱"
+            | "万元" | "千元" | "百元" | "亿元" | "美元" | "欧元" | "日元" | "港币" | "英镑"
+            | "韩元" | "千瓦" | "兆瓦" | "吉瓦" | "毫安" | "赫兹" | "分贝" | "摄氏度" | "华氏度"
+            | "百分点" | "成新" | "个人"
+    )
+}
+
+#[inline]
+fn is_strict_unit_word(w: &str) -> bool {
+    matches!(
+        w,
+        "平方" | "平方米" | "平米" | "平方公里" | "平方千米" | "平方厘米" | "平方毫米"
+            | "平方分米" | "立方" | "立方米" | "公里" | "千米" | "厘米" | "毫米" | "分米"
+            | "公斤" | "千克" | "毫克" | "公顷" | "毫升" | "块钱" | "毛钱" | "分钱" | "千瓦"
+            | "兆瓦" | "赫兹" | "摄氏度" | "百分点"
+    )
+}
+
+#[inline]
+fn is_single_char_measure_word(w: &str) -> bool {
+    matches!(
+        w,
+        "词" | "字" | "页" | "行" | "列" | "项" | "段" | "句" | "章" | "节" | "篇" | "条"
+            | "件" | "次" | "回" | "场" | "遍" | "趟" | "步" | "招" | "层" | "楼" | "门"
+            | "间" | "位" | "名" | "家" | "人" | "天" | "月" | "年" | "周" | "岁" | "代"
+            | "点" | "分" | "秒" | "倍" | "元" | "块" | "斤" | "米" | "度" | "级" | "等"
+            | "类" | "种" | "样" | "款" | "版" | "期" | "届" | "批" | "群" | "组" | "队"
+            | "班" | "套" | "份" | "本" | "部" | "台" | "辆" | "座" | "张" | "颗" | "关"
+            | "轮" | "波" | "站" | "课" | "题" | "幕" | "集" | "亩" | "克" | "吨" | "升"
+            | "寸" | "尺" | "毛" | "角" | "成" | "折" | "平" | "坪" | "栋" | "号" | "室"
+            | "厅" | "卫" | "只" | "双" | "对" | "包" | "盒" | "箱" | "瓶" | "杯" | "碗"
+            | "盘"
     )
 }
 
@@ -1761,6 +1848,31 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
     }
 
     // 2. 指代/数量/动词+量词短语（如「这个」「那个」「一个」「每个」「哪个」「几个」「这些」「这种」「换个」「加个」）+ 可数名词 vs 文言代词/虚词
+    //    以及封闭类「数词 + 度量衡/单位词/量词」构式（如「四+平方」「七+公斤」「四+块钱」「二十+平方」「三+斤」「三+亩」）
+    if is_chinese_numeral_word(prev_word) && is_multi_char_unit_word(w) {
+        bonus += 3.45;
+    } else if prev_word.chars().count() == 1
+        && !is_chinese_numeral_word(prev_word)
+        && !matches!(
+            prev_word,
+            "每" | "各" | "多" | "少" | "数" | "近" | "约" | "超" | "满" | "第" | "开" | "大"
+                | "小" | "上" | "下" | "前" | "后" | "好" | "足"
+        )
+        && is_strict_unit_word(w)
+    {
+        bonus -= 1.85;
+    }
+
+    if matches!(
+        prev_word,
+        "翻了" | "涨了" | "翻" | "涨" | "增" | "高" | "多" | "快" | "大" | "强" | "贵"
+    ) && w.chars().count() >= 2
+        && w.ends_with('倍')
+        && is_chinese_numeral_word(&w[..w.len() - '倍'.len_utf8()])
+    {
+        bonus += 3.25;
+    }
+
     if is_classifier_phrase(prev_word) {
         if is_ungrammatical_after_classifier(w) {
             bonus -= 2.65;
@@ -1769,24 +1881,16 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
         } else if edge.kind == EdgeKind::ChineseWord && edge.syllable_count >= 2 && !edge.is_fuzzy {
             bonus += 0.65;
         }
-    } else if matches!(
-        prev_word,
-        "这一" | "那一" | "哪一" | "第一" | "第二" | "第三" | "第四" | "第五" | "上一"
-            | "下一" | "前一" | "后一" | "另一" | "每一" | "某一" | "同一" | "唯一" | "这"
-            | "那" | "哪" | "一" | "两" | "三" | "四" | "五" | "六" | "七" | "八" | "九" | "十"
-            | "几" | "每" | "某" | "各" | "首" | "末"
-    ) {
-        let is_two_char_det = prev_word.chars().count() == 2;
-        if matches!(
-            w,
-            "词" | "字" | "页" | "行" | "列" | "项" | "段" | "句" | "章" | "节" | "篇" | "条"
-                | "件" | "次" | "回" | "场" | "遍" | "趟" | "步" | "招" | "层" | "楼" | "门"
-                | "间" | "位" | "名" | "家" | "人" | "天" | "月" | "年" | "周" | "岁" | "代"
-                | "点" | "分" | "秒" | "倍" | "元" | "块" | "斤" | "米" | "度" | "级" | "等"
-                | "类" | "种" | "样" | "款" | "版" | "期" | "届" | "批" | "群" | "组" | "队"
-                | "班" | "套" | "份" | "本" | "部" | "台" | "辆" | "座" | "张" | "颗" | "关"
-                | "轮" | "波" | "站" | "课" | "题" | "幕" | "集"
-        ) {
+    } else if is_chinese_numeral_word(prev_word)
+        || matches!(
+            prev_word,
+            "这一" | "那一" | "哪一" | "第一" | "第二" | "第三" | "第四" | "第五" | "上一"
+                | "下一" | "前一" | "后一" | "另一" | "每一" | "某一" | "同一" | "唯一" | "这"
+                | "那" | "哪" | "每" | "某" | "各" | "首" | "末"
+        )
+    {
+        let is_two_char_det = prev_word.chars().count() >= 2 && !is_chinese_numeral_word(prev_word);
+        if is_single_char_measure_word(w) {
             bonus += if is_two_char_det { 3.35 } else { 2.25 };
         } else if matches!(
             w,
@@ -1960,10 +2064,43 @@ fn grammar_transition_bonus(
     prev_word: &str,
     edge: &LatticeEdge,
     n: usize,
+    has_common_exact_whole_word: bool,
 ) -> f32 {
     let mut bonus = word_pair_collocation_bonus(prev_word, edge);
     let w = edge.text.as_str();
     let is_end = edge.end == n && edge.start > 0;
+
+    // 0. 封闭类「数词 + 多音节单位词 / 单字度量词 + 名词」独立性偏差补偿（PMI Compensation）：
+    //    词库仅预组了极少数数字+单位（如仅收「十平方」未收「四平方/五平方/七平方」），多段拼接天然比预组整词多计一次
+    //    ln(Z) 与单字步长惩罚；在整串不存在高频精确单条整词（保护「石河子」「适应力」「急性期」）时，对齐其联合概率标尺。
+    if !has_common_exact_whole_word {
+        if is_chinese_numeral_word(prev_word) && is_multi_char_unit_word(w) {
+            bonus += if edge.is_fuzzy { 3.20 } else { 4.00 };
+        } else if n >= 6 && !edge.is_fuzzy && is_numeral_measure_phrase(prev_word) {
+            if edge.kind == EdgeKind::ChineseWord && edge.syllable_count >= 2 {
+                bonus += 2.15;
+            } else if w == "地" && prev_word.ends_with(['亩', '块', '片', '寸', '分']) {
+                bonus += 3.35;
+            }
+        } else if n >= 7 && !edge.is_fuzzy {
+            if is_chinese_numeral_word(prev_word) && is_single_char_measure_word(w) {
+                bonus += 1.65;
+            } else if is_single_char_measure_word(prev_word)
+                && state
+                    .edges
+                    .iter()
+                    .rev()
+                    .filter(|e| !e.text.is_empty())
+                    .nth(1)
+                    .is_some_and(|e| is_chinese_numeral_word(&e.text))
+                && (edge.kind == EdgeKind::ChineseWord
+                    || is_countable_single_noun(w)
+                    || w == "地")
+            {
+                bonus += 2.25;
+            }
+        }
+    }
 
     // 1. 句末语气助词（吧/吗/呢/啊/呀/啦/呗/嘛） vs 句末未完介词结构（把/别把/先把/再把）
     if matches!(w, "吧" | "吗" | "呢" | "啊" | "呀" | "啦" | "呗" | "嘛") {

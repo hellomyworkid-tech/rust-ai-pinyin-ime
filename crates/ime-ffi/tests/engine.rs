@@ -1827,3 +1827,100 @@ fn personal_prefix_recall_and_colloquial_compounds_rank_first() {
         engine.reset();
     }
 }
+
+#[test]
+fn si_prioritizes_four_and_numeral_unit_phrases_rank_first() {
+    let engine = engine();
+
+    // 1) 单音节 `si` 首选「四」，且常用同音字排在模糊音「是」之前、纠错项不跟表情
+    let si = type_letters(&engine, "si");
+    assert_eq!(top_text(&si), "四");
+    let si_cands = si["view"]["visible_candidates"].as_array().unwrap();
+    let pos_si = si_cands.iter().position(|c| c["text"] == "四").unwrap();
+    assert_eq!(pos_si, 0);
+    let pos_si_shi = si_cands.iter().position(|c| c["text"] == "是");
+    if let Some(shi_idx) = pos_si_shi {
+        assert!(
+            shi_idx >= 5,
+            "模糊音「是」不应挤入 si 的前排精确同音字之前: {si_cands:?}"
+        );
+        assert_ne!(
+            si_cands.get(shi_idx + 1).and_then(|c| c["tag"].as_str()),
+            Some("[表情]"),
+            "纠错候选后不应插入表情"
+        );
+    }
+    engine.reset();
+
+    // 2) 全拼与前后鼻音混输下的「数词 + 单位/量词」构式及同音正词保护
+    for (py, want) in [
+        ("sipingfang", "四平方"),
+        ("sipinfang", "四平方"),
+        ("erpingfang", "二平方"),
+        ("wupingfang", "五平方"),
+        ("liupingfang", "六平方"),
+        ("qipingfang", "七平方"),
+        ("bapingfang", "八平方"),
+        ("jiupingfang", "九平方"),
+        ("shipingfang", "十平方"),
+        ("ershipingfang", "二十平方"),
+        ("sanshipingfang", "三十平方"),
+        ("sishipingfang", "四十平方"),
+        ("qishipingfang", "七十平方"),
+        ("sipingfangmi", "四平方米"),
+        ("qipingfangmi", "七平方米"),
+        ("sipingmi", "四平米"),
+        ("sigongjin", "四公斤"),
+        ("qigongjin", "七公斤"),
+        ("bagongli", "八公里"),
+        ("sikuaiqian", "四块钱"),
+        ("sanjinpingguo", "三斤苹果"),
+        ("sipingshui", "四瓶水"),
+        ("fanlesibei", "翻了四倍"),
+        ("sishi", "四十"),
+        ("sanshi", "三十"),
+        ("shisi", "十四"),
+        // 高频非数词同音整词不受影响
+        ("shihezi", "石河子"),
+        ("shiyingli", "适应力"),
+        ("jixingqi", "急性期"),
+        ("jiudian", "酒店"),
+        ("liucheng", "流程"),
+        ("wutai", "舞台"),
+        ("baike", "百科"),
+    ] {
+        let out = type_letters(&engine, py);
+        assert_eq!(top_text(&out), want, "{py}");
+        engine.reset();
+    }
+
+    // 3) 开启本地大模型后，`sipingfang` 与 `sipinfang` 首选依然稳定为「四平方」
+    if let Ok(model) = std::env::var("IME_LLM_TEST_MODEL") {
+        if ImeEngine::llm_supported() {
+            let _turn = real_model_test_turn();
+            let (tx, rx) = mpsc::channel();
+            let tx = Mutex::new(tx);
+            engine.set_notify(Some(Arc::new(move || {
+                let _ = tx.lock().unwrap().send(());
+            })));
+            engine
+                .load_llm(std::path::Path::new(&model), 0)
+                .expect("load model");
+            for py in ["sipingfang", "sipinfang"] {
+                let before = type_letters(&engine, py);
+                assert_eq!(top_text(&before), "四平方", "{py} before LLM");
+                if engine.ai_result_pending() {
+                    rx.recv_timeout(Duration::from_secs(20))
+                        .expect("LLM callback");
+                }
+                let after = json(&engine.refresh_after_ai());
+                assert_eq!(
+                    after["visible_candidates"][0]["text"], "四平方",
+                    "{py} after LLM"
+                );
+                engine.reset();
+            }
+            engine.unload_llm();
+        }
+    }
+}

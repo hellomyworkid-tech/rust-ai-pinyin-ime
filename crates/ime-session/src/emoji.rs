@@ -55,7 +55,12 @@ pub fn insert_emoji_candidates(candidates: &mut Vec<Candidate>, input_len: usize
         }
         words_seen += 1;
         let english = candidate.text.is_ascii();
-        if candidate.consumed_len != input_len || (english && candidate.tag != ENGLISH_TAG) {
+        let is_fuzzy_or_misread =
+            candidate.tag.starts_with("[纠错") || candidate.tag.starts_with("[错音");
+        if candidate.consumed_len != input_len
+            || is_fuzzy_or_misread
+            || (english && candidate.tag != ENGLISH_TAG)
+        {
             i += 1;
             continue;
         }
@@ -168,5 +173,20 @@ mod tests {
         let mut lol = vec![english("LOL", 3)];
         insert_emoji_candidates(&mut lol, 3);
         assert_eq!(lol[1].text, "😂");
+    }
+
+    #[test]
+    fn fuzzy_and_misread_candidates_never_get_emoji() {
+        let fuzzy = Candidate {
+            tag: "[纠错 shi]".to_string(),
+            ..word("是", 2)
+        };
+        let misread = Candidate {
+            tag: "[错音]".to_string(),
+            ..word("猫", 3)
+        };
+        let mut list = vec![word("四", 2), fuzzy, misread];
+        insert_emoji_candidates(&mut list, 2);
+        assert!(list.iter().all(|c| c.tag != EMOJI_TAG));
     }
 }

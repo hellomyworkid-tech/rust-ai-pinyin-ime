@@ -92,6 +92,7 @@ impl BilingualLattice {
                     0,
                     0,
                     0.0,
+                    0,
                     input,
                     &spans_at,
                     lexicon,
@@ -460,6 +461,7 @@ fn collect_chinese_edges<'a>(
     curr_trie_node: u32,
     depth: usize,
     accum_fuzzy: f32,
+    fuzzy_syl_count: u8,
     input: &str,
     spans_at: &[Vec<&'a SyllableSpan>],
     lexicon: &CompiledLexicon,
@@ -500,6 +502,7 @@ fn collect_chinese_edges<'a>(
         if new_fuzzy > max_fuzzy_for_input {
             continue;
         }
+        let new_fuzzy_syls = fuzzy_syl_count + u8::from(sp.fuzzy_penalty > 0.0);
 
         // 在 Trie 上直接推进一个音节，若词库中根本不存在以该音节序列为前缀的词条，立即剪枝！
         let Some(next_node) = lexicon.syllable_trie().advance_node(base_node, &sp.syllable) else {
@@ -540,13 +543,17 @@ fn collect_chinese_edges<'a>(
                     .iter()
                     .any(|e| !e.is_fuzzy && e.syllable_count >= 2 && e.base_cost < 13.1);
             let effective_fuzzy = if syl_count >= 2 {
-                if has_common_exact_word_at_origin || new_fuzzy >= 3.0 {
+                if new_fuzzy_syls >= 2 {
+                    new_fuzzy * 1.45
+                } else if has_common_exact_word_at_origin || new_fuzzy >= 3.0 {
                     new_fuzzy * 1.15
                 } else {
                     new_fuzzy * 0.75
                 }
             } else if is_short_single_input {
-                new_fuzzy * 1.45
+                // 单音节短输入时提高模糊音单字惩罚（约需 36x 以上字频差），确保精确同音常用字（如 `si` 的「四/死/思/似/斯/司」）
+                // 排在模糊纠错单字（如 `shi` 的「是」）之前，同时仍高于生僻字
+                new_fuzzy * 2.25
             } else {
                 new_fuzzy
             };
@@ -556,8 +563,19 @@ fn collect_chinese_edges<'a>(
                 0.0
             };
 
-            for id in hit_ids.iter().take(take_limit) {
+            let scan_cap = hit_ids.len().min(24);
+            for (idx, id) in hit_ids.iter().take(scan_cap).enumerate() {
                 let entry = lexicon.entry(id);
+                if idx >= take_limit {
+                    // 封闭类语法单字（数词/常见度量衡单字，如 `qi` 的第 6 字「七」、`ling` 的第 7 字「零」、`jin` 的「斤」、`mu` 的「亩」）
+                    // 与双音节复合数词（如 `qishi` 的第 7 词「七十」）在长句中不因字频位次被提前剪枝
+                    let keep_closed = new_fuzzy == 0.0
+                        && ((syl_count == 1 && is_closed_numeral_or_measure_char(entry.text()))
+                            || (syl_count == 2 && is_closed_compound_numeral(entry.text())));
+                    if !keep_closed {
+                        continue;
+                    }
+                }
                 let cal_cost = calibrated_word_cost(entry.text(), entry.syllable_key(), entry.cost());
                 out_edges.push(LatticeEdge {
                     start: origin_start,
@@ -584,6 +602,7 @@ fn collect_chinese_edges<'a>(
             next_node,
             syl_count,
             new_fuzzy,
+            new_fuzzy_syls,
             input,
             spans_at,
             lexicon,
@@ -847,6 +866,7 @@ fn collect_chinese_edges_from_sep<'a>(
                 next_node,
                 syl_count,
                 0.0,
+                0,
                 input,
                 spans_at,
                 lexicon,
@@ -856,13 +876,45 @@ fn collect_chinese_edges_from_sep<'a>(
     }
 }
 
-/// 现代汉语高频新词/常用词静态词频校准：
-/// 开源基础词库（`rime_ice_base`）基于早期书面语料统计，对部分近年日常高频词（如「人设」「女频」「男频」「短剧」「受众」「痛点」「复盘」「内卷」「霸总」）
-/// 赋予了偏低权重（甚至被模糊音或单字拼接反超）。在不重编远端词库的前提下按 `AIMELX03` 代价标尺做温和上界校准，
-/// 同时保留同音正词（如「手中」「短句」「通电」「塌方」「填充」）自身的原始领先地位，交由搭配与语境模型决胜。
+#[inline]
+pub(crate) fn is_pure_numeral_char(c: char) -> bool {
+    matches!(
+        c,
+        '一' | '二' | '两' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
+            | '百' | '千' | '万' | '亿' | '零' | '半' | '几'
+    )
+}
+
+#[inline]
+fn is_closed_numeral_or_measure_char(text: &str) -> bool {
+    matches!(
+        text,
+        "一" | "二" | "两" | "三" | "四" | "五" | "六" | "七" | "八" | "九" | "十"
+            | "百" | "千" | "万" | "亿" | "零" | "半" | "几" | "每" | "各" | "第"
+            | "米" | "斤" | "克" | "吨" | "亩" | "升" | "度" | "元" | "块" | "角"
+            | "毛" | "分" | "倍" | "成" | "折" | "层" | "楼" | "栋" | "号" | "岁"
+            | "天" | "年" | "月" | "周" | "日" | "秒" | "瓦" | "匹" | "寸" | "尺"
+            | "箱" | "盒" | "袋" | "瓶" | "杯" | "碗"
+    )
+}
+
+#[inline]
+fn is_closed_compound_numeral(text: &str) -> bool {
+    let mut chars = text.chars();
+    matches!((chars.next(), chars.next(), chars.next()), (Some(a), Some(b), None) if is_pure_numeral_char(a) && is_pure_numeral_char(b))
+}
+
+/// 现代汉语高频新词/常用词与分词残余字频偏差校准：
+/// 1) 开源基础词库（`rime_ice_8105` / `rime_ice_base`）基于分词后的语料统计单字词频，「四」大量被「四个/四月/四十/四川」吸收，
+///    导致单字残余词频略低于补语「死」（`8.45` vs `8.24`），且公文提纲「三是/四是」权重反超基数词「三十/四十」，「十四」显著偏低；
+/// 2) 对近年日常高频词（如「人设」「女频」「短剧」「受众」等）做温和上界校准，同时保留同音正词自身的原始领先地位，交由搭配与语境模型决胜。
 #[inline]
 pub(crate) fn calibrated_word_cost(text: &str, code_key: &str, raw_cost: f32) -> f32 {
     let cap = match (text, code_key) {
+        ("四", "si") => 8.05,
+        ("三十", "san'shi") => 8.30,
+        ("四十", "si'shi") => 8.65,
+        ("十四", "shi'si") => 11.25,
         ("人设", "ren'she") => 10.55,
         ("女频", "nv'pin") => 10.75,
         ("男频", "nan'pin") => 10.85,
