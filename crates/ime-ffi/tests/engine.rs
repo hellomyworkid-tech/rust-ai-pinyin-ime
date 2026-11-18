@@ -2016,3 +2016,66 @@ fn separable_verb_object_phrases_rank_first_unpinned_and_pinned() {
     assert_eq!(top_text(&after_two_syl_pins), "交了税了");
     engine.reset();
 }
+
+#[test]
+fn english_brands_morphology_mixed_sentences_and_raw_fallback_work() {
+    let engine = engine();
+
+    // 1. iPhone：规范大小写首选 + 原样小写备选 + 干净单段预编辑
+    let iph = type_letters(&engine, "iphone");
+    assert_eq!(top_text(&iph), "iPhone");
+    assert_eq!(iph["view"]["preedit_text"], "iphone");
+    let iph_cands = iph["view"]["visible_candidates"].as_array().unwrap();
+    assert!(
+        iph_cands.iter().any(|c| c["text"] == "iphone"),
+        "expected raw lowercase fallback 'iphone' in {iph_cands:?}"
+    );
+    engine.reset();
+
+    // 2. 专名补充表、前缀补全、无空格中英混输与 i+<词根> 形态合成
+    for (py, want) in [
+        ("iphon", "iPhone"),
+        ("macboo", "MacBook"),
+        ("airpod", "AirPods"),
+        ("wodeiphone", "我的 iPhone"),
+        ("yongiphonepaizhao", "用 iPhone 拍照"),
+        ("ipad", "iPad"),
+        ("maileyitaiipad", "买了一台 iPad"),
+        ("airpods", "AirPods"),
+        ("daizheairpods", "戴着 AirPods"),
+        ("macbook", "MacBook"),
+        ("imac", "iMac"),
+        ("icloud", "iCloud"),
+        ("xcode", "Xcode"),
+        ("swiftui", "SwiftUI"),
+        ("wechat", "WeChat"),
+        ("dakaiwechat", "打开 WeChat"),
+        ("tiktok", "TikTok"),
+        ("youtube", "YouTube"),
+        ("typec", "TypeC"),
+        ("oled", "OLED"),
+        ("hdmi", "HDMI"),
+        ("url", "URL"),
+        ("imovie", "iMovie"),
+        ("ibook", "iBook"),
+        ("iphoto", "iPhoto"),
+        ("ideal", "ideal"),
+        ("image", "image"),
+    ] {
+        let out = type_letters(&engine, py);
+        assert_eq!(top_text(&out), want, "{py}");
+        engine.reset();
+    }
+
+    // 3. 与中文全拼/高频简拼重叠的词条保持中文第 1 位、规范英文在黄金第 2 位
+    for (py, first_want, second_want) in [
+        ("bilibili", "哔哩哔哩", "Bilibili"),
+        ("ssd", "深深的", "SSD"),
+    ] {
+        let out = type_letters(&engine, py);
+        let cands = out["view"]["visible_candidates"].as_array().unwrap();
+        assert_eq!(cands[0]["text"], first_want, "{py} #1");
+        assert_eq!(cands[1]["text"], second_want, "{py} #2");
+        engine.reset();
+    }
+}

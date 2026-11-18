@@ -148,11 +148,8 @@ impl BilingualLattice {
                 // 3.1 单字母声母简拼单字（如输入 `w`、`wzj` 中的 `w`/`z`/`j`、或句首/句中/句尾未成音节的孤立声母 `z`/`w`/`f`）：
                 // 当该位置无完整全拼音节（`no_full_syl_at_start`）且句中不构成词典英文词前缀时，允许匹配高频声母单字，杜绝退化为原样英文字母
                 if matched_len == 1 {
-                    let has_eng_word_at_start = lexicon
-                        .english_trie()
-                        .common_prefix_search(&lower_input[start_pos..])
-                        .next()
-                        .is_some();
+                    let has_eng_word_at_start =
+                        crate::supplement::has_english_prefix(lexicon, &lower_input[start_pos..]);
                     if !no_full_syl_at_start
                         || (n > 6 && end_pos < n && has_eng_word_at_start)
                     {
@@ -207,10 +204,10 @@ impl BilingualLattice {
                 let is_sentence_tail_abbrev = end_pos == n
                     && no_full_syl_at_start
                     && matched_len <= 4
-                    && lexicon
-                        .english_trie()
-                        .exact_lookup(&lower_input[start_pos..end_pos])
-                        .is_empty();
+                    && !crate::supplement::has_english_entry(
+                        lexicon,
+                        &lower_input[start_pos..end_pos],
+                    );
 
                 // 关键规则：若在长句中间（n > 6 且不在句尾纯声母处），严禁局部简拼抢夺全拼与英文词（如 `amd + de`）
                 if !is_whole_input && n > 6 && !is_sentence_tail_abbrev {
@@ -289,10 +286,7 @@ impl BilingualLattice {
             if (2..=5).contains(&tail_len)
                 && suffix.bytes().all(|b| b.is_ascii_lowercase())
                 && !crate::pinyin::is_valid_or_alias_syllable(suffix)
-                && lexicon
-                    .english_trie()
-                    .exact_lookup(&lower_input[start_pos..n])
-                    .is_empty()
+                && !crate::supplement::has_english_entry(lexicon, &lower_input[start_pos..n])
             {
                 let take_inc = if start_pos == 0 { 24 } else { 6 };
                 let inc_char_penalty = if start_pos == 0 { 1.25 } else { 2.85 };
@@ -316,7 +310,7 @@ impl BilingualLattice {
             }
         }
 
-        // 4. 扫描英文与程序员规范词库 (`english_trie`)，实现无空格中英混输
+        // 4. 扫描英文与程序员规范词库 (`english_trie` + 专名补充树 + 形态合成)，实现无空格中英混输
         let detector = PhonotacticDetector::global();
 
         for start_pos in 0..n {
@@ -327,6 +321,38 @@ impl BilingualLattice {
             }
 
             let starts_with_upper = orig_suffix.as_bytes()[0].is_ascii_uppercase();
+            let push_or_upgrade_eng = |edges: &mut Vec<LatticeEdge>,
+                                       end_pos: usize,
+                                       text: String,
+                                       code_key: String,
+                                       base_cost: f32,
+                                       domain: DomainTag| {
+                if let Some(existing) = edges.iter_mut().find(|e| {
+                    e.end == end_pos
+                        && e.kind == EdgeKind::EnglishWord
+                        && e.text.eq_ignore_ascii_case(&text)
+                }) {
+                    if base_cost < existing.base_cost {
+                        existing.text = text;
+                        existing.code_key = code_key;
+                        existing.base_cost = base_cost;
+                        existing.domain = domain;
+                    }
+                    return;
+                }
+                edges.push(LatticeEdge {
+                    start: start_pos,
+                    end: end_pos,
+                    text,
+                    code_key,
+                    kind: EdgeKind::EnglishWord,
+                    base_cost,
+                    domain,
+                    syllable_count: 1,
+                    is_fuzzy: false,
+                    pronunciation_hint: None,
+                });
+            };
 
             // 4.1 精确前缀匹配词典中的英文词（如 `rust`, `api`, `github`, `open`, `source`, `bug`）
             for (matched_len, entry_ids) in lexicon.english_trie().common_prefix_search(lower_suffix) {
@@ -350,42 +376,182 @@ impl BilingualLattice {
 
                 for id in entry_ids.iter().take(4) {
                     let entry = lexicon.entry(id);
-                    edges_from[start_pos].push(LatticeEdge {
-                        start: start_pos,
-                        end: end_pos,
-                        text: entry.text().to_string(),
-                        code_key: entry.flat_key().into_owned(),
-                        kind: EdgeKind::EnglishWord,
-                        base_cost: (entry.cost() - phonotactic_bonus + short_overlap_penalty).max(0.2),
-                        domain: entry.domain(),
+                    push_or_upgrade_eng(
+                        &mut edges_from[start_pos],
+                        end_pos,
+                        entry.text().to_string(),
+                        entry.flat_key().into_owned(),
+                        (entry.cost() - phonotactic_bonus + short_overlap_penalty).max(0.2),
+                        entry.domain(),
+                    );
+                }
+            }
+
+            // 4.1b 扫描专有名词、数码品牌与互联网高频缩写补充树（如 `iPhone`, `iPad`, `AirPods`, `MacBook`, `WeChat`, `YouTube`, `URL`, `HDMI`）
+            for (matched_len, sup_ids) in crate::supplement::english_supplement_trie().common_prefix_search(lower_suffix) {
+                let end_pos = start_pos + matched_len;
+                let raw_slice = &input[start_pos..end_pos];
+                let cluster_score = detector.english_cluster_score(raw_slice);
+                let phonotactic_bonus = (cluster_score * 0.85).min(3.2)
+                    + if starts_with_upper { 2.5 } else { 0.0 };
+                let short_overlap_penalty = if matched_len <= 2 && !starts_with_upper && n > 2 {
+                    2.6
+                } else if matched_len == 3 && cluster_score == 0.0 && !starts_with_upper && n > 3 {
+                    0.85
+                } else {
+                    0.0
+                };
+                for &id in sup_ids.iter().take(4) {
+                    let sup = crate::supplement::english_supplement_entry(id);
+                    push_or_upgrade_eng(
+                        &mut edges_from[start_pos],
+                        end_pos,
+                        sup.text.to_string(),
+                        sup.lower_key.to_string(),
+                        (sup.cost - phonotactic_bonus + short_overlap_penalty).max(0.2),
+                        sup.domain,
+                    );
+                }
+            }
+
+            // 4.1c 英语高产形态构词规则：`i` + 词库已知英文词根 -> 驼峰专名 `i<Stem>`（如 `iMovie`, `iBook`, `iWork`, `iLife`, `iCare`, `iPhoto`）。
+            //      汉语拼音没有任何音节以 `i` 开头；当整词本身不在普通英文词典中（排除 `ideal`, `image`, `input` 等原生普通词），
+            //      且不处于前接汉字复韵母 `ai/ei/ui/oi` 内部时，自动合成规范驼峰词边。
+            if lower_suffix.starts_with('i')
+                && lower_suffix.len() >= 4
+                && (start_pos == 0
+                    || !matches!(
+                        lower_input.as_bytes()[start_pos - 1],
+                        b'a' | b'e' | b'u' | b'o'
+                    ))
+            {
+                for (stem_len, stem_ids) in lexicon.english_trie().common_prefix_search(&lower_suffix[1..]) {
+                    if stem_len < 3 {
+                        continue;
+                    }
+                    let whole_len = 1 + stem_len;
+                    let whole_lower = &lower_suffix[..whole_len];
+                    if crate::supplement::has_english_entry(lexicon, whole_lower) {
+                        continue;
+                    }
+                    let Some(top_stem_id) = stem_ids.first() else {
+                        continue;
+                    };
+                    let stem_entry = lexicon.entry(top_stem_id);
+                    let stem_text = stem_entry.text();
+                    if stem_entry.cost() > 16.5 || !stem_text.is_ascii() || stem_text.len() < 3 {
+                        continue;
+                    }
+                    let mut chars = stem_text.chars();
+                    let Some(first_ch) = chars.next() else {
+                        continue;
+                    };
+                    if !first_ch.is_ascii_alphabetic() {
+                        continue;
+                    }
+                    let camel = format!("i{}{}", first_ch.to_ascii_uppercase(), chars.as_str());
+                    let end_pos = start_pos + whole_len;
+                    let cluster_score = detector.english_cluster_score(&input[start_pos..end_pos]);
+                    let phonotactic_bonus = (cluster_score * 0.85).min(3.2)
+                        + if starts_with_upper { 2.0 } else { 0.8 };
+                    push_or_upgrade_eng(
+                        &mut edges_from[start_pos],
+                        end_pos,
+                        camel,
+                        whole_lower.to_string(),
+                        (stem_entry.cost().min(10.8) - phonotactic_bonus).max(0.5),
+                        DomainTag::Tech,
+                    );
+                }
+            }
+
+            // 4.2 句尾长英文前缀自动补全（如输入 `typesc` 自动补全 `TypeScript`、`iphon` 自动补全 `iPhone`）
+            if start_pos == 0 && n >= 4 {
+                let mut prefix_cands: Vec<(f32, String, String, DomainTag)> = Vec::new();
+                for id in lexicon.english_trie().prefix_lookup(lower_suffix).iter().take(4) {
+                    let entry = lexicon.entry(id);
+                    if entry.flat_key().len() > n {
+                        prefix_cands.push((
+                            entry.cost(),
+                            entry.text().to_string(),
+                            entry.flat_key().into_owned(),
+                            entry.domain(),
+                        ));
+                    }
+                }
+                for &id in crate::supplement::english_supplement_trie()
+                    .prefix_lookup(lower_suffix)
+                    .iter()
+                    .take(4)
+                {
+                    let sup = crate::supplement::english_supplement_entry(id);
+                    if sup.lower_key.len() > n
+                        && !prefix_cands
+                            .iter()
+                            .any(|(_, t, _, _)| t.eq_ignore_ascii_case(sup.text))
+                    {
+                        prefix_cands.push((
+                            sup.cost,
+                            sup.text.to_string(),
+                            sup.lower_key.to_string(),
+                            sup.domain,
+                        ));
+                    }
+                }
+                prefix_cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+                for (cost, text, code_key, domain) in prefix_cands.into_iter().take(4) {
+                    edges_from[0].push(LatticeEdge {
+                        start: 0,
+                        end: n,
+                        text,
+                        code_key,
+                        kind: EdgeKind::EnglishPrefixCompletion,
+                        base_cost: cost + 1.5,
+                        domain,
                         syllable_count: 1,
                         is_fuzzy: false,
                         pronunciation_hint: None,
                     });
                 }
             }
+        }
 
-            // 4.2 句尾长英文前缀自动补全（如输入 `typesc` 自动补全 `TypeScript`）
-            if start_pos == 0 && n >= 4 {
-                let prefix_ids = lexicon.english_trie().prefix_lookup(lower_suffix);
-                for id in prefix_ids.iter().take(3) {
-                    let entry = lexicon.entry(id);
-                    if entry.flat_key().len() > n {
-                        edges_from[0].push(LatticeEdge {
-                            start: 0,
-                            end: n,
-                            text: entry.text().to_string(),
-                            code_key: entry.flat_key().into_owned(),
-                            kind: EdgeKind::EnglishPrefixCompletion,
-                            base_cost: entry.cost() + 1.5,
-                            domain: entry.domain(),
-                            syllable_count: 1,
-                            is_fuzzy: false,
-                            pronunciation_hint: None,
-                        });
-                    }
-                }
-            }
+        // 4.3 未登录英文词整串音系学兜底边：
+        //     当整串输入（3..=28 字节纯 ASCII 字母/数字）在词库中不存在任何单步整词（中文、简拼或英文），
+        //     无法由合法全拼/纠错音节与词典英文词组合覆盖（含句尾未敲完的声母前缀），且具备显著非拼音英文特征
+        //     （以 `i/u/v` 开头、包含英文辅音簇 `english_cluster_score >= 2.0`、或含大写字母/数字）时，补充一条整串原样英文边，
+        //     防止未知英文专名/变量名被硬拆成 `u + 你 + 非法 + i` 之类乱码碎片，同时不污染已覆盖的「中文+词典英文」混输句。
+        let has_leading_common_chinese_word = edges_from[0].iter().any(|e| {
+            !e.is_fuzzy
+                && e.kind == EdgeKind::ChineseWord
+                && e.syllable_count >= 2
+                && e.end >= 4
+                && e.base_cost < 12.0
+        });
+        if (3..=20).contains(&n)
+            && !has_leading_common_chinese_word
+            && input.bytes().all(|b| b.is_ascii_alphanumeric())
+            && input.bytes().any(|b| b.is_ascii_alphabetic())
+            && !edges_from[0].iter().any(|e| e.end == n)
+            && !can_cover_with_non_abbrev_pinyin(&lower_input, &spans_at, &edges_from, lexicon)
+            && (matches!(lower_input.as_bytes()[0], b'i' | b'u' | b'v')
+                || detector.english_cluster_score(&lower_input) >= 2.0
+                || input
+                    .bytes()
+                    .any(|b| b.is_ascii_uppercase() || b.is_ascii_digit()))
+        {
+            edges_from[0].push(LatticeEdge {
+                start: 0,
+                end: n,
+                text: input.to_string(),
+                code_key: lower_input.clone(),
+                kind: EdgeKind::EnglishRaw,
+                base_cost: 14.5 + (n as f32) * 1.15,
+                domain: DomainTag::Tech,
+                syllable_count: 1,
+                is_fuzzy: false,
+                pronunciation_hint: None,
+            });
         }
 
         // 5. 大写字母引导的驼峰/原样英文 Token 或未知字符兜底边
@@ -936,4 +1102,51 @@ pub(crate) fn calibrated_word_cost(text: &str, code_key: &str, raw_cost: f32) ->
         _ => return raw_cost,
     };
     raw_cost.min(cap)
+}
+
+/// 判断小写输入串是否能由合法非简拼拼音音节（含模糊音/手误纠错）与词典英文词组合覆盖，允许末尾残留尚未敲完的声母前缀
+fn can_cover_with_non_abbrev_pinyin(
+    lower_input: &str,
+    spans_at: &[Vec<&SyllableSpan>],
+    edges_from: &[Vec<LatticeEdge>],
+    lexicon: &CompiledLexicon,
+) -> bool {
+    let n = lower_input.len();
+    if n == 0 {
+        return false;
+    }
+    let mut reachable = vec![false; n + 1];
+    reachable[0] = true;
+    for pos in 0..n {
+        if !reachable[pos] {
+            continue;
+        }
+        for sp in &spans_at[pos] {
+            if !sp.is_abbrev && sp.end <= n {
+                reachable[sp.end] = true;
+            }
+        }
+        for edge in &edges_from[pos] {
+            if edge.kind == EdgeKind::EnglishWord && edge.end >= pos + 2 && edge.end <= n {
+                reachable[edge.end] = true;
+            }
+        }
+    }
+    if reachable[n] {
+        return true;
+    }
+    // 允许长句末尾残留 1~4 字节尚未敲完的合法拼音前缀（如 `keyiyouhuadedif` 的 `f`、`nihaozh` 的 `zh`）
+    for pos in 1..n {
+        if !reachable[pos] {
+            continue;
+        }
+        let tail = &lower_input[pos..n];
+        if tail.len() <= 4
+            && tail.bytes().all(|b| b.is_ascii_lowercase())
+            && lexicon.syllable_trie().advance_node(0, tail).is_some()
+        {
+            return true;
+        }
+    }
+    false
 }

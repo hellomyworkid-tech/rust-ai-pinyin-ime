@@ -931,10 +931,9 @@ impl BilingualDecoder {
             if edge.end < n {
                 if matches!(
                     edge.kind,
-                    EdgeKind::EnglishWord
-                        | EdgeKind::EnglishPrefixCompletion
-                        | EdgeKind::EnglishRaw
-                ) {
+                    EdgeKind::EnglishPrefixCompletion | EdgeKind::EnglishRaw
+                ) || (edge.kind == EdgeKind::EnglishWord && has_full_pinyin_at_start)
+                {
                     continue;
                 }
                 if edge.kind == EdgeKind::AbbrevPinyin && has_full_pinyin_at_start {
@@ -1498,13 +1497,11 @@ impl BilingualDecoder {
         }
 
         // 黄金第二候选位（Guaranteed 2nd Slot）：
-        // 若整个输入串（3~10字母）恰好命中高频英文词表（如 `api`, `data`, `main`, `nice`, `bug`, `app`）
+        // 若整个输入串（3~12字母）恰好命中高频英文词表（如 `api`, `data`, `main`, `nice`, `bug`, `app`, `ssh`, `ssd`, `bilibili`）
         // 且第一候选为中文，则强制将该英文词提升至至多第 2 候选位（下标 1）
-        if config.golden_second_slot_english && (3..=10).contains(&n) && candidates.len() >= 2 {
+        if config.golden_second_slot_english && (3..=12).contains(&n) && candidates.len() >= 2 {
             let lower_key = lattice.input.to_ascii_lowercase();
-            let eng_ids = lexicon.english_trie().exact_lookup(&lower_key);
-            if let Some(top_eng_id) = eng_ids.first() {
-                let eng_word = lexicon.entry(top_eng_id).text();
+            if let Some(eng_word) = crate::supplement::best_english_exact_text(lexicon, &lower_key) {
                 if candidates[0].text != eng_word {
                     if let Some(pos) = candidates.iter().position(|c| c.text == eng_word) {
                         if pos > 1 {
@@ -1516,6 +1513,67 @@ impl BilingualDecoder {
                         }
                     }
                 }
+            }
+        }
+
+        // 原样英文候选兜底与大小写备选：
+        // 1) 当首选是规范大小写英文专名（如 `iPhone`、`GitHub`、`ChatGPT`、`CPU`）而输入是小写 `iphone` 时，
+        //    在全长候选之后附带原样 `iphone` 备选（对齐主流输入法 `1. iPhone  2. iphone` 体验，且 `final_score < 89.5` 不干扰大模型池）；
+        // 2) 当整串输入具备显著非拼音英文特征（以 `i/u/v` 开头或含强英文辅音簇）且列表中尚无原样英文串时，确保提供原样英文候选兜底。
+        if pinned_segments.is_empty()
+            && (2..=28).contains(&n)
+            && lattice.input.bytes().all(|b| b.is_ascii_alphanumeric())
+            && lattice.input.bytes().any(|b| b.is_ascii_alphabetic())
+            && !candidates.iter().any(|c| c.text == lattice.input)
+        {
+            let lower_key = lattice.input.to_ascii_lowercase();
+            let top_is_cased_english = candidates
+                .first()
+                .is_some_and(|c| c.consumed_len == n && c.text.is_ascii() && c.text != lattice.input);
+            let top_is_clean_bilingual = candidates
+                .first()
+                .is_some_and(|c| c.consumed_len == n && c.tag == "[中英混输]");
+            let non_pinyin_english = n >= 3
+                && !top_is_clean_bilingual
+                && !crate::pinyin::can_segment_as_clean_full_syllables(&lower_key)
+                && (matches!(lower_key.as_bytes()[0], b'i' | b'u' | b'v')
+                    || crate::pinyin::PhonotacticDetector::global()
+                        .english_cluster_score(&lower_key)
+                        >= 2.0);
+            if top_is_cased_english || non_pinyin_english {
+                let raw_text = lattice.input.clone();
+                let insert_pos = candidates
+                    .iter()
+                    .position(|c| c.consumed_len < n)
+                    .unwrap_or(candidates.len())
+                    .clamp(1, candidates.len());
+                let raw_score = (min_beam_score - 0.95).min(89.2);
+                candidates.insert(
+                    insert_pos,
+                    Candidate {
+                        text: raw_text.clone(),
+                        preedit: lower_key.clone(),
+                        consumed_len: n,
+                        l1_cost: max_beam_cost + 0.4,
+                        final_score: raw_score,
+                        ai_boosted: false,
+                        tag: "[英文]".to_string(),
+                        pronunciation_hint: None,
+                        segments: vec![raw_text.clone()],
+                        segment_spans: vec![SegmentSpan {
+                            start: 0,
+                            end: n,
+                            text: raw_text,
+                            code_key: lower_key.clone(),
+                        }],
+                        syllable_spans: vec![SegmentSpan {
+                            start: 0,
+                            end: n,
+                            text: lattice.input.clone(),
+                            code_key: lower_key,
+                        }],
+                    },
+                );
             }
         }
 
@@ -2118,6 +2176,19 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
         bonus += 3.5;
     }
 
+    // 6. 穿戴类动词「戴/戴着/戴上/戴好」+ 可穿戴配件名词同音消歧（避免被更高字频的「带/带着」覆盖）
+    if matches!(
+        w,
+        "耳机" | "眼镜" | "墨镜" | "口罩" | "帽子" | "手表" | "手环" | "头盔" | "手套"
+            | "项链" | "耳环" | "戒指" | "AirPods" | "AppleWatch" | "iWatch"
+    ) {
+        if matches!(prev_word, "戴" | "戴着" | "戴上" | "戴好" | "佩戴") {
+            bonus += 3.2;
+        } else if matches!(prev_word, "带" | "带着") {
+            bonus -= 0.8;
+        }
+    }
+
     bonus
 }
 
@@ -2269,6 +2340,33 @@ fn grammar_transition_bonus(
                 if state_vo_bonus(&state.edges[..o_pos], o_edge) > 0.0 {
                     bonus += 2.65;
                 }
+            }
+        }
+    }
+
+    // 00. 抑制无分隔符连续输入中「英文词/兜底单字母 <-> 简拼碎片」的伪拼接
+    //     （如 `iphone` 硬拆成 `IP + h'o[海鸥] + ne`、`xcode` 拆成 `x[下] + code`、`url` 拆成 `u + r'l[人类]`）；
+    //     仅当用户在英文词末尾正敲入句尾单个声母（`edge.end == n` 且为单声母 `ChineseChar`，如 `ppty`）时保留自然预览。
+    if state.edges.last().is_some_and(|last| !last.text.is_empty()) {
+        if let Some(prev_e) = state.edges.iter().rev().find(|e| !e.text.is_empty()) {
+            let is_eng_kind = |k: EdgeKind| {
+                matches!(
+                    k,
+                    EdgeKind::EnglishWord | EdgeKind::EnglishPrefixCompletion | EdgeKind::EnglishRaw
+                )
+            };
+            let is_single_consonant_char = |e: &LatticeEdge| {
+                e.kind == EdgeKind::ChineseChar
+                    && e.code_key.len() == 1
+                    && !matches!(e.code_key.as_str(), "a" | "e" | "o")
+            };
+            let prev_eng = is_eng_kind(prev_e.kind);
+            let curr_eng = is_eng_kind(edge.kind);
+            let prev_jp = prev_e.kind == EdgeKind::AbbrevPinyin || is_single_consonant_char(prev_e);
+            let curr_jp = edge.kind == EdgeKind::AbbrevPinyin
+                || (is_single_consonant_char(edge) && !is_end);
+            if (prev_eng && curr_jp) || (prev_jp && curr_eng) {
+                bonus -= 5.5;
             }
         }
     }

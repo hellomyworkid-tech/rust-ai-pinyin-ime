@@ -117,11 +117,192 @@ pub static SUPPLEMENT_ENTRIES: &[SupplementEntry] = &[
     SupplementEntry { syllable_key: "qing'xu'jia'zhi", text: "情绪价值", cost: 10.55, domain: DomainTag::Chat },
     SupplementEntry { syllable_key: "jing'shen'nei'hao", text: "精神内耗", cost: 10.65, domain: DomainTag::Chat },
     SupplementEntry { syllable_key: "cao'tai'ban'zi", text: "草台班子", cost: 10.85, domain: DomainTag::Chat },
+    SupplementEntry { syllable_key: "bi'li'bi'li", text: "哔哩哔哩", cost: 10.45, domain: DomainTag::Chat },
+];
+
+/// 现代高频英文品牌、数码产品、主流平台、AI 生态与软硬件缩写补充词条。
+///
+/// 背景：远端 `merged_lexicon-2026.11.12.2.bin` 仅编入了雾凇拼音的普通单词表 `en.dict.yaml`（`google-10000-english`）
+/// 与 150 条开发种子词，未纳入专有名词与互联网扩展表 `en_ext.dict.yaml`，导致 `iPhone`、`iPad`、`AirPods`、
+/// `MacBook`、`WeChat`、`YouTube`、`Xcode`、`HDMI`、`OLED`、`URL` 等高频大小写专名缺失。
+#[derive(Debug, Clone, Copy)]
+pub struct EnglishSupplementEntry {
+    pub text: &'static str,
+    pub lower_key: &'static str,
+    pub cost: f32,
+    pub domain: DomainTag,
+}
+
+pub static ENGLISH_SUPPLEMENT_ENTRIES: &[EnglishSupplementEntry] = &[
+    // 1. Apple 与主流移动/桌面软硬件生态
+    EnglishSupplementEntry { text: "iPhone", lower_key: "iphone", cost: 9.05, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "iPad", lower_key: "ipad", cost: 9.15, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "AirPods", lower_key: "airpods", cost: 9.20, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "MacBook", lower_key: "macbook", cost: 9.18, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "iMac", lower_key: "imac", cost: 9.30, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "MacMini", lower_key: "macmini", cost: 9.55, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "MacStudio", lower_key: "macstudio", cost: 9.55, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "iCloud", lower_key: "icloud", cost: 9.25, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "AppleWatch", lower_key: "applewatch", cost: 9.35, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "iWatch", lower_key: "iwatch", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "iPod", lower_key: "ipod", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "HomePod", lower_key: "homepod", cost: 9.55, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "AirTag", lower_key: "airtag", cost: 9.55, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "AirDrop", lower_key: "airdrop", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "FaceID", lower_key: "faceid", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "TouchID", lower_key: "touchid", cost: 9.55, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "CarPlay", lower_key: "carplay", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "MagSafe", lower_key: "magsafe", cost: 9.55, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "iMessage", lower_key: "imessage", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "FaceTime", lower_key: "facetime", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "TestFlight", lower_key: "testflight", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Xcode", lower_key: "xcode", cost: 9.30, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "SwiftUI", lower_key: "swiftui", cost: 9.30, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Safari", lower_key: "safari", cost: 9.35, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Siri", lower_key: "siri", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "ProMax", lower_key: "promax", cost: 9.55, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "eSIM", lower_key: "esim", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "eBook", lower_key: "ebook", cost: 9.60, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "HarmonyOS", lower_key: "harmonyos", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "ThinkPad", lower_key: "thinkpad", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "GeForce", lower_key: "geforce", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Snapdragon", lower_key: "snapdragon", cost: 9.55, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "PlayStation", lower_key: "playstation", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Xbox", lower_key: "xbox", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Nintendo", lower_key: "nintendo", cost: 9.55, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "SteamDeck", lower_key: "steamdeck", cost: 9.60, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Kindle", lower_key: "kindle", cost: 9.45, domain: DomainTag::General },
+
+    // 2. 主流应用、社交内容平台与生产力软件
+    EnglishSupplementEntry { text: "WeChat", lower_key: "wechat", cost: 9.25, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "TikTok", lower_key: "tiktok", cost: 9.30, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "YouTube", lower_key: "youtube", cost: 9.25, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Bilibili", lower_key: "bilibili", cost: 10.85, domain: DomainTag::Chat },
+    EnglishSupplementEntry { text: "Instagram", lower_key: "instagram", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Facebook", lower_key: "facebook", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Twitter", lower_key: "twitter", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Telegram", lower_key: "telegram", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "WhatsApp", lower_key: "whatsapp", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Discord", lower_key: "discord", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Reddit", lower_key: "reddit", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "LinkedIn", lower_key: "linkedin", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Netflix", lower_key: "netflix", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Spotify", lower_key: "spotify", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Steam", lower_key: "steam", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Notion", lower_key: "notion", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Obsidian", lower_key: "obsidian", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Figma", lower_key: "figma", cost: 9.40, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Canva", lower_key: "canva", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Lightroom", lower_key: "lightroom", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Premiere", lower_key: "premiere", cost: 9.55, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "AutoCAD", lower_key: "autocad", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "MATLAB", lower_key: "matlab", cost: 9.45, domain: DomainTag::Academic },
+    EnglishSupplementEntry { text: "OneDrive", lower_key: "onedrive", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Outlook", lower_key: "outlook", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Keynote", lower_key: "keynote", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Chrome", lower_key: "chrome", cost: 9.30, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Firefox", lower_key: "firefox", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Gmail", lower_key: "gmail", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Google", lower_key: "google", cost: 9.20, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Microsoft", lower_key: "microsoft", cost: 9.30, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Amazon", lower_key: "amazon", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Tesla", lower_key: "tesla", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Samsung", lower_key: "samsung", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Sony", lower_key: "sony", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "OPPO", lower_key: "oppo", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "vivo", lower_key: "vivo", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "DJI", lower_key: "dji", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Nikon", lower_key: "nikon", cost: 9.55, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Canon", lower_key: "canon", cost: 9.55, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "Leica", lower_key: "leica", cost: 9.55, domain: DomainTag::General },
+
+    // 3. AI 大模型与现代技术栈专名
+    EnglishSupplementEntry { text: "Copilot", lower_key: "copilot", cost: 9.35, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Cursor", lower_key: "cursor", cost: 9.35, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Midjourney", lower_key: "midjourney", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Sora", lower_key: "sora", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Perplexity", lower_key: "perplexity", cost: 9.55, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Grok", lower_key: "grok", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Llama", lower_key: "llama", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Qwen", lower_key: "qwen", cost: 9.35, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Kimi", lower_key: "kimi", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "HuggingFace", lower_key: "huggingface", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "LangChain", lower_key: "langchain", cost: 9.55, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Vulkan", lower_key: "vulkan", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "CoreML", lower_key: "coreml", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "WebGL", lower_key: "webgl", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "WebGPU", lower_key: "webgpu", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Kotlin", lower_key: "kotlin", cost: 9.35, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Flutter", lower_key: "flutter", cost: 9.35, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Golang", lower_key: "golang", cost: 9.35, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "NodeJS", lower_key: "nodejs", cost: 9.40, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "NextJS", lower_key: "nextjs", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "VueJS", lower_key: "vuejs", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Tailwind", lower_key: "tailwind", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Xcodeproj", lower_key: "xcodeproj", cost: 9.65, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "UniFFI", lower_key: "uniffi", cost: 9.65, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Vercel", lower_key: "vercel", cost: 9.55, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "Supabase", lower_key: "supabase", cost: 9.55, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "ArkTS", lower_key: "arkts", cost: 9.55, domain: DomainTag::Tech },
+
+    // 4. 硬件接口、显示、网络协议与常见文件格式缩写
+    //    （与高频中文简拼重叠的 3 字母缩写如 SSH/SSD/LCD/LED 定在 11.4，保持中文首选并通过黄金第二位呈现）
+    EnglishSupplementEntry { text: "URL", lower_key: "url", cost: 9.25, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "USB", lower_key: "usb", cost: 9.20, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "TypeC", lower_key: "typec", cost: 9.25, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "HDMI", lower_key: "hdmi", cost: 9.25, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "OLED", lower_key: "oled", cost: 9.25, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "AMOLED", lower_key: "amoled", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "QLED", lower_key: "qled", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "HDR", lower_key: "hdr", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "RGB", lower_key: "rgb", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "NFC", lower_key: "nfc", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "GPS", lower_key: "gps", cost: 9.30, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "VPN", lower_key: "vpn", cost: 9.30, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "DNS", lower_key: "dns", cost: 9.40, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "DHCP", lower_key: "dhcp", cost: 9.55, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "TCP", lower_key: "tcp", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "UDP", lower_key: "udp", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "IPv4", lower_key: "ipv4", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "IPv6", lower_key: "ipv6", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "BIOS", lower_key: "bios", cost: 9.40, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "UEFI", lower_key: "uefi", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "NVMe", lower_key: "nvme", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "PCIe", lower_key: "pcie", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "VRAM", lower_key: "vram", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "DRAM", lower_key: "dram", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "DDR5", lower_key: "ddr5", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "EUV", lower_key: "euv", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "DUV", lower_key: "duv", cost: 9.55, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "ASML", lower_key: "asml", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "APK", lower_key: "apk", cost: 9.35, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "IPA", lower_key: "ipa", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "HEIC", lower_key: "heic", cost: 9.50, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "WEBP", lower_key: "webp", cost: 9.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "JPEG", lower_key: "jpeg", cost: 9.40, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "FLAC", lower_key: "flac", cost: 9.45, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "MP3", lower_key: "mp3", cost: 9.25, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "MP4", lower_key: "mp4", cost: 9.20, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "YAML", lower_key: "yaml", cost: 9.40, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "TOML", lower_key: "toml", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "UTF8", lower_key: "utf8", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "CSV", lower_key: "csv", cost: 9.45, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "SSH", lower_key: "ssh", cost: 13.50, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "SSD", lower_key: "ssd", cost: 13.80, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "LCD", lower_key: "lcd", cost: 13.20, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "LED", lower_key: "led", cost: 13.20, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "FPS", lower_key: "fps", cost: 11.20, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "PNG", lower_key: "png", cost: 11.20, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "JPG", lower_key: "jpg", cost: 11.20, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "GIF", lower_key: "gif", cost: 10.60, domain: DomainTag::General },
+    EnglishSupplementEntry { text: "SVG", lower_key: "svg", cost: 10.80, domain: DomainTag::Tech },
+    EnglishSupplementEntry { text: "XML", lower_key: "xml", cost: 11.20, domain: DomainTag::Tech },
 ];
 
 struct SupplementIndex {
     syllable_trie: FlatTrie,
     abbrev_trie: FlatTrie,
+    english_trie: FlatTrie,
 }
 
 static SUPPLEMENT_INDEX: LazyLock<SupplementIndex> = LazyLock::new(|| {
@@ -146,11 +327,97 @@ static SUPPLEMENT_INDEX: LazyLock<SupplementIndex> = LazyLock::new(|| {
             abbrev_trie.insert_with_limit(&abbrev, idx as u32, false, 0, 16);
         }
     }
+
+    let mut eng_order: Vec<usize> = (0..ENGLISH_SUPPLEMENT_ENTRIES.len()).collect();
+    eng_order.sort_by(|&a, &b| {
+        ENGLISH_SUPPLEMENT_ENTRIES[a]
+            .cost
+            .total_cmp(&ENGLISH_SUPPLEMENT_ENTRIES[b].cost)
+            .then_with(|| {
+                ENGLISH_SUPPLEMENT_ENTRIES[a]
+                    .text
+                    .cmp(ENGLISH_SUPPLEMENT_ENTRIES[b].text)
+            })
+    });
+    let mut english_trie = FlatTrie::new();
+    for idx in eng_order {
+        let entry = &ENGLISH_SUPPLEMENT_ENTRIES[idx];
+        english_trie.insert_with_limit(entry.lower_key, idx as u32, true, 8, 8);
+    }
+
     SupplementIndex {
         syllable_trie,
         abbrev_trie,
+        english_trie,
     }
 });
+
+#[inline]
+pub fn english_supplement_trie() -> &'static FlatTrie {
+    &SUPPLEMENT_INDEX.english_trie
+}
+
+#[inline]
+pub fn english_supplement_entry(id: u32) -> &'static EnglishSupplementEntry {
+    &ENGLISH_SUPPLEMENT_ENTRIES[id as usize]
+}
+
+#[inline]
+pub fn has_english_entry(lexicon: &ime_lexicon::CompiledLexicon, lower_key: &str) -> bool {
+    !lexicon.english_trie().exact_lookup(lower_key).is_empty()
+        || !SUPPLEMENT_INDEX
+            .english_trie
+            .exact_lookup(lower_key)
+            .is_empty()
+}
+
+#[inline]
+pub fn has_english_prefix(lexicon: &ime_lexicon::CompiledLexicon, lower_suffix: &str) -> bool {
+    lexicon
+        .english_trie()
+        .common_prefix_search(lower_suffix)
+        .next()
+        .is_some()
+        || !SUPPLEMENT_INDEX
+            .english_trie
+            .common_prefix_search(lower_suffix)
+            .is_empty()
+}
+
+/// 查询主词库与补充词表中覆盖 `lower_key` 的最优（最低 cost）规范大小写英文词文本
+pub fn best_english_exact_text<'a>(
+    lexicon: &'a ime_lexicon::CompiledLexicon,
+    lower_key: &str,
+) -> Option<&'a str> {
+    let lex_best = lexicon
+        .english_trie()
+        .exact_lookup(lower_key)
+        .first()
+        .map(|id| {
+            let e = lexicon.entry(id);
+            (e.cost(), e.text())
+        });
+    let sup_best = SUPPLEMENT_INDEX
+        .english_trie
+        .exact_lookup(lower_key)
+        .first()
+        .map(|&id| {
+            let e = &ENGLISH_SUPPLEMENT_ENTRIES[id as usize];
+            (e.cost, e.text)
+        });
+    match (lex_best, sup_best) {
+        (Some((lc, lt)), Some((sc, st))) => {
+            if sc < lc {
+                Some(st)
+            } else {
+                Some(lt)
+            }
+        }
+        (Some((_, lt)), None) => Some(lt),
+        (None, Some((_, st))) => Some(st),
+        (None, None) => None,
+    }
+}
 
 /// 收集补充词表的全拼/模糊音及末尾不完整音节边
 pub fn collect_supplement_edges(
@@ -344,5 +611,26 @@ mod tests {
         assert!(lookup_supplement_abbrev("shkh")
             .iter()
             .any(|e| e.text == "私行客户"));
+
+        for eng in ENGLISH_SUPPLEMENT_ENTRIES {
+            assert!(!eng.text.is_empty());
+            assert!(eng.text.is_ascii(), "non-ASCII in {}", eng.text);
+            assert_eq!(
+                eng.lower_key,
+                eng.text.to_ascii_lowercase(),
+                "lower_key mismatch for {}",
+                eng.text
+            );
+            assert!(
+                eng.lower_key.bytes().all(|b| b.is_ascii_alphanumeric()),
+                "invalid lower_key {}",
+                eng.lower_key
+            );
+            assert!((8.5..=14.5).contains(&eng.cost), "cost out of range for {}", eng.text);
+        }
+        assert_eq!(
+            ENGLISH_SUPPLEMENT_ENTRIES[english_supplement_trie().exact_lookup("iphone")[0] as usize].text,
+            "iPhone"
+        );
     }
 }
