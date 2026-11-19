@@ -82,6 +82,11 @@ impl BilingualLattice {
                 spans_at[sp.start].push(sp);
             }
         }
+        // 精确音节永远先于模糊纠错音节遍历（稳定排序保留各自内部由长到短的顺序），
+        // 确保 `collect_chinese_edges` 判断 `has_common_exact_word_at_origin` 时同起点的精确多字词均已入列
+        for bucket in &mut spans_at {
+            bucket.sort_by_key(|sp| sp.fuzzy_penalty > 0.0);
+        }
 
         // 2. 基于 Trie 节点增量游走的零拷贝 DFS：枚举从位置 i 出发的 1~6 个连续中文音节路径，无前缀时立即剪枝
         for start_pos in 0..n {
@@ -707,7 +712,7 @@ fn collect_chinese_edges<'a>(
             let has_common_exact_word_at_origin = new_fuzzy > 0.0
                 && out_edges
                     .iter()
-                    .any(|e| !e.is_fuzzy && e.syllable_count >= 2 && e.base_cost < 13.1);
+                    .any(|e| !e.is_fuzzy && e.syllable_count >= 2 && e.base_cost < 13.6);
             let effective_fuzzy = if syl_count >= 2 {
                 if new_fuzzy_syls >= 2 {
                     new_fuzzy * 1.45
@@ -1062,7 +1067,7 @@ fn is_closed_numeral_or_measure_char(text: &str) -> bool {
             | "天" | "年" | "月" | "周" | "日" | "秒" | "瓦" | "匹" | "寸" | "尺"
             | "箱" | "盒" | "袋" | "瓶" | "杯" | "碗" | "税" | "职" | "觉" | "账"
             | "假" | "货" | "警" | "澡" | "婚" | "泳" | "款" | "费" | "单" | "票"
-            | "卡"
+            | "卡" | "达" | "码" | "柜"
     )
 }
 

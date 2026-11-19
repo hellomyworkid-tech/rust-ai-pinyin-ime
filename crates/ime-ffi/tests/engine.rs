@@ -2133,3 +2133,65 @@ fn english_brands_morphology_mixed_sentences_and_raw_fallback_work() {
         engine.reset();
     }
 }
+
+#[test]
+fn logistics_compounds_time_delivery_suffixes_and_diverse_pool_work() {
+    let engine = engine();
+    for (py, want) in [
+        ("shunfengbiaokuai", "顺丰标快"),
+        ("shunfengtekuai", "顺丰特快"),
+        ("shunfengsuyun", "顺丰速运"),
+        ("shunfengkuaiyun", "顺丰快运"),
+        ("shunfengtongcheng", "顺丰同城"),
+        ("shunfengxiaoge", "顺丰小哥"),
+        ("shunfengkuaidi", "顺丰快递"),
+        ("jingdongbiaokuai", "京东标快"),
+        ("jingdongtekuai", "京东特快"),
+        ("jingdongkuaidi", "京东快递"),
+        ("jingdongwuliu", "京东物流"),
+        ("jingdongziying", "京东自营"),
+        ("zhongtongkuaidi", "中通快递"),
+        ("yundakuaidi", "韵达快递"),
+        ("jitusudi", "极兔速递"),
+        ("cainiaoyizhan", "菜鸟驿站"),
+        ("tongchengjisong", "同城急送"),
+        ("cirida", "次日达"),
+        ("gerida", "隔日达"),
+        ("dangrida", "当日达"),
+        ("xiaoshida", "小时达"),
+        ("biaokuai", "标快"),
+    ] {
+        let out = type_letters(&engine, py);
+        assert_eq!(top_text(&out), want, "{py}");
+        engine.reset();
+    }
+
+    // 即使启用真实本地大模型（如手机端 Qwen2.5-0.5B），在有/无上文下输入 shunfengbiaokuai 也稳定保持「顺丰标快」首选
+    if let Some(model) = std::env::var_os("IME_LLM_TEST_MODEL") {
+        if ImeEngine::llm_supported() {
+            let _turn = real_model_test_turn();
+            let (tx, rx) = mpsc::channel();
+            let tx = Mutex::new(tx);
+            engine.set_notify(Some(Arc::new(move || {
+                let _ = tx.lock().unwrap().send(());
+            })));
+            engine.load_llm(std::path::Path::new(&model), 0).expect("load model");
+            for ctx in [None, Some("发个"), Some("寄快递选")] {
+                engine.set_context(ctx);
+                let initial = type_letters(&engine, "shunfengbiaokuai");
+                assert_eq!(top_text(&initial), "顺丰标快", "ctx={ctx:?} initial");
+                if engine.ai_result_pending() {
+                    let _ = rx.recv_timeout(Duration::from_secs(10));
+                }
+                let refreshed = json(&engine.refresh_after_ai());
+                assert_eq!(
+                    refreshed["visible_candidates"][0]["text"],
+                    "顺丰标快",
+                    "ctx={ctx:?} after AI"
+                );
+                engine.reset();
+            }
+            engine.unload_llm();
+        }
+    }
+}

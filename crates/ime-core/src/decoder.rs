@@ -623,19 +623,20 @@ impl BilingualDecoder {
 
         // 整句候选只保留少量「真正可能」的版本：
         // - 覆盖全部输入的单一词条（如 `xuanci` → 选词/选此，`zenmehuishi` → 怎么回事/怎么会是）都是合法同音词，全部保留在最前；
-        // - 多段拼接的整句：除第 1 名首选整句外，将代价接近的前 2 条备选整句暂存至 `alt_sentences`：
-        //   一方面用于提取句首第二词块同音对比前缀（如首选「现在再研究一下」时提取对比前缀「现在在」），
-        //   另一方面保留在候选池供 L2 端侧 AI / 大模型做语境与语法逆转重排，同时不挤占第一页前缀词位置。
-        const MAX_BACKUP_SENTENCES: usize = 3;
+        // - 多段拼接的整句：除第 1 名首选整句外，保留最多 7 条段级多样化的备选整句暂存至 `alt_sentences`（对齐 `SCORING_POOL_MAX = 8`）：
+        //   既防止某一段的多个近分同音词（如「笑个/校歌/小格」）垄断全部备选槽而挤掉另一段的同音替换及双段联合替换（如「顺丰+小哥」「顺丰+标快」），
+        //   又供 L2 端侧 AI / 大模型做语境重排（未夺冠的 `[整句备选]` 在 AI 重排后会被剔除，不挤占候选栏前缀词位置）。
+        const MAX_BACKUP_SENTENCES: usize = 7;
         const SENTENCE_COST_MARGIN: f32 = 3.5;
         let mut alt_sentences: Vec<Candidate> = Vec::new();
-        if let Some((best_cost, best_seg_cnt, best_syl_cnt, best_is_ascii)) =
+        if let Some((best_cost, best_seg_cnt, best_syl_cnt, best_is_ascii, best_seg_spans)) =
             candidates.first().map(|c| {
                 (
                     c.l1_cost,
                     c.segments.len(),
                     c.syllable_spans.len(),
                     c.text.is_ascii(),
+                    c.segment_spans.clone(),
                 )
             })
         {
@@ -651,6 +652,7 @@ impl BilingualDecoder {
                 .find(|c| !c.tag.starts_with("[纠错") && !c.text.is_ascii())
                 .map(|c| (c.l1_cost, c.segments.len(), c.syllable_spans.len()));
             let mut has_diff_syl_backup = false;
+            let mut standard_pool: Vec<Candidate> = Vec::new();
             let mut idx = 0usize;
             candidates.retain(|c| {
                 let cur_idx = idx;
@@ -677,7 +679,7 @@ impl BilingualDecoder {
                     && (c.syllable_spans.len() > best_syl_cnt
                         || c.syllable_spans.len() > ref_syl_cnt);
                 let effective_margin = if is_pure_full_pinyin_cn && c.segments.len() <= best_seg_cnt {
-                    4.2
+                    4.5
                 } else {
                     SENTENCE_COST_MARGIN
                 };
@@ -711,18 +713,66 @@ impl BilingualDecoder {
                     } else {
                         false
                     };
-                if (alt_sentences.len() < MAX_BACKUP_SENTENCES && standard_ok) || split_phrase_ok {
+                if split_phrase_ok {
+                    has_diff_syl_backup = true;
                     let mut backup = c.clone();
-                    if is_diff_syl_split && !has_diff_syl_backup {
-                        has_diff_syl_backup = true;
-                        backup.tag = "[分词备选]".to_string();
-                    } else {
-                        backup.tag = "[整句备选]".to_string();
-                    }
+                    backup.tag = "[分词备选]".to_string();
                     alt_sentences.push(backup);
+                } else if standard_ok && standard_pool.len() < 24 {
+                    let mut backup = c.clone();
+                    backup.tag = "[整句备选]".to_string();
+                    standard_pool.push(backup);
                 }
                 false
             });
+            // 两轮段级去垄断挑选：第一轮对「仅改变同一单段」的同音变体限流（每段最多占 2 席），
+            // 让其他段的次选同音词与多段联合替换（`[A2, B2]`）稳进前 7 备选；不足 7 条时第二轮按代价补满。
+            let mut single_seg_counts = [0u8; 16];
+            let mut deferred_single_seg: Vec<Candidate> = Vec::new();
+            for cand in standard_pool {
+                if alt_sentences.iter().filter(|c| c.tag == "[整句备选]").count() >= MAX_BACKUP_SENTENCES {
+                    break;
+                }
+                let single_diff_idx = if cand.segment_spans.len() == best_seg_spans.len()
+                    && cand.segment_spans.len() <= 16
+                    && cand
+                        .segment_spans
+                        .iter()
+                        .zip(best_seg_spans.iter())
+                        .all(|(a, b)| a.start == b.start && a.end == b.end)
+                {
+                    let mut diff_i = None;
+                    let mut diff_cnt = 0usize;
+                    for (si, (a, b)) in cand
+                        .segment_spans
+                        .iter()
+                        .zip(best_seg_spans.iter())
+                        .enumerate()
+                    {
+                        if a.text != b.text {
+                            diff_cnt += 1;
+                            diff_i = Some(si);
+                        }
+                    }
+                    (diff_cnt == 1).then_some(diff_i).flatten()
+                } else {
+                    None
+                };
+                if let Some(si) = single_diff_idx {
+                    if single_seg_counts[si] >= 2 {
+                        deferred_single_seg.push(cand);
+                        continue;
+                    }
+                    single_seg_counts[si] += 1;
+                }
+                alt_sentences.push(cand);
+            }
+            for cand in deferred_single_seg {
+                if alt_sentences.iter().filter(|c| c.tag == "[整句备选]").count() >= MAX_BACKUP_SENTENCES {
+                    break;
+                }
+                alt_sentences.push(cand);
+            }
             // 同步清理 `seen_surface`：被 `candidates.retain` 剔除的多段整句不能继续占用 `seen_surface`，
             // 否则会阻塞后续 `word_edges` 推入同名词库词条。
             seen_surface.retain(|txt| candidates.iter().any(|c| &c.text == txt));
@@ -2186,6 +2236,52 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
             bonus += 3.2;
         } else if matches!(prev_word, "带" | "带着") {
             bonus -= 0.8;
+        }
+    }
+
+    // 7. 高产时效构词「[时限名词] + 达」（次日达 / 隔日达 / 当日达 / 半日达 / 小时达 / 限时达 / 准时达），
+    //    以及「[快递/物流/平台专名] + [履约服务核心词]」语义选择限制（消除「顺风标快 / 惊动快递 / 肿痛快递 / 云大快递」等同音错配）
+    if !edge.is_fuzzy
+        && w == "达"
+        && matches!(
+            prev_word,
+            "次日" | "隔日" | "当日" | "半日" | "同日" | "明日" | "小时" | "分钟" | "限时"
+                | "准时" | "即时" | "整点"
+        )
+    {
+        bonus += 4.65;
+    }
+    if !edge.is_fuzzy {
+        let is_express_service_head = matches!(
+            w,
+            "快递" | "快运" | "速运" | "速递" | "标快" | "特快" | "普快" | "冷运" | "次晨"
+                | "即日" | "同城" | "物流" | "集运" | "驿站" | "小哥" | "单号" | "包裹" | "运单"
+                | "到付" | "寄付" | "现付" | "保价" | "取件" | "寄件" | "派件" | "揽收"
+        );
+        let is_ecommerce_head = matches!(w, "自营" | "商城" | "白条" | "超市" | "到家" | "买菜");
+        if is_express_service_head {
+            if matches!(
+                prev_word,
+                "顺丰" | "京东" | "中通" | "圆通" | "申通" | "韵达" | "极兔" | "德邦" | "菜鸟"
+                    | "丰巢" | "跨越"
+            ) {
+                bonus += 2.65;
+            } else if matches!(prev_word, "顺风" | "惊动" | "肿痛" | "云大" | "激凸" | "激突") {
+                bonus -= 1.65;
+            }
+        } else if is_ecommerce_head {
+            if matches!(prev_word, "京东" | "天猫" | "淘宝" | "美团" | "盒马") {
+                bonus += 2.65;
+            } else if prev_word == "惊动" {
+                bonus -= 1.65;
+            }
+        } else if matches!(w, "顺丰" | "德邦" | "中通" | "圆通" | "申通" | "韵达" | "极兔")
+            && matches!(
+                prev_word,
+                "发" | "发个" | "发了" | "寄" | "寄个" | "走" | "用" | "选" | "查" | "收"
+            )
+        {
+            bonus += 2.25;
         }
     }
 

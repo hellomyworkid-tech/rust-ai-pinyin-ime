@@ -118,6 +118,22 @@ pub static SUPPLEMENT_ENTRIES: &[SupplementEntry] = &[
     SupplementEntry { syllable_key: "jing'shen'nei'hao", text: "精神内耗", cost: 10.65, domain: DomainTag::Chat },
     SupplementEntry { syllable_key: "cao'tai'ban'zi", text: "草台班子", cost: 10.85, domain: DomainTag::Chat },
     SupplementEntry { syllable_key: "bi'li'bi'li", text: "哔哩哔哩", cost: 10.45, domain: DomainTag::Chat },
+
+    // 5. 现代快递物流、电商履约与同城配送缩略复合词（补齐词素级积木如「标快/速运/冷运/次晨/驿站」，使四字组合自然涌现）
+    SupplementEntry { syllable_key: "biao'kuai", text: "标快", cost: 10.95, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "su'yun", text: "速运", cost: 10.95, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "leng'yun", text: "冷运", cost: 11.15, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "ci'chen", text: "次晨", cost: 11.25, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "ji'fu", text: "寄付", cost: 11.15, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "bao'jia", text: "保价", cost: 11.05, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "yi'zhan", text: "驿站", cost: 10.85, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "feng'chao", text: "丰巢", cost: 10.95, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "feng'chao'gui", text: "丰巢柜", cost: 10.95, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "kuai'di'gui", text: "快递柜", cost: 10.65, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "qu'jian'ma", text: "取件码", cost: 10.55, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "ji'jian'ma", text: "寄件码", cost: 10.85, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "tong'cheng'ji'song", text: "同城急送", cost: 10.75, domain: DomainTag::General },
+    SupplementEntry { syllable_key: "ji'tu", text: "极兔", cost: 11.05, domain: DomainTag::General },
 ];
 
 /// 现代高频英文品牌、数码产品、主流平台、AI 生态与软硬件缩写补充词条。
