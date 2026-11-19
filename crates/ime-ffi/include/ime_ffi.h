@@ -191,6 +191,12 @@ uint64_t ime_phys_footprint(void);
 // 立即释放进程级本地模型缓存并向系统归还空闲堆页（用于 iOS 内存警告或键盘退入后台防 Jetsam 强杀）
 void ime_release_memory_caches(void);
 
+// 只释放进程内常驻本地模型的推理上下文（KV 缓存、计算缓冲、logits 缓冲），保留模型本体，并归还空闲堆页。
+// 键盘全部收起时调用：挂起期间的常驻内存降到只剩模型本体；下一次打分时在引擎后台线程上自动重建上下文
+// （Mac 实测 2–3 ms），不需要重新解析 GGUF，打分结果与释放前逐位相同。会等正在进行的打分取消退出，
+// 应在后台线程调用。进程里没有加载本地模型时只归还空闲堆页。
+void ime_trim_local_model_context(void);
+
 void ime_string_free(char *string);
 
 #ifdef __cplusplus

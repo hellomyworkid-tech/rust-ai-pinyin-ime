@@ -54,6 +54,8 @@ pub struct FakeCounters {
     pub decodes_without_outputs: usize,
     pub kv_clears: usize,
     pub tokenize_calls: usize,
+    /// `release_context` 的调用次数（释放时 KV 缓存一并清空）
+    pub context_releases: usize,
 }
 
 #[derive(Debug)]
@@ -309,6 +311,14 @@ impl LmBackend for FakeBackend {
 
     fn install_cancel(&mut self, flag: Arc<CancelFlag>) {
         self.cancel = Some(flag);
+    }
+
+    /// 模拟真实后端：释放上下文后 KV 缓存为空（不计入 `kv_clears`）
+    fn release_context(&mut self) {
+        self.counters.context_releases += 1;
+        for s in &mut self.seqs {
+            s.clear();
+        }
     }
 }
 

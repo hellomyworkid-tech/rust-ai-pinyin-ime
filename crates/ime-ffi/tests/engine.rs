@@ -1397,6 +1397,60 @@ fn local_model_fixes_the_homophone_by_context() {
     engine.reset();
 }
 
+/// 真模型：键盘收起时只释放推理上下文（`ime_trim_local_model_context`），模型仍挂在引擎上；
+/// 再次输入时上下文在后台自动重建，模型照样按上文改对同音词，内存在释放后下降
+#[test]
+fn trimming_the_model_context_keeps_the_model_usable() {
+    let Some(model) = std::env::var_os("IME_LLM_TEST_MODEL") else {
+        eprintln!("跳过：没有设置 IME_LLM_TEST_MODEL");
+        return;
+    };
+    if !ImeEngine::llm_supported() {
+        eprintln!("跳过：这个构建没有启用 llama 特性");
+        return;
+    }
+    let _turn = real_model_test_turn();
+    let engine = engine();
+    let (tx, rx) = mpsc::channel();
+    let tx = Mutex::new(tx);
+    engine.set_notify(Some(Arc::new(move || {
+        let _ = tx.lock().unwrap().send(());
+    })));
+    engine.load_llm(std::path::Path::new(&model), 0).expect("load model");
+
+    // 先打一次分，让上下文的缓冲都分配出来
+    engine.set_context(Some("我对天发誓这是我的"));
+    type_letters(&engine, "shiyan");
+    rx.recv_timeout(Duration::from_secs(20)).expect("模型结果应当触发刷新回调");
+    engine.reset();
+    let warm = ime_phys_footprint();
+
+    ime_trim_local_model_context();
+    let trimmed = ime_phys_footprint();
+    assert!(engine.is_llm_loaded(), "只释放上下文，模型仍挂在引擎上");
+    eprintln!(
+        "footprint: warm {:.1} MiB, after trimming the context {:.1} MiB",
+        warm as f64 / 1048576.0,
+        trimmed as f64 / 1048576.0
+    );
+    if warm > 0 {
+        assert!(trimmed < warm, "释放上下文后内存应当下降：{warm} -> {trimmed}");
+    }
+
+    // 换一组拼音（不命中结果缓存），确认上下文自动重建后模型照常工作
+    engine.set_context(Some("他在婚礼上许下了"));
+    type_letters(&engine, "shiyan");
+    rx.recv_timeout(Duration::from_secs(20)).expect("重建上下文后模型结果应当触发刷新回调");
+    let after = json(&engine.refresh_after_ai());
+    assert_eq!(after["visible_candidates"][0]["text"], "誓言");
+    assert_eq!(after["visible_candidates"][0]["ai_boosted"], true);
+    engine.reset();
+
+    // 没有加载模型时调用也安全
+    engine.unload_llm();
+    ime_trim_local_model_context();
+}
+
 unsafe extern "C" fn c_chooser(user: *mut std::ffi::c_void, id: u64, request_json: *const c_char) {
     let sink = &*(user as *const Mutex<Vec<(u64, Option<String>)>>);
     let json = (!request_json.is_null()).then(|| CStr::from_ptr(request_json).to_str().unwrap().to_string());

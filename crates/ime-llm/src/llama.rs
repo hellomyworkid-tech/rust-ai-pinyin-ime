@@ -9,7 +9,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 /// 必须与 `ime_llm_shim.h` 中的 `IME_LLM_ABI_VERSION` 一致
-const SHIM_ABI_VERSION: i32 = 1;
+const SHIM_ABI_VERSION: i32 = 2;
 
 const FLAG_VERBOSE: u32 = 1;
 const FLAG_NO_MMAP: u32 = 2;
@@ -44,6 +44,10 @@ extern "C" {
     #[cfg(test)]
     fn ime_llm_resolve_limits(n_ctx: i32, n_seq_max: *mut i32, n_outputs_max: *mut i32) -> i32;
     fn ime_llm_free(h: *mut RawHandle);
+    fn ime_llm_release_context(h: *mut RawHandle);
+    fn ime_llm_restore_context(h: *mut RawHandle, err: *mut c_char, err_cap: i32) -> i32;
+    #[cfg(test)]
+    fn ime_llm_context_released(h: *const RawHandle) -> i32;
     fn ime_llm_n_ctx(h: *const RawHandle) -> i32;
     fn ime_llm_n_batch(h: *const RawHandle) -> i32;
     fn ime_llm_n_seq_max(h: *const RawHandle) -> i32;
@@ -284,6 +288,36 @@ impl LmBackend for LlamaBackend {
         // 旧标记在新回调生效之后才释放
         self.cancel = Some(flag);
     }
+
+    fn release_context(&mut self) {
+        // SAFETY: 句柄有效，独占访问；模型与中止回调的注册保持不变
+        unsafe { ime_llm_release_context(self.handle.as_ptr()) };
+        // 批缓冲也一并还掉，下次 decode 时按需重新分配
+        self.buf_tokens = Vec::new();
+        self.buf_pos = Vec::new();
+        self.buf_seq = Vec::new();
+        self.buf_want = Vec::new();
+    }
+
+    fn restore_context(&mut self) -> Result<(), LlmError> {
+        let mut err = [0 as c_char; 512];
+        // SAFETY: 句柄有效，独占访问；`err` 的容量如实传入
+        let r = unsafe { ime_llm_restore_context(self.handle.as_ptr(), err.as_mut_ptr(), err.len() as i32) };
+        if r == 0 {
+            return Ok(());
+        }
+        // SAFETY: 垫片写入的内容以 NUL 结尾；数组初始全 0
+        let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned();
+        Err(LlmError::Backend(if msg.is_empty() { format!("重建推理上下文失败，返回值 {r}") } else { msg }))
+    }
+}
+
+#[cfg(test)]
+impl LlamaBackend {
+    fn context_released(&self) -> bool {
+        // SAFETY: 句柄有效
+        unsafe { ime_llm_context_released(self.handle.as_ptr()) != 0 }
+    }
 }
 
 #[cfg(test)]
@@ -354,5 +388,38 @@ mod tests {
         // `user` 是空指针（`install_cancel` 不会这样注册，回调里是防御性的判空）：不中止
         // SAFETY: 回调先判空，空指针不会被解引用
         assert!(!unsafe { abort_trampoline(std::ptr::null_mut()) }, "空指针不中止");
+    }
+
+    /// 释放 / 重建上下文的垫片状态（需要真实模型，默认跳过）：释放后 KV 操作是无操作，decode 自动重建
+    #[test]
+    fn release_and_restore_context_round_trip() {
+        let Some(path) = std::env::var_os("IME_LLM_TEST_MODEL").filter(|p| !p.is_empty()) else {
+            eprintln!("跳过模型测试：未设置 IME_LLM_TEST_MODEL");
+            return;
+        };
+        let mut backend = LlamaBackend::load(Path::new(&path), &LlmOptions::default()).expect("加载模型");
+        assert!(!backend.context_released());
+        backend.release_context();
+        assert!(backend.context_released());
+        backend.release_context(); // 重复释放无害
+        // 释放后 KV 操作不崩溃：缓存本来就是空的
+        backend.kv_clear();
+        assert!(backend.kv_seq_rm(0, 0, -1));
+        backend.kv_seq_cp(0, 1, 0, -1);
+        backend.restore_context().expect("重建上下文");
+        assert!(!backend.context_released());
+        backend.restore_context().expect("已存在时直接成功");
+
+        // decode 自动重建
+        backend.release_context();
+        let tokens = backend.tokenize("你好").unwrap();
+        assert!(!tokens.is_empty());
+        let batch: Vec<BatchItem> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| BatchItem { token: t, pos: i as i32, seq: 0, want_logits: i + 1 == tokens.len() })
+            .collect();
+        assert_eq!(backend.decode(&batch).unwrap(), DecodeOutcome::Ok);
+        assert!(!backend.context_released());
     }
 }

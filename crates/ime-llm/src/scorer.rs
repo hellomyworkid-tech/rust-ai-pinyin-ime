@@ -144,6 +144,19 @@ impl LlmScorer {
         self.lock().invalidate();
     }
 
+    /// 释放推理上下文（KV 缓存、计算缓冲、logits 输出缓冲），保留已加载的模型（mmap 权重与词表）。
+    /// 键盘收起、进程即将被系统挂起时调用：常驻内存降到只剩模型本体，下次打分时自动重建上下文，
+    /// 不必重新解析 GGUF。正在执行的打分先被取消，等它退出后才释放（最多晚一块前缀，≤16 个 token）。
+    pub fn release_context(&self) {
+        self.cancel();
+        self.lock().release_context();
+    }
+
+    /// 提前重建被 [`Self::release_context`] 释放的上下文（键盘再次出现时在后台调用，第一次击键不必等它）
+    pub fn restore_context(&self) -> Result<(), LlmError> {
+        self.lock().restore_context()
+    }
+
     /// 最近一次打分调用的统计信息
     pub fn last_stats(&self) -> ScoreStats {
         self.lock().stats()

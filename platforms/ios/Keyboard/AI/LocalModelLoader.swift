@@ -12,15 +12,10 @@ import os
 /// - 新控制器请求同一个模型时，先复用进程内已加载的模型实例（零额外内存、毫秒内完成），再从旧控制器卸下引用；
 /// - 新控制器请求别的模型、关闭本地模型或收到内存警告时，先把旧控制器的模型一并卸掉，再测内存或加载。
 final class LocalModelCoordinator {
-    /// 键盘全部隐藏或切走宿主时，若进程剩余可用内存已低于该水位（48 MiB），立即主动卸载本地模型腾出安全余量；
-    /// 余量充足（如 Qwen2.5 常驻后仍剩 ~108 MiB）则保持 `SHARED_LLM` 热驻留（仅归还空闲堆页），
-    /// 既避免下次呼出时重新冷加载，也根绝 `asyncAfter` 跨进程挂起后在下次唤醒瞬间误卸模型的竞态
-    static let defaultLowHeadroomUnloadBytes: UInt64 = 48 * 1024 * 1024
-
     static let shared: LocalModelCoordinator = {
         let coordinator = LocalModelCoordinator(
             queue: DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .userInitiated),
-            availableMemory: LocalModelLoader.systemAvailableMemory,
+            trimContext: { RustEngine.trimLocalModelContext() },
             releaseCaches: { RustEngine.releaseMemoryCaches() }
         )
         coordinator.installMemoryPressureMonitor()
@@ -28,8 +23,7 @@ final class LocalModelCoordinator {
     }()
 
     let queue: DispatchQueue
-    private let availableMemory: () -> UInt64
-    private let lowHeadroomUnloadBytes: UInt64
+    private let trimContext: () -> Void
     private let releaseCaches: () -> Void
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var visibleControllers: Set<ObjectIdentifier> = []
@@ -47,12 +41,10 @@ final class LocalModelCoordinator {
     private var entries: [Entry] = []
 
     init(queue: DispatchQueue = DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .userInitiated),
-         availableMemory: @escaping () -> UInt64 = { .max },
-         lowHeadroomUnloadBytes: UInt64 = LocalModelCoordinator.defaultLowHeadroomUnloadBytes,
+         trimContext: @escaping () -> Void = {},
          releaseCaches: @escaping () -> Void = {}) {
         self.queue = queue
-        self.availableMemory = availableMemory
-        self.lowHeadroomUnloadBytes = lowHeadroomUnloadBytes
+        self.trimContext = trimContext
         self.releaseCaches = releaseCaches
     }
 
@@ -74,52 +66,26 @@ final class LocalModelCoordinator {
         visibleControllers.insert(id)
     }
 
-    /// 某个键盘控制器消失或宿主切后台：
-    /// - 不使用 `asyncAfter` 延迟定时器（iOS 会在 100–300ms 内冻结扩展进程，延迟任务会拖到下次呼出键盘唤醒瞬间才执行，反而误杀热驻留模型）；
-    /// - 当进程内已无可见键盘时，立即检查当前真实剩余内存：低于安全水位（<48 MiB）才主动卸载模型，余量充裕时保留模型热驻留并仅回收空闲堆页
-    func controllerDidDisappear(_ id: ObjectIdentifier, hostResigned: Bool = false) {
-        _ = hostResigned
+    /// 某个键盘控制器消失或宿主切后台。进程内已无可见键盘时，立刻（不用定时器：扩展进程收起后很快就被挂起，
+    /// 延迟任务会拖到下次呼出时才执行）在模型队列上只释放推理上下文（KV 缓存与计算缓冲），保留模型本体：
+    /// - 挂起期间的常驻内存降到只剩模型本体（Mac 实测 Qwen2.5 65→54 MiB，Qwen3 90→54 MiB）；
+    /// - 加载器状态保持 `.loaded`，下次打分时上下文在引擎后台线程上自动重建（Mac 实测 2–3 ms），不重新解析 GGUF。
+    /// 真正卸载整个模型只在系统内存警告 / 内存压力时发生（见 `evictAllForMemoryWarning`）
+    func controllerDidDisappear(_ id: ObjectIdentifier) {
         visibleControllers.remove(id)
         guard visibleControllers.isEmpty else { return }
-        if availableMemory() < lowHeadroomUnloadBytes {
-            evictAllForBackground()
-        } else {
-            let release = releaseCaches
-            queue.async { release() }
-        }
-    }
-
-    /// 内存余量偏紧退入后台时主动卸载所有本地模型：状态回到 .idle（下次唤起时可正常重新加载）
-    func evictAllForBackground() {
-        entries.removeAll { $0.loader == nil && $0.engine == nil }
-        var engines: [IMEEngine] = []
-        for entry in entries {
-            let active = entry.loader?.state == .loading || entry.loader?.state == .loaded
-            if active {
-                entry.loader?.yieldToPeer()
-            }
-            if let engine = entry.engine,
-               (active || engine.isLocalModelLoaded),
-               !engines.contains(where: { $0 === engine }) {
-                engines.append(engine)
-            }
-        }
-        let release = releaseCaches
-        guard !engines.isEmpty else {
-            queue.async { release() }
-            return
-        }
+        let trim = trimContext
         queue.async {
-            for engine in engines where engine.isLocalModelLoaded {
-                engine.unloadLocalModel()
-            }
-            release()
+            let start = KeyboardTrace.now
+            trim()
+            KeyboardTrace.event("model.contextTrimmed", "\(KeyboardTrace.ms(since: start))ms")
         }
     }
 
     /// 内核发出内存压力信号时，无条件卸掉进程内全部本地模型并清空共享缓存
     func evictAllForMemoryWarning() {
         let engines = evictPeersForMemoryWarning(excluding: nil, keepingEngine: nil)
+        KeyboardTrace.event("memory.pressure", "unloading=\(engines.count)")
         let release = releaseCaches
         queue.async {
             for engine in engines where engine.isLocalModelLoaded {
@@ -343,6 +309,7 @@ final class LocalModelLoader {
         let requiredBytes = Self.minimumAvailableBytes(for: url)
         // 引擎和同进程其他控制器里都没有模型、也没有排着的加载时，现在量到的就是加载前的内存：不够就直接报，不必先显示「正在加载」
         if state != .loading, !engine.isLocalModelLoaded, claim.peerEngines.isEmpty, availableMemory() < requiredBytes {
+            KeyboardTrace.event("model.skippedLowMemory", "model=\(url.lastPathComponent) required=\(requiredBytes >> 20)")
             state = .skippedLowMemory
             return
         }
@@ -353,7 +320,10 @@ final class LocalModelLoader {
         let availableMemory = self.availableMemory
         let peerEngines = claim.peerEngines
         let sameModelResident = claim.sameModelResident
+        let modelName = url.lastPathComponent
+        KeyboardTrace.event("model.loadQueued", "model=\(modelName) reuse=\(sameModelResident)")
         queue.async { [weak self, weak engine] in
+            let start = KeyboardTrace.now
             let outcome: Outcome
             if let engine {
                 let canReuseFromPeer = sameModelResident && peerEngines.contains { $0.isLocalModelLoaded }
@@ -384,6 +354,7 @@ final class LocalModelLoader {
                 for peer in peerEngines where peer.isLocalModelLoaded { peer.unloadLocalModel() }
                 outcome = .failed
             }
+            KeyboardTrace.event("model.loadFinished", "model=\(modelName) outcome=\(outcome) \(KeyboardTrace.ms(since: start))ms")
             DispatchQueue.main.async {
                 guard let self, self.generation == current else { return }
                 switch outcome {
@@ -425,6 +396,7 @@ final class LocalModelLoader {
 
     /// 内存警告：立刻卸载（即便本控制器 engine 尚未创建，也要卸掉同进程其他控制器和静态缓存）
     func didReceiveMemoryWarning(engine: IMEEngine?) {
+        KeyboardTrace.event("memory.warning", "state=\(state)")
         if let engine {
             coordinator?.register(loader: self, engine: engine)
         }

@@ -242,6 +242,12 @@ final class RustEngine: IMEEngine {
         ime_release_memory_caches()
     }
 
+    /// 只释放进程内常驻本地模型的推理上下文（KV 缓存与计算缓冲），保留模型本体；下次打分时自动重建。
+    /// 会等正在进行的打分取消退出，必须在后台队列调用
+    static func trimLocalModelContext() {
+        ime_trim_local_model_context()
+    }
+
     // MARK: - 内部
 
     private func send(_ kind: Int) -> IMEResult {

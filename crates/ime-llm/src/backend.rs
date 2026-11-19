@@ -126,9 +126,24 @@ pub trait LmBackend: Send {
     /// 决定是否中止，不能用 [`CancelFlag::is_cancelled`]：不可中止区段里的一批即使已被取消也要算完。
     /// 默认忽略（引擎仍会在两次 `decode` 之间检查）。
     fn install_cancel(&mut self, _flag: Arc<CancelFlag>) {}
+
+    /// 释放推理上下文（KV 缓存与计算缓冲），保留模型本体。之后 KV 缓存视为空，
+    /// 下一次 `decode` 由后端自动按原参数重建上下文。默认什么也不做（假后端与不支持的后端）。
+    fn release_context(&mut self) {}
+
+    /// 提前重建被 [`Self::release_context`] 释放的上下文；上下文已存在时直接返回 `Ok`
+    fn restore_context(&mut self) -> Result<(), LlmError> {
+        Ok(())
+    }
 }
 
 impl<B: LmBackend + ?Sized> LmBackend for Box<B> {
+    fn release_context(&mut self) {
+        (**self).release_context()
+    }
+    fn restore_context(&mut self) -> Result<(), LlmError> {
+        (**self).restore_context()
+    }
     fn limits(&self) -> BackendLimits {
         (**self).limits()
     }

@@ -50,6 +50,8 @@ struct ime_llm {
     // 中止回调：decode 期间只读；设置发生在两次 decode 之间（同一把 Rust 锁内）
     std::atomic<ime_llm_abort_fn> abort_fn{nullptr};
     std::atomic<void *> abort_user{nullptr};
+    // 创建上下文用的参数：ime_llm_release_context 之后按它原样重建
+    llama_context_params cparams{};
 };
 
 namespace {
@@ -184,16 +186,53 @@ void resolve_limits(int32_t n_ctx, int32_t &n_seq_max, int32_t &n_outputs_max) {
     }
 }
 
+// 释放推理上下文及其附属缓冲（KV、计算缓冲、logits、批缓冲、打分草稿区），保留模型
+void release_context(ime_llm *h) {
+    if (h->batch_ready) {
+        llama_batch_free(h->batch);
+        h->batch = llama_batch{};
+        h->batch_ready = false;
+    }
+    if (h->ctx != nullptr) {
+        llama_free(h->ctx);
+        h->ctx = nullptr;
+    }
+    h->mem = nullptr;
+    std::vector<uint8_t>().swap(h->last_want);
+    std::vector<float>().swap(h->scratch);
+}
+
+// 按 h->cparams 创建上下文。失败时不留下半成品，原因写入 why
+bool create_context(ime_llm *h, std::string &why) {
+    take_last_error();
+    h->ctx = llama_init_from_model(h->model, h->cparams);
+    if (h->ctx == nullptr) {
+        why = take_last_error();
+        if (why.empty()) {
+            why = "llama_init_from_model failed";
+        }
+        return false;
+    }
+    h->mem = llama_get_memory(h->ctx);
+    h->n_ctx = (int32_t)llama_n_ctx(h->ctx);
+    h->n_batch = (int32_t)llama_n_batch(h->ctx);
+    h->n_seq_max = (int32_t)llama_n_seq_max(h->ctx);
+    if (h->mem == nullptr || h->n_batch <= 0) {
+        why = "model has no usable memory/vocab";
+        release_context(h);
+        return false;
+    }
+    h->batch = llama_batch_init(h->n_batch, 0, 1);
+    h->batch_ready = true;
+    h->scratch.reserve((size_t)h->n_vocab);
+    return true;
+}
+
 void destroy(ime_llm *h) {
     if (h == nullptr) {
         return;
     }
-    if (h->batch_ready) {
-        llama_batch_free(h->batch);
-    }
-    if (h->ctx != nullptr) {
-        llama_free(h->ctx);
-    }
+    release_context(h);
     if (h->model != nullptr) {
         llama_model_free(h->model);
     }
@@ -256,30 +295,22 @@ ime_llm *ime_llm_load(const char *model_path, int32_t n_ctx, int32_t n_threads, 
         cp.no_perf = true;
         cp.abort_callback = abort_trampoline;
         cp.abort_callback_data = h;
-        h->ctx = llama_init_from_model(h->model, cp);
-        if (h->ctx == nullptr) {
-            std::string why = take_last_error();
-            write_err(err, err_cap, why.empty() ? std::string("llama_init_from_model failed") : why);
-            destroy(h);
-            return nullptr;
-        }
-
+        h->cparams = cp;
         h->vocab = llama_model_get_vocab(h->model);
-        h->mem = llama_get_memory(h->ctx);
         h->n_vocab = llama_vocab_n_tokens(h->vocab);
-        h->n_ctx = (int32_t)llama_n_ctx(h->ctx);
-        h->n_batch = (int32_t)llama_n_batch(h->ctx);
-        h->n_seq_max = (int32_t)llama_n_seq_max(h->ctx);
         h->n_outputs_max = n_outputs_max;
         h->n_threads = n_threads;
-        if (h->mem == nullptr || h->n_vocab <= 0 || h->n_batch <= 0) {
+        if (h->n_vocab <= 0) {
             write_err(err, err_cap, "model has no usable memory/vocab");
             destroy(h);
             return nullptr;
         }
-        h->batch = llama_batch_init(h->n_batch, 0, 1);
-        h->batch_ready = true;
-        h->scratch.reserve((size_t)h->n_vocab);
+        std::string why;
+        if (!create_context(h, why)) {
+            write_err(err, err_cap, why);
+            destroy(h);
+            return nullptr;
+        }
         return h;
     } catch (const std::exception &e) {
         write_err(err, err_cap, std::string("exception: ") + e.what());
@@ -320,6 +351,45 @@ void ime_llm_free(ime_llm *h) {
 #endif
 }
 
+void ime_llm_release_context(ime_llm *h) {
+    if (h == nullptr || h->ctx == nullptr) {
+        return;
+    }
+    try {
+        release_context(h);
+    } catch (...) {
+    }
+#if defined(__APPLE__)
+    malloc_zone_pressure_relief(nullptr, 0);
+#endif
+}
+
+int32_t ime_llm_restore_context(ime_llm *h, char *err, int32_t err_cap) {
+    if (h == nullptr) {
+        write_err(err, err_cap, "invalid arguments");
+        return IME_LLM_ERR_ARGS;
+    }
+    if (h->ctx != nullptr) {
+        return 0;
+    }
+    try {
+        std::string why;
+        if (create_context(h, why)) {
+            return 0;
+        }
+        write_err(err, err_cap, why);
+    } catch (const std::exception &e) {
+        release_context(h);
+        write_err(err, err_cap, std::string("exception: ") + e.what());
+    } catch (...) {
+        release_context(h);
+        write_err(err, err_cap, "unknown exception");
+    }
+    return IME_LLM_ERR_CONTEXT;
+}
+
+int32_t ime_llm_context_released(const ime_llm *h) { return (h != nullptr && h->ctx == nullptr) ? 1 : 0; }
+
 int32_t ime_llm_n_vocab(const ime_llm *h) { return h ? h->n_vocab : 0; }
 int32_t ime_llm_n_ctx(const ime_llm *h) { return h ? h->n_ctx : 0; }
 int32_t ime_llm_n_batch(const ime_llm *h) { return h ? h->n_batch : 0; }
@@ -349,7 +419,7 @@ int32_t ime_llm_tokenize(const ime_llm *h, const char *text, int32_t text_len, i
 }
 
 void ime_llm_kv_clear(ime_llm *h) {
-    if (h == nullptr) {
+    if (h == nullptr || h->mem == nullptr) {
         return;
     }
     try {
@@ -364,6 +434,9 @@ int32_t ime_llm_kv_seq_rm(ime_llm *h, int32_t seq, int32_t p0, int32_t p1) {
     if (h == nullptr || seq < 0 || seq >= h->n_seq_max) {
         return 0;
     }
+    if (h->mem == nullptr) {
+        return 1; // 上下文已释放：缓存本来就是空的
+    }
     try {
         return llama_memory_seq_rm(h->mem, seq, p0, p1) ? 1 : 0;
     } catch (...) {
@@ -372,7 +445,8 @@ int32_t ime_llm_kv_seq_rm(ime_llm *h, int32_t seq, int32_t p0, int32_t p1) {
 }
 
 void ime_llm_kv_seq_cp(ime_llm *h, int32_t src, int32_t dst, int32_t p0, int32_t p1) {
-    if (h == nullptr || src < 0 || dst < 0 || src >= h->n_seq_max || dst >= h->n_seq_max || src == dst) {
+    if (h == nullptr || h->mem == nullptr || src < 0 || dst < 0 || src >= h->n_seq_max || dst >= h->n_seq_max ||
+        src == dst) {
         return;
     }
     try {
@@ -385,6 +459,10 @@ int32_t ime_llm_decode(ime_llm *h, const int32_t *tokens, const int32_t *pos, co
                        const uint8_t *want, int32_t n) {
     if (h == nullptr || tokens == nullptr || pos == nullptr || seq == nullptr || want == nullptr) {
         return IME_LLM_ERR_ARGS;
+    }
+    // 上下文被 ime_llm_release_context 释放过：按原参数重建（n_batch 等与释放前相同）
+    if (h->ctx == nullptr && ime_llm_restore_context(h, nullptr, 0) != 0) {
+        return IME_LLM_ERR_CONTEXT;
     }
     // 下列条件在 llama.cpp 内部是断言（失败即 abort 整个进程），必须在这里拦住
     if (n <= 0 || n > h->n_batch) {

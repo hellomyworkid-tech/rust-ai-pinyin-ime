@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define IME_LLM_ABI_VERSION 1
+#define IME_LLM_ABI_VERSION 2
 
 // ime_llm_load 的 flags 位
 #define IME_LLM_FLAG_VERBOSE 1u // 输出 llama.cpp 日志到 stderr（默认静默）
@@ -30,6 +30,7 @@ extern "C" {
 #define IME_LLM_DECODE_BAD_INPUT (-1) // llama.cpp 判定输入批非法（状态未变）
 #define IME_LLM_ERR_ARGS         (-100) // 垫片层参数检查未通过（状态未变）
 #define IME_LLM_ERR_EXCEPTION    (-101) // 捕获到 C++ 异常（状态未知，调用方应清空 KV）
+#define IME_LLM_ERR_CONTEXT      (-102) // 上下文已释放且重建失败（状态未变，调用方应清空 KV 后重试）
 // 其余负值为 llama.cpp 的致命错误（状态未知，调用方应清空 KV）
 
 typedef struct ime_llm ime_llm;
@@ -56,6 +57,16 @@ ime_llm *ime_llm_load(const char *model_path, int32_t n_ctx, int32_t n_threads, 
 // 三个值都必须为正；参数不合法返回 0（不修改输出），成功返回 1。
 int32_t ime_llm_resolve_limits(int32_t n_ctx, int32_t *n_seq_max, int32_t *n_outputs_max);
 void ime_llm_free(ime_llm *h);
+
+// 释放推理上下文（KV 缓存、计算缓冲、logits 输出缓冲、批缓冲），保留已加载的模型（mmap 权重与词表）。
+// 之后 KV 缓存视为空：kv_clear / kv_seq_rm / kv_seq_cp 是无操作，logprobs 返回错误，
+// 下一次 ime_llm_decode 会按 ime_llm_load 时的参数自动重建上下文（也可先调用 ime_llm_restore_context 提前重建）。
+// 已经释放时什么也不做。
+void ime_llm_release_context(ime_llm *h);
+// 按 ime_llm_load 时的参数重建上下文。上下文已存在时直接返回 0；失败返回非 0 并把错误说明写入 err（可为 NULL）。
+int32_t ime_llm_restore_context(ime_llm *h, char *err, int32_t err_cap);
+// 上下文当前是否已释放（1 = 已释放，0 = 存在）
+int32_t ime_llm_context_released(const ime_llm *h);
 
 // 实际生效的参数
 int32_t ime_llm_n_vocab(const ime_llm *h);

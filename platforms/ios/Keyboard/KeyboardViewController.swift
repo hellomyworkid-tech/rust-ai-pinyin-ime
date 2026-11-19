@@ -52,9 +52,12 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private var pendingDeferredRestore: (docID: UUID, excluded: UUID?)?
+    /// 本次 viewWillAppear 的时刻（诊断记录里算呼出各阶段的耗时）
+    private var appearStartedAt: TimeInterval = 0
 
     deinit {
-        LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self), hostResigned: true)
+        KeyboardTrace.event("controller.deinit")
+        LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self))
         for observer in lifecycleObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -63,6 +66,7 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: - 生命周期
 
     override func loadView() {
+        KeyboardTrace.controllerCreated()
         let root = KeyboardRootView()
         rootView = root
         view = root
@@ -112,16 +116,18 @@ final class KeyboardViewController: UIInputViewController {
         lifecycleObservers = [
             center.addObserver(forName: .NSExtensionHostWillResignActive, object: nil, queue: .main) { [weak self] note in
                 guard let self, self.matchesExtensionContext(note) else { return }
+                KeyboardTrace.event("host.willResignActive", "visible=\(self.isVisible)")
                 self.hostInterrupted = true
                 self.saveCurrentComposition()
                 if self.rootView.isSettingsExpanded {
                     self.setSettingsExpanded(false)
                     self.render()
                 }
-                LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self), hostResigned: true)
+                LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self))
             },
             center.addObserver(forName: .NSExtensionHostDidBecomeActive, object: nil, queue: .main) { [weak self] note in
                 guard let self, self.matchesExtensionContext(note) else { return }
+                KeyboardTrace.event("host.didBecomeActive", "visible=\(self.isVisible)")
                 self.hostDidBecomeActive()
             }
         ]
@@ -171,6 +177,8 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        appearStartedAt = KeyboardTrace.now
+        KeyboardTrace.event("appear.will", "engine=\(input.engine != nil ? "warm" : "cold")")
         LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
         // settings.json 只有几百字节，读一次很快；未开完全访问但快捷面板改过开关时合并读取本地覆盖配置
         settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
@@ -193,11 +201,13 @@ final class KeyboardViewController: UIInputViewController {
             // 引擎构建与未提交拼音恢复统一放到 viewDidAppear 首帧显示完成之后
             syncField(restorePending: false)
         }
+        KeyboardTrace.event("appear.willDone", "\(KeyboardTrace.ms(since: appearStartedAt))ms")
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         isVisible = true
+        KeyboardTrace.event("appear.did", "+\(KeyboardTrace.ms(since: appearStartedAt))ms")
         LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
 
         if currentDocumentID != nil, currentDocumentID != documentID {
@@ -215,11 +225,14 @@ final class KeyboardViewController: UIInputViewController {
             if self.pendingCompositions.mayHaveEntries {
                 self.pendingCompositions.purgeExpired()
             }
+            KeyboardTrace.event("appear.ready",
+                                "+\(KeyboardTrace.ms(since: self.appearStartedAt))ms ai=\(self.settings.aiMode.rawValue) model=\(self.ai.localLoader.state)")
         }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        KeyboardTrace.event("disappear.will", "shownFor=\(KeyboardTrace.ms(since: appearStartedAt))ms")
         isVisible = false
         hostInterrupted = true
         saveCurrentComposition()
@@ -227,7 +240,7 @@ final class KeyboardViewController: UIInputViewController {
         documentID = nil
         input.resetComposition()
         ai.keyboardWillHide()
-        LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self), hostResigned: false)
+        LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self))
         page = traits.startPage
         isSymbolPanelLocked = false
         setGridExpanded(false)

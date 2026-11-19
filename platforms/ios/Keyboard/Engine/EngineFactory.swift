@@ -55,6 +55,13 @@ enum EngineFactory {
     static let keyboardSettingsURL: URL? = appSupportDirectory?.appendingPathComponent("settings_override.json")
 
     static func makeEngine(source: LexiconSource?) -> IMEEngine {
+        let start = KeyboardTrace.now
+        let engine = createEngine(source: source)
+        KeyboardTrace.event("engine.created", "type=\(type(of: engine)) \(KeyboardTrace.ms(since: start))ms")
+        return engine
+    }
+
+    private static func createEngine(source: LexiconSource?) -> IMEEngine {
         guard let source else {
             #if DEBUG
             // 调试构建里找不到词库（工程的构建检查本应拦住）：用假引擎，界面照样能调

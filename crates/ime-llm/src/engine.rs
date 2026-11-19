@@ -258,6 +258,17 @@ impl<B: LmBackend> ScoringEngine<B> {
         self.dirty = true;
     }
 
+    /// 释放后端的推理上下文（KV 缓存与计算缓冲），保留模型。缓存记录随之作废，下次打分从头解码
+    pub fn release_context(&mut self) {
+        self.invalidate();
+        self.backend.release_context();
+    }
+
+    /// 提前重建后端的推理上下文（不重建也行：下一次解码时后端会自动重建）
+    pub fn restore_context(&mut self) -> Result<(), LlmError> {
+        self.backend.restore_context()
+    }
+
     /// 按 `text` 模块的规则构造每个候选的打分文本并整体分词。
     /// 前缀用进程内版本 [`text::lm_scoring_prefix_inprocess`]：长上文的窗口起点对齐到分句处
     /// （用户连续上屏时，新前缀以上一次的前缀开头，KV 缓存才接得上），英文上文末尾的空格保留一个。

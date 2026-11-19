@@ -600,48 +600,54 @@ final class AIWiringTests: XCTestCase {
 
     // MARK: - 后台释放、冷启动延后加载与内存余量保护
 
-    func testBackgroundDisappearKeepsModelWarmWhenHeadroomHealthyAndEvictsWhenTight() async throws {
-        let queue = DispatchQueue(label: "test.local-model.bg-evict")
+    func testHidingAllKeyboardsTrimsContextImmediatelyButKeepsModel() async throws {
+        let queue = DispatchQueue(label: "test.local-model.trim")
+        var trimCount = 0
         var releaseCount = 0
-        var headroomBytes: UInt64 = 108 * 1024 * 1024 // 模拟 Qwen2.5 常驻后仍有 ~108 MiB 充裕余量
         let coordinator = LocalModelCoordinator(
             queue: queue,
-            availableMemory: { headroomBytes },
-            lowHeadroomUnloadBytes: 48 * 1024 * 1024,
+            trimContext: { trimCount += 1 },
             releaseCaches: { releaseCount += 1 }
         )
         let loader = LocalModelLoader(coordinator: coordinator, availableMemory: { .max })
         let engine = RecordingEngine()
         let url = try makeModelFile()
-        let token = ObjectIdentifier(engine)
+        let a = ObjectIdentifier(engine)
+        let b = ObjectIdentifier(loader)
 
-        coordinator.controllerWillAppear(token)
+        coordinator.controllerWillAppear(a)
         loader.load(url, into: engine)
         await waitForState(loader, .loaded)
-        XCTAssertTrue(engine.isLocalModelLoaded)
 
-        // 1. 余量充裕（≥48 MiB）时收起键盘或切 App：保留本地模型热驻留供下次亚毫秒复用，仅回收空闲堆页
-        coordinator.controllerDidDisappear(token, hostResigned: true)
+        // 还有别的控制器可见（如系统搜索层叠在上面）：不释放
+        coordinator.controllerWillAppear(b)
+        coordinator.controllerDidDisappear(a)
         await drain(queue)
-        XCTAssertTrue(engine.isLocalModelLoaded, "内存余量充裕时不应盲目卸载本地模型")
-        XCTAssertEqual(loader.state, .loaded)
-        XCTAssertEqual(releaseCount, 1)
+        XCTAssertEqual(trimCount, 0)
 
-        // 2. 余量偏紧（<48 MiB）时退入后台：立即同步入队卸载模型，不依赖可能拖到下次唤醒才触发的延迟定时器
-        coordinator.controllerWillAppear(token)
-        headroomBytes = 32 * 1024 * 1024
-        coordinator.controllerDidDisappear(token, hostResigned: true)
+        // 全部收起：立刻（不等定时器）在模型队列上只释放推理上下文，模型和加载状态都保留
+        coordinator.controllerDidDisappear(b)
+        await drain(queue)
+        XCTAssertEqual(trimCount, 1)
+        XCTAssertEqual(releaseCount, 0, "收起键盘不清空进程级模型缓存")
+        XCTAssertTrue(engine.isLocalModelLoaded)
+        XCTAssertEqual(loader.state, .loaded)
+        XCTAssertFalse(engine.modelEvents.contains(.unload), "收起键盘不卸载模型本体")
+
+        // 再次出现：模型仍在，load 直接复用，不重新加载
+        coordinator.controllerWillAppear(a)
+        let eventsBefore = engine.modelEvents.count
+        loader.load(url, into: engine)
+        await drain(queue)
+        XCTAssertEqual(loader.state, .loaded)
+        XCTAssertEqual(engine.modelEvents.count, eventsBefore, "模型本体常驻，不应重新加载")
+
+        // 只有内存压力才整体卸载
+        coordinator.evictAllForMemoryWarning()
         await drain(queue)
         XCTAssertFalse(engine.isLocalModelLoaded)
-        XCTAssertEqual(loader.state, .idle, "后台主动卸载应回到 .idle 而不是 .unloadedForMemory")
-        XCTAssertEqual(releaseCount, 2)
-
-        // 3. 下次余量恢复后唤起可正常重新加载
-        headroomBytes = 120 * 1024 * 1024
-        coordinator.controllerWillAppear(token)
-        loader.load(url, into: engine)
-        await waitForState(loader, .loaded)
-        XCTAssertTrue(engine.isLocalModelLoaded)
+        XCTAssertEqual(loader.state, .unloadedForMemory)
+        XCTAssertEqual(releaseCount, 1)
     }
 
     func testProbeAppleAvailabilityInLocalModeDoesNotBlockMainThread() async {

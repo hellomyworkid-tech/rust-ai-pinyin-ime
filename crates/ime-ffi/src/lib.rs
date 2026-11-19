@@ -895,6 +895,18 @@ pub fn release_memory_caches() {
     release_allocator_pressure();
 }
 
+/// 只释放进程内常驻本地模型的推理上下文，保留模型本体（见 `ime_trim_local_model_context`）。
+/// 模型由所有引擎共享（`SHARED_LLM`），所以这是进程级操作
+pub fn trim_local_model_context() {
+    let scorer = lock_ignoring_poison(&SHARED_LLM)
+        .as_ref()
+        .map(|cached| Arc::clone(&cached.scorer));
+    if let Some(scorer) = scorer {
+        scorer.release_context();
+    }
+    release_allocator_pressure();
+}
+
 /// 在后台以低优先级分批把词库文件的页读进内存，免得冷启动时与首帧渲染或模型加载争抢闪存带宽。
 /// 这些是只读文件页，不计入进程的内存配额，内存紧张时系统可以随时丢弃
 fn spawn_page_warmup(lexicon: CompiledLexicon) {
@@ -1458,6 +1470,11 @@ pub extern "C" fn ime_phys_footprint() -> u64 {
 #[no_mangle]
 pub extern "C" fn ime_release_memory_caches() {
     let _ = catch_unwind(AssertUnwindSafe(release_memory_caches));
+}
+
+#[no_mangle]
+pub extern "C" fn ime_trim_local_model_context() {
+    let _ = catch_unwind(AssertUnwindSafe(trim_local_model_context));
 }
 
 /// # Safety
