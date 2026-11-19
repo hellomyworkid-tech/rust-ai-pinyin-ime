@@ -453,6 +453,78 @@ impl ImeCoreEngine {
                 }
             }
         }
+        // 合并用户针对从 `start_pos` 起始的多音节区间的有效自造词记忆（与 `decoder.rs` 保持同一校准标尺，不压过活跃词库正词）
+        if !self.user_dict.records.is_empty() && preferred_end < input.len() {
+            let max_end = input.len().min(start_pos + 24);
+            for end_pos in (preferred_end + 1)..=max_end {
+                let raw_span = &input[start_pos..end_pos];
+                let user_recs = self.user_dict.top_user_records(raw_span);
+                if user_recs.is_empty() {
+                    continue;
+                }
+                let best_exact_span_cost = edges
+                    .iter()
+                    .filter(|e| !e.is_fuzzy && e.end == end_pos && e.kind == EdgeKind::ChineseWord)
+                    .map(|e| e.base_cost)
+                    .fold(None, |acc: Option<f32>, c| Some(acc.map_or(c, |a| a.min(c))));
+                let default_custom_cost = if self.lexicon.entry_count() > 50_000 {
+                    9.2
+                } else {
+                    5.2
+                };
+                let injected_base_cost = best_exact_span_cost
+                    .map(|c| c + 0.55)
+                    .unwrap_or(default_custom_cost);
+                for urec in user_recs.into_iter().take(4) {
+                    let char_cnt = urec.text.chars().count();
+                    if char_cnt < 2 || (char_cnt > 4 && !urec.text.is_ascii()) {
+                        continue;
+                    }
+                    if !(urec.dynamic_score >= 4.5
+                        || (urec.commit_count >= 2 && urec.dynamic_score >= 2.2))
+                    {
+                        continue;
+                    }
+                    if edges
+                        .iter()
+                        .any(|e| !e.is_fuzzy && e.end == end_pos && e.text == urec.text)
+                    {
+                        continue;
+                    }
+                    let matched_code_key = (!urec.text.is_ascii())
+                        .then(|| {
+                            edges
+                                .iter()
+                                .find(|e| {
+                                    e.end == end_pos
+                                        && e.code_key.contains('\'')
+                                        && e.syllable_count == char_cnt
+                                })
+                                .map(|e| e.code_key.clone())
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| raw_span.to_string());
+                    let is_ascii = urec.text.is_ascii();
+                    let hint = crate::corrector::lookup_hint_flat(raw_span, &urec.text);
+                    edges.push(LatticeEdge {
+                        start: start_pos,
+                        end: end_pos,
+                        text: urec.text,
+                        code_key: matched_code_key,
+                        kind: if is_ascii {
+                            EdgeKind::EnglishWord
+                        } else {
+                            EdgeKind::ChineseWord
+                        },
+                        base_cost: injected_base_cost,
+                        domain: ime_lexicon::DomainTag::General,
+                        syllable_count: if is_ascii { 1 } else { char_cnt },
+                        is_fuzzy: false,
+                        pronunciation_hint: hint,
+                    });
+                }
+            }
+        }
         edges.retain(|e| !e.text.is_empty());
 
         // 将从当前音节出发的候选严格分层，对齐主流输入法体验：
@@ -626,41 +698,47 @@ impl ImeCoreEngine {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
 
-        // 优先注入用户针对当前音节高频记忆的单字或词条（含全拼历史词的简拼联想）
+        // 仅当当前音节已是整串末尾（`end_clamped >= input.len()`，后方已无多字词可组合）或无多字词候选时，
+        // 才将当前单音节的用户记忆字/简拼词直接置顶；若后方仍有未选音节（如 `rang |you xia jiao`），
+        // 多音节词组（如「右下角」「右下」）必须优先排在最前，单字记忆已通过 `rank_cost` 在单字层内部提权！
         let end_clamped = preferred_end.min(input.len()).max(start_pos + 1);
         let raw_slice = &input[start_pos..end_clamped];
-        let mut user_recs = self.user_dict.top_user_records(raw_slice);
-        for jrec in self.user_dict.top_jianpin_records(raw_slice) {
-            if !user_recs.iter().any(|r| r.text == jrec.text) {
-                user_recs.push(jrec);
+        let has_multi_word_ahead = end_clamped < input.len()
+            && ordered_edges.iter().any(|e| !e.is_fuzzy && e.end > end_clamped);
+        if !has_multi_word_ahead {
+            let mut user_recs = self.user_dict.top_user_records(raw_slice);
+            for jrec in self.user_dict.top_jianpin_records(raw_slice) {
+                if !user_recs.iter().any(|r| r.text == jrec.text) {
+                    user_recs.push(jrec);
+                }
             }
-        }
-        for urec in user_recs.into_iter().take(4) {
-            if (urec.dynamic_score >= 4.5
-                || urec.commit_count >= 2
-                || (urec.code_key != raw_slice && urec.commit_count >= 1))
-                && seen.insert(urec.text.clone())
-            {
-                let span = SegmentSpan {
-                    start: start_pos,
-                    end: end_clamped,
-                    text: urec.text.clone(),
-                    code_key: raw_slice.to_string(),
-                };
-                let hint = crate::corrector::lookup_hint_flat(raw_slice, &urec.text).map(str::to_string);
-                out.push(Candidate {
-                    text: urec.text.clone(),
-                    preedit: raw_slice.to_string(),
-                    consumed_len: end_clamped.saturating_sub(start_pos),
-                    l1_cost: 0.05,
-                    final_score: 135.0 + urec.dynamic_score,
-                    ai_boosted: false,
-                    tag: format!("[记忆·{}次]", urec.commit_count),
-                    pronunciation_hint: hint,
-                    segments: vec![urec.text],
-                    segment_spans: vec![span.clone()],
-                    syllable_spans: vec![span],
-                });
+            for urec in user_recs.into_iter().take(4) {
+                if (urec.dynamic_score >= 4.5
+                    || (urec.commit_count >= 2 && urec.dynamic_score >= 2.2)
+                    || (urec.code_key != raw_slice && urec.commit_count >= 1 && urec.dynamic_score >= 1.5))
+                    && seen.insert(urec.text.clone())
+                {
+                    let span = SegmentSpan {
+                        start: start_pos,
+                        end: end_clamped,
+                        text: urec.text.clone(),
+                        code_key: raw_slice.to_string(),
+                    };
+                    let hint = crate::corrector::lookup_hint_flat(raw_slice, &urec.text).map(str::to_string);
+                    out.push(Candidate {
+                        text: urec.text.clone(),
+                        preedit: raw_slice.to_string(),
+                        consumed_len: end_clamped.saturating_sub(start_pos),
+                        l1_cost: 0.05,
+                        final_score: 135.0 + urec.dynamic_score,
+                        ai_boosted: false,
+                        tag: format!("[记忆·{}次]", urec.commit_count),
+                        pronunciation_hint: hint,
+                        segments: vec![urec.text],
+                        segment_spans: vec![span.clone()],
+                        syllable_spans: vec![span],
+                    });
+                }
             }
         }
 
@@ -1661,6 +1739,50 @@ mod tests {
             engine.decode("baixindeqian", AppScene::General, "").candidates[0].text,
             "百姓的钱"
         );
+
+        // 4) 「右下角」及句中分步选词防单字/陈旧误输词抢位验证（复现 `rang |you xia jiao` 真实问题）：
+        //    - 即使个人词库中单字 `you -> 有/又` 高频出现，且存在陈旧误输词 `youxiajiao -> 右下叫`，
+        //      锁定「让」后整句首选仍必须是「让右下角」，余下音节首选仍必须是「右下角」（绝不能被「右下叫」或单字「有/又」挤到后面）！
+        let mut yxj_engine = build_test_engine();
+        for _ in 0..5 {
+            yxj_engine.commit_candidate_ex("you", "有", None, true);
+        }
+        for _ in 0..3 {
+            yxj_engine.commit_candidate_ex("you", "又", None, true);
+        }
+        // 模拟多天前曾误输过 2 次「右下叫」（衰减后分数偏低），而「右下角」也是用户正常使用的词
+        yxj_engine.user_dict.records.insert(
+            "youxiajiao\t右下叫".to_string(),
+            crate::user_dict::UserWordRecord {
+                text: "右下叫".to_string(),
+                code_key: "youxiajiao".to_string(),
+                dynamic_score: 1.8,
+                last_updated_secs: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                commit_count: 2,
+                explicit_count: 0,
+                last_seq: 10,
+            },
+        );
+        for _ in 0..6 {
+            yxj_engine.commit_candidate_ex("youxiajiao", "右下角", None, false);
+        }
+        assert_eq!(
+            yxj_engine.decode("rangyouxiajiao", AppScene::General, "").candidates[0].text,
+            "让右下角"
+        );
+        let mut rang_pins = HashMap::new();
+        rang_pins.insert(0usize, (4usize, "让".to_string()));
+        let rang_pinned = yxj_engine.decode_with_pins("rangyouxiajiao", AppScene::General, "", &rang_pins);
+        assert_eq!(rang_pinned.candidates[0].text, "让右下角");
+        let yxj_alts = yxj_engine.query_segment_alternatives_with_prev("rangyouxiajiao", 4, 7, Some("让"));
+        let yxj_top5: Vec<&str> = yxj_alts.iter().take(5).map(|c| c.text.as_str()).collect();
+        assert_eq!(yxj_top5[0], "右下角", "rang |you xia jiao top5 = {yxj_top5:?}");
+        let pos_yxj = yxj_top5.iter().position(|&t| t == "右下角").unwrap();
+        let pos_you = yxj_top5.iter().position(|&t| t == "有").unwrap_or(99);
+        assert!(pos_yxj < pos_you, "多音节正词『右下角』必须排在单字『有』之前: {yxj_top5:?}");
     }
 
     /// 打印常用输入的前 6 个候选（回归抽查用）：`cargo test -p ime-core dump_top_candidates -- --ignored --nocapture`

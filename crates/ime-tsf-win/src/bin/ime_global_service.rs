@@ -727,6 +727,7 @@ extern "system" {
 extern "system" {
     fn GetClassNameW(h_wnd: isize, lp_class_name: *mut u16, n_max_count: i32) -> i32;
     fn MonitorFromWindow(hwnd: isize, dw_flags: u32) -> isize;
+    fn MonitorFromPoint(pt: POINT, dw_flags: u32) -> isize;
     fn GetMonitorInfoW(h_monitor: isize, lpmi: *mut MONITORINFO) -> i32;
     fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) -> u16;
     fn CreateWindowExW(
@@ -1138,9 +1139,39 @@ unsafe fn get_work_area() -> RECT {
     }
 }
 
-/// 将窗口坐标限制在排除任务栏后的桌面工作区内（绝不压到任务栏或拖出屏幕边框）
+/// 获取指定坐标所在显示器（若越界则取最近显示器）排除任务栏后的桌面工作区矩形，兼容多显示器环境
+unsafe fn get_work_area_for_point(x: i32, y: i32) -> RECT {
+    let hmon = MonitorFromPoint(POINT { x, y }, 2 /* MONITOR_DEFAULTTONEAREST */);
+    if hmon != 0 {
+        let mut mi = MONITORINFO {
+            cb_size: std::mem::size_of::<MONITORINFO>() as u32,
+            rc_monitor: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            rc_work: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            dw_flags: 0,
+        };
+        if GetMonitorInfoW(hmon, &mut mi) != 0
+            && mi.rc_work.right > mi.rc_work.left + 200
+            && mi.rc_work.bottom > mi.rc_work.top + 200
+        {
+            return mi.rc_work;
+        }
+    }
+    get_work_area()
+}
+
+/// 将窗口坐标限制在目标显示器排除任务栏后的桌面工作区内（绝不压到任务栏或拖出屏幕边框）
 unsafe fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
-    let wa = get_work_area();
+    let wa = get_work_area_for_point(x + w / 2, y + h / 2);
     let min_x = wa.left + 2;
     let max_x = (wa.right - w - 2).max(min_x);
     let min_y = wa.top + 2;
@@ -1184,13 +1215,10 @@ unsafe fn enable_win11_round_corners(hwnd: isize) {
 const ID_CHK_AI_ENABLED: isize = 1001;
 const ID_EDT_API_BASE: isize = 1003;
 const ID_EDT_MODEL: isize = 1004;
-const ID_EDT_API_KEY: isize = 1005;
 const ID_BTN_PROBE_LOCAL: isize = 1006;
 const ID_BTN_TEST_CONN: isize = 1007;
 const ID_BTN_PRESET_QWEN15B: isize = 1010;
 const ID_BTN_PRESET_QWEN05B: isize = 1011;
-const ID_BTN_PRESET_DEEPSEEK: isize = 1012;
-const ID_BTN_PRESET_SILICON: isize = 1013;
 const ID_CHK_Z_ZH: isize = 1020;
 const ID_CHK_AN_ANG: isize = 1021;
 const ID_CHK_TYPO: isize = 1022;
@@ -1206,10 +1234,8 @@ const ID_BTN_UNREG_TSF: isize = 1051;
 #[derive(Default, Clone, Copy)]
 struct SettingsControls {
     chk_ai_enabled: isize,
-    seg_provider: [isize; 5],
     edt_api_base: isize,
     edt_model: isize,
-    edt_api_key: isize,
     chk_z_zh: isize,
     chk_an_ang: isize,
     chk_typo: isize,
@@ -2141,7 +2167,14 @@ unsafe fn compute_cand_layout(
         if remain < 36 {
             break;
         }
-        let tw = m.width(f.cand, &cand.text).min(C_CAND_TEXT_MAX).min(remain);
+        let hint_extra = cand
+            .pronunciation_hint
+            .as_deref()
+            .map(|h| 5 + m.width(f.small, h))
+            .unwrap_or(0);
+        let tw = (m.width(f.cand, &cand.text) + hint_extra)
+            .min(C_CAND_TEXT_MAX)
+            .min(remain);
         let iw = fixed + tw;
         items.push((idx, cx, cx + iw));
         cx += iw + 2;
@@ -2244,10 +2277,10 @@ fn hit_test_status(x: i32, y: i32) -> StatusHitZone {
     }
 }
 
-/// 判断展开态状态栏是否紧贴工作区的某条边：0 = 否，1 = 左，2 = 右，3 = 上
+/// 判断展开态状态栏是否紧贴当前显示器工作区的某条边：0 = 否，1 = 左，2 = 右，3 = 上
 unsafe fn status_edge_side(pos: (i32, i32)) -> i32 {
-    let wa = get_work_area();
     let w = current_status_width();
+    let wa = get_work_area_for_point(pos.0 + w / 2, pos.1 + STATUS_H / 2);
     if pos.0 <= wa.left + 6 {
         1
     } else if pos.0 + w >= wa.right - 6 {
@@ -2273,8 +2306,8 @@ unsafe fn arm_status_autohide(hwnd: isize, pos: (i32, i32)) {
 
 /// 收缩为贴边小方块，返回小方块位置
 unsafe fn collapse_status_to_orb(pos: (i32, i32), side: i32) -> (i32, i32) {
-    let wa = get_work_area();
     let w = current_status_width();
+    let wa = get_work_area_for_point(pos.0 + w / 2, pos.1 + STATUS_H / 2);
     let orb = STATUS_ORB_SIZE;
     let y_mid = pos.1 + (STATUS_H - orb) / 2;
     let p = match side {
@@ -2289,9 +2322,9 @@ unsafe fn collapse_status_to_orb(pos: (i32, i32), side: i32) -> (i32, i32) {
 
 /// 从贴边小方块展开为完整状态栏（保持贴靠在原来那条边上），返回展开后的位置
 unsafe fn expand_status_from_orb(orb_pos: (i32, i32)) -> (i32, i32) {
-    let wa = get_work_area();
-    let w = current_status_width();
     let orb = STATUS_ORB_SIZE;
+    let wa = get_work_area_for_point(orb_pos.0 + orb / 2, orb_pos.1 + orb / 2);
+    let w = current_status_width();
     let y = orb_pos.1 - (STATUS_H - orb) / 2;
     let p = match STATUS_DOCK_SIDE.load(Ordering::Relaxed) {
         1 => (wa.left + 2, y),
@@ -3340,7 +3373,19 @@ unsafe extern "system" fn wnd_proc_cand(
                             SelectObject(hdc, f.num);
                             let num_w = measure_text_width(hdc, &num);
                             s_text(hdc, f.num, UI_TEXT2, rc.left + 14, rc.top, rc.left + 14 + num_w + 2, rc.bottom, &num, T_LINE);
-                            s_text(hdc, f.cand, UI_TEXT, rc.left + 14 + num_w + 6, rc.top, rc.right - 10, rc.bottom, &cand.text, T_LINE);
+                            let text_l = rc.left + 14 + num_w + 6;
+                            if let Some(ref hint) = cand.pronunciation_hint {
+                                SelectObject(hdc, f.cand);
+                                let cw_txt = measure_text_width(hdc, &cand.text);
+                                let text_r = (text_l + cw_txt + 2).min(rc.right - 10);
+                                s_text(hdc, f.cand, UI_TEXT, text_l, rc.top, text_r, rc.bottom, &cand.text, T_LINE);
+                                let hint_l = text_l + cw_txt + 5;
+                                if hint_l < rc.right - 12 {
+                                    s_text(hdc, f.small, UI_MUTED, hint_l, rc.top + 1, rc.right - 10, rc.bottom, hint, T_LINE);
+                                }
+                            } else {
+                                s_text(hdc, f.cand, UI_TEXT, text_l, rc.top, rc.right - 10, rc.bottom, &cand.text, T_LINE);
+                            }
                             if cand.tag.contains("AI") {
                                 s_ellipse(hdc, rc.right - 9, t + 5, rc.right - 4, t + 10, rgb(124, 58, 237));
                             }
@@ -3537,7 +3582,15 @@ unsafe extern "system" fn wnd_proc_status(
                                 move_win = Some((st.status_pos.0, st.status_pos.1, w, h));
                             }
                         } else {
+                            if st.status_drag_moved && !STATUS_COLLAPSED.load(Ordering::Relaxed) {
+                                st.persistent_cfg.status_bar_pos = Some(st.status_pos);
+                                let cfg_snapshot = st.persistent_cfg.clone();
+                                std::thread::spawn(move || {
+                                    let _ = cfg_snapshot.save();
+                                });
+                            }
                             st.dragging_status = None;
+                            st.status_drag_moved = false;
                         }
                     }
                     if st.status_hover != zone {
@@ -3574,16 +3627,31 @@ unsafe extern "system" fn wnd_proc_status(
             0
         }
         WM_CAPTURECHANGED => {
+            let mut save_cfg: Option<ImePersistentConfig> = None;
             if let Ok(mut guard) = GLOBAL_STATE.lock() {
                 if let Some(st) = guard.as_mut() {
+                    if st.dragging_status.is_some()
+                        && st.status_drag_moved
+                        && !STATUS_COLLAPSED.load(Ordering::Relaxed)
+                    {
+                        st.persistent_cfg.status_bar_pos = Some(st.status_pos);
+                        save_cfg = Some(st.persistent_cfg.clone());
+                    }
                     st.dragging_status = None;
+                    st.status_drag_moved = false;
                 }
+            }
+            if let Some(cfg_snapshot) = save_cfg {
+                std::thread::spawn(move || {
+                    let _ = cfg_snapshot.save();
+                });
             }
             0
         }
         WM_LBUTTONUP => {
             let mut need_sync = false;
             let mut arm_pos: Option<(i32, i32)> = None;
+            let mut save_cfg: Option<ImePersistentConfig> = None;
             if let Ok(mut guard) = GLOBAL_STATE.lock() {
                 if let Some(st) = guard.as_mut() {
                     let was_dragging = st.dragging_status.is_some();
@@ -3597,10 +3665,19 @@ unsafe extern "system" fn wnd_proc_status(
                         arm_pos = Some(st.status_pos);
                     } else if was_dragging {
                         arm_pos = Some(st.status_pos);
+                        if moved && !STATUS_COLLAPSED.load(Ordering::Relaxed) {
+                            st.persistent_cfg.status_bar_pos = Some(st.status_pos);
+                            save_cfg = Some(st.persistent_cfg.clone());
+                        }
                     }
                 }
             }
             ReleaseCapture();
+            if let Some(cfg_snapshot) = save_cfg {
+                std::thread::spawn(move || {
+                    let _ = cfg_snapshot.save();
+                });
+            }
             if need_sync {
                 sync_ui_windows();
             }
@@ -3842,7 +3919,6 @@ const WM_CTLCOLORSTATIC: u32 = 0x0138;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_APP_SETTINGS_REFRESH: u32 = 0x8000 + 44;
 const BS_OWNERDRAW: u32 = 0x000B;
-const ES_PASSWORD: u32 = 0x0020;
 const SS_NOPREFIX: u32 = 0x0080;
 const EN_SETFOCUS: usize = 0x0100;
 const EN_KILLFOCUS: usize = 0x0200;
@@ -3896,34 +3972,22 @@ const FIELD_L: i32 = 318;
 const NAV_Y0: i32 = 92;
 const NAV_STEP: i32 = 44;
 const NAV_H: i32 = 38;
-const SEG_Y: i32 = 176;
-const ACT_Y: i32 = 322;
+const ACT_Y: i32 = 418;
 const PAGE_ALWAYS: u8 = 255;
 
-const ID_SEG_PROVIDER_BASE: isize = 1100;
-const SEG_LABELS: [&str; 5] = ["本地 Qwen", "ChatGPT", "Claude", "Gemini", "自定义"];
-const EDIT_ROWS: [(isize, i32, &str); 3] = [
-    (ID_EDT_API_BASE, 214, "接口地址"),
-    (ID_EDT_MODEL, 250, "模型名称"),
-    (ID_EDT_API_KEY, 286, "API Key"),
-];
-/// 各服务商推荐模型速查（在「服务配置」卡片右上角随所选服务商动态展示）
-const PROVIDER_MODEL_TIPS: [&str; 5] = [
-    "推荐：内置 Qwen2.5-1.5B（首选）/ Ollama qwen2.5:1.5b 或 qwen3:1.7b",
-    "推荐：gpt-4.1-mini / gpt-4.1-nano / gpt-4o-mini（低延迟高性价比）",
-    "推荐：claude-3-5-haiku-latest / claude-haiku-4-5（响应最快）",
-    "推荐：gemini-2.5-flash / gemini-2.5-flash-lite（已自动关闭思考延迟）",
-    "推荐：deepseek-chat (V3) / Qwen2.5-7B-Instruct / Qwen3-8B",
+const EDIT_ROWS: [(isize, i32, &str); 2] = [
+    (ID_EDT_API_BASE, 330, "本机地址"),
+    (ID_EDT_MODEL, 374, "模型名称"),
 ];
 /// 侧栏导航：(Segoe MDL2 图标, 名称)
 const NAV_ITEMS: [(&str, &str); 4] = [
-    ("\u{E945}", "AI 模型"),
+    ("\u{E945}", "本地 AI"),
     ("\u{E8C1}", "拼音与纠错"),
     ("\u{E765}", "输入法模式"),
     ("\u{E946}", "快捷键与关于"),
 ];
 const PAGE_HEADERS: [(&str, &str); 4] = [
-    ("AI 模型", "接入本地或云端大模型对候选词做语义重排；关闭时仍由端侧轻量模型辅助选词。"),
+    ("本地 AI 模型", "纯本地离线语义重排，绝不联网上传任何打字内容；关闭时仍由端侧轻量模型辅助选词。"),
     ("拼音与纠错", "声母、韵母或按键顺序输错时也能给出正确候选，精确拼写的结果始终优先。"),
     ("输入法模式", "选择输入法接入 Windows 的方式，两种模式共用词库与设置，可随时切换。"),
     ("快捷键与关于", "常用操作速查，以及版本与词库信息。"),
@@ -3964,7 +4028,6 @@ static SETTINGS_RES: Mutex<SettingsRes> = Mutex::new(SettingsRes {
 });
 static SETTINGS_PAGE: AtomicUsize = AtomicUsize::new(0);
 static NAV_HOVER: AtomicI32 = AtomicI32::new(-1);
-static PROVIDER_SEL: AtomicUsize = AtomicUsize::new(0);
 static FOCUSED_EDIT: AtomicIsize = AtomicIsize::new(0);
 static TSF_REGISTERED: AtomicBool = AtomicBool::new(false);
 static TSF_OP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -4221,24 +4284,39 @@ unsafe fn paint_settings(hwnd: isize) {
 
 unsafe fn paint_page_ai(hdc: isize, r: &SettingsRes) {
     // 卡片 1：总开关（开关控件铺满卡片内部）
-    s_card(hdc, 78, 132);
+    s_card(hdc, 78, 134);
 
-    // 卡片 2：服务配置
-    s_card(hdc, 138, 420);
-    s_text(hdc, r.f_heading, C_TEXT, IN_L, 146, IN_L + 84, 170, "服务配置", T_LINE);
-    let prov_idx = get_provider_sel();
+    // 卡片 2：内置本地模型（一键下载并运行于 127.0.0.1:18434）
+    s_card(hdc, 146, 270);
+    s_text(hdc, r.f_heading, C_TEXT, IN_L, 158, IN_L + 110, 180, "内置本地模型", T_LINE);
+    s_pill(hdc, IN_L + 104, 159, IN_L + 204, 179, "免安装 Ollama", C_GREEN_SOFT, C_GREEN, false);
+    s_pill(hdc, IN_L + 212, 159, IN_L + 300, 179, "纯本地离线", C_ACCENT_SOFT, C_ACCENT, false);
+    s_text(
+        hdc,
+        r.f_small,
+        C_MUTED,
+        IN_L,
+        184,
+        IN_R,
+        202,
+        "自动下载 llama.cpp（Vulkan GPU 加速）与 Qwen2.5 GGUF 模型，后台运行于 127.0.0.1:18434",
+        T_LINE,
+    );
+
+    // 卡片 3：本机推理服务配置（仅允许回环地址，支持内置 / Ollama / llama.cpp / LM Studio）
+    s_card(hdc, 282, 526);
+    s_text(hdc, r.f_heading, C_TEXT, IN_L, 294, IN_L + 116, 316, "本机推理服务", T_LINE);
     s_text(
         hdc,
         r.f_small,
         C_ACCENT,
-        IN_L + 88,
-        147,
+        IN_L + 118,
+        295,
         IN_R,
-        170,
-        PROVIDER_MODEL_TIPS[prov_idx],
+        316,
+        "支持内置 (18434) / Ollama (11434) / llama.cpp (8080) / LM Studio (1234)",
         T_LINE,
     );
-    s_text(hdc, r.f_body, C_TEXT2, IN_L, SEG_Y, FIELD_L - 8, SEG_Y + 32, "服务商", T_LINE);
     let focused = FOCUSED_EDIT.load(Ordering::Relaxed);
     for (id, y, label) in EDIT_ROWS {
         s_text(hdc, r.f_body, C_TEXT2, IN_L, y, FIELD_L - 8, y + 32, label, T_LINE);
@@ -4249,19 +4327,19 @@ unsafe fn paint_page_ai(hdc: isize, r: &SettingsRes) {
             s_round(hdc, FIELD_L, y, IN_R, y + 32, 8, C_CARD, C_INPUT_BORDER);
         }
     }
-    s_text(hdc, r.f_body, C_TEXT2, IN_L, ACT_Y, FIELD_L - 8, ACT_Y + 30, "快速填入", T_LINE);
+    s_text(hdc, r.f_body, C_TEXT2, IN_L, ACT_Y, FIELD_L - 8, ACT_Y + 30, "连接检测", T_LINE);
 
-    // 各家推荐模型简单说明栏（底栏三行提示框，每行均留足右边距不截断）
-    s_round(hdc, IN_L, 358, IN_R, 412, 6, C_BG, C_BORDER);
+    // 本地模式隐私与选型说明框
+    s_round(hdc, IN_L, 460, IN_R, 514, 6, C_BG, C_BORDER);
     s_text(
         hdc,
         r.f_small,
         C_TEXT2,
         IN_L + 8,
-        361,
+        463,
         IN_R - 8,
-        377,
-        "各家推荐 · 本地: Qwen2.5-1.5B / qwen3:1.7b   ChatGPT: gpt-4.1-mini / 4o-mini",
+        479,
+        "推荐本地模型 · 内置 Qwen2.5-1.5B（首选）/ Ollama qwen2.5:1.5b 或 qwen3:1.7b",
         T_LINE,
     );
     s_text(
@@ -4269,10 +4347,10 @@ unsafe fn paint_page_ai(hdc: isize, r: &SettingsRes) {
         r.f_small,
         C_TEXT2,
         IN_L + 8,
-        377,
+        479,
         IN_R - 8,
-        393,
-        "Claude: claude-3-5-haiku-latest   Gemini: gemini-2.5-flash / 2.5-flash-lite",
+        495,
+        "隐私安全保证 · 仅允许连接本机回环地址（127.0.0.1 / localhost），绝不联网发送打字内容",
         T_LINE,
     );
     s_text(
@@ -4280,26 +4358,10 @@ unsafe fn paint_page_ai(hdc: isize, r: &SettingsRes) {
         r.f_small,
         C_MUTED,
         IN_L + 8,
-        393,
+        495,
         IN_R - 8,
-        409,
-        "DeepSeek/硅基: deepseek-chat (V3) / Qwen2.5-7B（勿选 R1/o1 等慢思考模型）",
-        T_LINE,
-    );
-
-    // 卡片 3：内置本地模型
-    s_card(hdc, 428, 530);
-    s_text(hdc, r.f_heading, C_TEXT, IN_L, 438, IN_L + 110, 460, "内置本地模型", T_LINE);
-    s_pill(hdc, IN_L + 104, 439, IN_L + 204, 459, "免安装 Ollama", C_GREEN_SOFT, C_GREEN, false);
-    s_text(
-        hdc,
-        r.f_small,
-        C_MUTED,
-        IN_L,
-        461,
-        IN_R,
-        480,
-        "自动下载 llama.cpp（Vulkan GPU 加速）与 Qwen2.5 GGUF 模型，后台运行于 127.0.0.1:18434",
+        511,
+        "性能提示 · 请选择轻量级指令/续写模型（0.5B~3B），避免思考类模型造成选词延迟",
         T_LINE,
     );
 }
@@ -4387,7 +4449,7 @@ unsafe fn paint_page_about(hdc: isize, r: &SettingsRes) {
     s_text(hdc, r.f_title, C_CARD, IN_L, 104, IN_L + 52, 156, "拼", T_CENTER);
     let tx = IN_L + 70;
     s_text(hdc, r.f_brand, C_TEXT, tx, 100, IN_R, 124, "Rust AI 拼音输入法", T_LINE);
-    s_text(hdc, r.f_small, C_TEXT2, tx, 128, IN_R, 146, "版本 0.2.0 · Rust 原生实现 · 本地优先，输入数据不出本机", T_LINE);
+    s_text(hdc, r.f_small, C_TEXT2, tx, 128, IN_R, 146, "版本 0.2.0 · Rust 原生实现 · 纯本地运行，打字内容绝不上传云端", T_LINE);
     let count = LEXICON_ENTRY_COUNT.load(Ordering::Relaxed);
     s_text(
         hdc,
@@ -4438,19 +4500,6 @@ unsafe fn get_toggle(hwnd_ctrl: isize) -> bool {
     hwnd_ctrl != 0 && GetWindowLongPtrW(hwnd_ctrl, GWLP_USERDATA) != 0
 }
 
-unsafe fn set_provider_sel(ctrls: &SettingsControls, idx: usize) {
-    PROVIDER_SEL.store(idx.min(4), Ordering::Relaxed);
-    for h in ctrls.seg_provider {
-        if h != 0 {
-            InvalidateRect(h, null(), 0);
-        }
-    }
-}
-
-fn get_provider_sel() -> usize {
-    PROVIDER_SEL.load(Ordering::Relaxed).min(4)
-}
-
 unsafe fn get_window_text_string(h: isize) -> String {
     let len = GetWindowTextLengthW(h);
     if len <= 0 {
@@ -4468,7 +4517,7 @@ unsafe fn settings_draw_item(dis: &DRAWITEMSTRUCT) {
     let id = dis.ctl_id as isize;
     let pressed = dis.item_state & ODS_SELECTED != 0;
     let text = get_window_text_string(dis.hwnd_item);
-    let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+    let h = rc.bottom - rc.top;
 
     SetBkMode(hdc, TRANSPARENT);
     fill_rect_struct(hdc, &rc, C_CARD);
@@ -4486,20 +4535,6 @@ unsafe fn settings_draw_item(dis: &DRAWITEMSTRUCT) {
         s_round(hdc, sx, sy, sx + sw, sy + sh, sh, track, track);
         let kx = if on { sx + sw - 21 } else { sx + 3 };
         s_ellipse(hdc, kx, sy + 3, kx + 18, sy + 21, C_CARD);
-        return;
-    }
-
-    if (ID_SEG_PROVIDER_BASE..ID_SEG_PROVIDER_BASE + 5).contains(&id) {
-        let selected = (id - ID_SEG_PROVIDER_BASE) as usize == get_provider_sel();
-        let (fill, border, fg, font) = if selected {
-            (C_ACCENT_SOFT, C_ACCENT, C_ACCENT, r.f_body_bold)
-        } else if pressed {
-            (C_PRESSED, C_INPUT_BORDER, C_TEXT, r.f_body)
-        } else {
-            (C_CARD, C_INPUT_BORDER, C_TEXT2, r.f_body)
-        };
-        s_round(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, fill, border);
-        s_text(hdc, font, fg, rc.left, rc.top, rc.left + w, rc.bottom, &text, T_CENTER);
         return;
     }
 
@@ -4532,7 +4567,7 @@ unsafe fn settings_draw_item(dis: &DRAWITEMSTRUCT) {
         } else if active && enabled {
             ("使用中 · GPU 加速".to_string(), C_GREEN)
         } else if active {
-            ("已选择 · 大模型重排未开启".to_string(), C_TEXT2)
+            ("已选择 · 本地大模型未开启".to_string(), C_TEXT2)
         } else if downloaded {
             ("已下载 · 点击切换到此模型".to_string(), C_MUTED)
         } else {
@@ -4540,8 +4575,8 @@ unsafe fn settings_draw_item(dis: &DRAWITEMSTRUCT) {
         };
 
         let badge_w = if active { 30 } else { 0 };
-        s_text(hdc, title_font, title_col, rc.left + 14, rc.top + 3, rc.right - 10 - badge_w, rc.top + 21, &text, T_LINE);
-        s_text(hdc, r.f_small, sub_col, rc.left + 14, rc.top + 20, rc.right - 10 - badge_w, rc.bottom - 3, &sub, T_LINE);
+        s_text(hdc, title_font, title_col, rc.left + 14, rc.top + 5, rc.right - 10 - badge_w, rc.top + 24, &text, T_LINE);
+        s_text(hdc, r.f_small, sub_col, rc.left + 14, rc.top + 24, rc.right - 10 - badge_w, rc.bottom - 5, &sub, T_LINE);
 
         if active {
             // 右侧圆形勾选徽标
@@ -4582,14 +4617,8 @@ unsafe fn settings_draw_item(dis: &DRAWITEMSTRUCT) {
 unsafe fn populate_settings_controls(ctrls: &SettingsControls, cfg: &ImePersistentConfig) {
     refresh_builtin_tier_state(cfg);
     set_toggle(ctrls.chk_ai_enabled, cfg.ai_config.enabled);
-    let sel_idx = AiProvider::ALL
-        .iter()
-        .position(|&p| p == cfg.ai_config.provider)
-        .unwrap_or(0);
-    set_provider_sel(ctrls, sel_idx);
     set_ctrl_text(ctrls.edt_api_base, &cfg.ai_config.api_base);
     set_ctrl_text(ctrls.edt_model, &cfg.ai_config.model);
-    set_ctrl_text(ctrls.edt_api_key, &cfg.ai_config.api_key);
 
     let f = &cfg.fuzzy_config;
     set_toggle(ctrls.chk_z_zh, f.z_zh && f.c_ch && f.s_sh);
@@ -4601,11 +4630,9 @@ unsafe fn populate_settings_controls(ctrls: &SettingsControls, cfg: &ImePersiste
 
 unsafe fn read_settings_controls_into_cfg(ctrls: &SettingsControls, cfg: &mut ImePersistentConfig) {
     cfg.ai_config.enabled = get_toggle(ctrls.chk_ai_enabled);
-    cfg.ai_config.provider = AiProvider::ALL[get_provider_sel()];
+    cfg.ai_config.provider = AiProvider::LocalQwen;
     cfg.ai_config.api_base = get_ctrl_text(ctrls.edt_api_base);
     cfg.ai_config.model = get_ctrl_text(ctrls.edt_model);
-    cfg.ai_config.api_key = get_ctrl_text(ctrls.edt_api_key);
-    cfg.ai_config.save_current_to_profile();
 
     let z_zh = get_toggle(ctrls.chk_z_zh);
     let an_ang = get_toggle(ctrls.chk_an_ang);
@@ -5037,31 +5064,24 @@ unsafe extern "system" fn wnd_proc_settings(
                 mk("EDIT", "", ES_AUTOHSCROLL | WS_TABSTOP | extra, FIELD_L + 10, y + 6, IN_R - FIELD_L - 20, 20, id, 0, r.f_body)
             };
 
-            // ---- 第 1 页：AI 模型 ----
+            // ---- 第 1 页：本地 AI 模型 ----
             let chk_ai_enabled = btn(
-                "启用大模型智能选词重排\n在后台异步运行，不阻塞打字；端侧轻量模型始终开启",
+                "启用本地大模型智能选词重排\n纯本机离线异步运行，绝不联网上传；关闭时仍由端侧轻量模型辅助选词",
                 IN_L,
-                83,
+                84,
                 IN_R - IN_L,
                 44,
                 ID_CHK_AI_ENABLED,
                 0,
             );
-            let mut seg_provider = [0isize; 5];
-            for (i, label) in SEG_LABELS.iter().enumerate() {
-                seg_provider[i] = btn(label, FIELD_L + i as i32 * 90, SEG_Y, 84, 32, ID_SEG_PROVIDER_BASE + i as isize, 0);
-            }
-            let edt_api_base = edit(EDIT_ROWS[0].1, ID_EDT_API_BASE, 0);
-            let edt_model = edit(EDIT_ROWS[1].1, ID_EDT_MODEL, 0);
-            let edt_api_key = edit(EDIT_ROWS[2].1, ID_EDT_API_KEY, ES_PASSWORD);
-            btn("DeepSeek", FIELD_L, ACT_Y, 84, 30, ID_BTN_PRESET_DEEPSEEK, 0);
-            btn("硅基流动", FIELD_L + 90, ACT_Y, 84, 30, ID_BTN_PRESET_SILICON, 0);
-            btn("探测本机服务", IN_R - 232, ACT_Y, 112, 30, ID_BTN_PROBE_LOCAL, 0);
-            btn("测试连接", IN_R - 112, ACT_Y, 112, 30, ID_BTN_TEST_CONN, 0);
-            let tile_05 = btn("Qwen2.5-0.5B · 极速版", IN_L, 483, 264, 40, ID_BTN_PRESET_QWEN05B, 0);
-            let tile_15 = btn("Qwen2.5-1.5B · 推荐", IN_L + 276, 483, 264, 40, ID_BTN_PRESET_QWEN15B, 0);
+            let tile_05 = btn("Qwen2.5-0.5B · 极速版", IN_L, 210, 264, 46, ID_BTN_PRESET_QWEN05B, 0);
+            let tile_15 = btn("Qwen2.5-1.5B · 推荐", IN_L + 276, 210, 264, 46, ID_BTN_PRESET_QWEN15B, 0);
             MODEL_TILE_HWNDS[0].store(tile_05, Ordering::Relaxed);
             MODEL_TILE_HWNDS[1].store(tile_15, Ordering::Relaxed);
+            let edt_api_base = edit(EDIT_ROWS[0].1, ID_EDT_API_BASE, 0);
+            let edt_model = edit(EDIT_ROWS[1].1, ID_EDT_MODEL, 0);
+            btn("探测本机服务", FIELD_L, ACT_Y, 128, 30, ID_BTN_PROBE_LOCAL, 0);
+            btn("测试本地连接", FIELD_L + 138, ACT_Y, 128, 30, ID_BTN_TEST_CONN, 0);
 
             // ---- 第 2 页：拼音与纠错 ----
             let fuzzy_rows: [(&str, isize); 5] = [
@@ -5099,10 +5119,8 @@ unsafe extern "system" fn wnd_proc_settings(
 
             let ctrls = SettingsControls {
                 chk_ai_enabled,
-                seg_provider,
                 edt_api_base,
                 edt_model,
-                edt_api_key,
                 chk_z_zh: fuzzy_hwnds[0],
                 chk_an_ang: fuzzy_hwnds[1],
                 chk_typo: fuzzy_hwnds[2],
@@ -5214,7 +5232,7 @@ unsafe extern "system" fn wnd_proc_settings(
             let ctrls = settings_ctrls_snapshot();
 
             // 输入框获得 / 失去焦点：刷新高亮描边
-            if matches!(id, ID_EDT_API_BASE | ID_EDT_MODEL | ID_EDT_API_KEY) {
+            if matches!(id, ID_EDT_API_BASE | ID_EDT_MODEL) {
                 if notify_code == EN_SETFOCUS {
                     FOCUSED_EDIT.store(id, Ordering::Relaxed);
                     InvalidateRect(hwnd, null(), 0);
@@ -5235,48 +5253,6 @@ unsafe extern "system" fn wnd_proc_settings(
             }
 
             if notify_code != BN_CLICKED {
-                return 0;
-            }
-
-            // 服务商分段选择器
-            if (ID_SEG_PROVIDER_BASE..ID_SEG_PROVIDER_BASE + 5).contains(&id) {
-                let idx = (id - ID_SEG_PROVIDER_BASE) as usize;
-                if idx == get_provider_sel() {
-                    return 0;
-                }
-                let next_prov = AiProvider::ALL[idx];
-                let cur_base = get_ctrl_text(ctrls.edt_api_base);
-                let cur_model = get_ctrl_text(ctrls.edt_model);
-                let cur_key = get_ctrl_text(ctrls.edt_api_key);
-                let mut next_cfg = None;
-                if let Ok(mut guard) = GLOBAL_STATE.lock() {
-                    if let Some(st) = guard.as_mut() {
-                        st.persistent_cfg.ai_config.api_base = cur_base;
-                        st.persistent_cfg.ai_config.model = cur_model;
-                        st.persistent_cfg.ai_config.api_key = cur_key;
-                        st.persistent_cfg.ai_config.switch_provider(next_prov);
-                        next_cfg = Some((
-                            st.persistent_cfg.ai_config.api_base.clone(),
-                            st.persistent_cfg.ai_config.model.clone(),
-                            st.persistent_cfg.ai_config.api_key.clone(),
-                        ));
-                    }
-                }
-                set_provider_sel(&ctrls, idx);
-                InvalidateRect(hwnd, null(), 0);
-                if let Some((base_s, model_s, key_s)) = next_cfg {
-                    set_ctrl_text(ctrls.edt_api_base, &base_s);
-                    set_ctrl_text(ctrls.edt_model, &model_s);
-                    set_ctrl_text(ctrls.edt_api_key, &key_s);
-                }
-                set_ctrl_text(
-                    ctrls.lbl_status,
-                    &format!(
-                        "已切换到「{}」（{}），点击「保存设置」生效。",
-                        next_prov.display_name(),
-                        PROVIDER_MODEL_TIPS[idx]
-                    ),
-                );
                 return 0;
             }
 
@@ -5303,7 +5279,6 @@ unsafe extern "system" fn wnd_proc_settings(
                     }
                     DOWNLOADING_TIER.store(tier_slot(tier), Ordering::Relaxed);
                     invalidate_model_tiles();
-                    set_provider_sel(&ctrls, 0);
                     set_ctrl_text(ctrls.edt_api_base, MANAGED_LLM_BASE_URL);
                     set_ctrl_text(ctrls.edt_model, tier.model_id());
                     set_toggle(ctrls.chk_ai_enabled, true);
@@ -5324,7 +5299,6 @@ unsafe extern "system" fn wnd_proc_settings(
                                             st.persistent_cfg.ai_config.api_base = MANAGED_LLM_BASE_URL.to_string();
                                             st.persistent_cfg.ai_config.model = tier.model_id().to_string();
                                             st.persistent_cfg.ai_config.enabled = true;
-                                            st.persistent_cfg.ai_config.save_current_to_profile();
                                             st.session.apply_persistent_config(&st.persistent_cfg);
                                             let _ = st.persistent_cfg.save();
                                         }
@@ -5342,20 +5316,8 @@ unsafe extern "system" fn wnd_proc_settings(
                         }
                     });
                 }
-                ID_BTN_PRESET_DEEPSEEK => {
-                    set_provider_sel(&ctrls, 4);
-                    set_ctrl_text(ctrls.edt_api_base, "https://api.deepseek.com/v1");
-                    set_ctrl_text(ctrls.edt_model, "deepseek-chat");
-                    set_ctrl_text(ctrls.lbl_status, "已填入 DeepSeek 接口，请在「API Key」中填写你的密钥。");
-                }
-                ID_BTN_PRESET_SILICON => {
-                    set_provider_sel(&ctrls, 4);
-                    set_ctrl_text(ctrls.edt_api_base, "https://api.siliconflow.cn/v1");
-                    set_ctrl_text(ctrls.edt_model, "Qwen/Qwen2.5-7B-Instruct");
-                    set_ctrl_text(ctrls.lbl_status, "已填入硅基流动 Qwen2.5-7B 接口，请在「API Key」中填写你的密钥。");
-                }
                 ID_BTN_PROBE_LOCAL => {
-                    set_ctrl_text(ctrls.lbl_status, "正在探测本机 Ollama / llama.cpp 服务…");
+                    set_ctrl_text(ctrls.lbl_status, "正在探测本机内置 / Ollama / llama.cpp / LM Studio 服务…");
                     std::thread::spawn(move || unsafe {
                         let endpoints = OpenAiCompatibleClient::probe_local_endpoints();
                         let mut summary = Vec::new();
@@ -5378,26 +5340,33 @@ unsafe extern "system" fn wnd_proc_settings(
                     });
                 }
                 ID_BTN_TEST_CONN => {
-                    if TEST_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-                        return 0;
-                    }
-                    set_ctrl_text(ctrls.lbl_status, "正在测试大模型连接与推理延迟…");
                     let mut temp_cfg = GLOBAL_STATE
                         .lock()
                         .ok()
                         .and_then(|g| g.as_ref().map(|st| st.persistent_cfg.clone()))
                         .unwrap_or_default();
                     read_settings_controls_into_cfg(&ctrls, &mut temp_cfg);
+                    if !ime_ai::is_loopback_http_url(&temp_cfg.ai_config.api_base) {
+                        set_ctrl_text(
+                            ctrls.lbl_status,
+                            "地址无效：本地模式仅允许连接本机回环地址（如 http://127.0.0.1:18434/v1 或 http://127.0.0.1:11434/v1）。",
+                        );
+                        return 0;
+                    }
+                    if TEST_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+                        return 0;
+                    }
+                    set_ctrl_text(ctrls.lbl_status, "正在测试本机大模型连接与推理延迟…");
                     let ai_cfg = temp_cfg.ai_config;
                     std::thread::spawn(move || unsafe {
                         let client = OpenAiCompatibleClient::new(ai_cfg);
                         let text = match client.test_connection() {
                             Ok((reply, elapsed)) => format!(
-                                "连接成功，耗时 {:.0} ms。测试语境「微积分傅里叶 + jishu」→ 模型返回「{}」",
+                                "本地连接成功，耗时 {:.0} ms。测试语境「微积分傅里叶 + jishu」→ 模型返回「{}」",
                                 elapsed.as_secs_f64() * 1000.0,
                                 reply
                             ),
-                            Err(e) => format!("连接失败：{e}"),
+                            Err(e) => format!("本地连接失败：{e}"),
                         };
                         TEST_IN_PROGRESS.store(false, Ordering::SeqCst);
                         set_ctrl_text(ctrls.lbl_status, &text);
@@ -5421,6 +5390,17 @@ unsafe extern "system" fn wnd_proc_settings(
                         .and_then(|g| g.as_ref().map(|st| st.persistent_cfg.clone()))
                         .unwrap_or_default();
                     read_settings_controls_into_cfg(&ctrls, &mut updated_cfg);
+                    if !ime_ai::is_loopback_http_url(&updated_cfg.ai_config.api_base) {
+                        set_ctrl_text(
+                            ctrls.lbl_status,
+                            "保存失败：已移除云端接口，仅允许填写本机回环地址（如 http://127.0.0.1:18434/v1）。",
+                        );
+                        return 0;
+                    }
+                    updated_cfg.ai_config.sanitize_local_only();
+                    let next_enabled = updated_cfg.ai_config.enabled;
+                    let next_api_base = updated_cfg.ai_config.api_base.clone();
+                    let next_model = updated_cfg.ai_config.model.clone();
                     let mut saved_msg = None;
                     if let Ok(mut guard) = GLOBAL_STATE.lock() {
                         if let Some(st) = guard.as_mut() {
@@ -5430,7 +5410,7 @@ unsafe extern "system" fn wnd_proc_settings(
                             let ok = st.persistent_cfg.save().is_ok();
                             saved_msg = Some(if ok {
                                 format!(
-                                    "设置已保存并生效。当前：{} · {}，大模型重排{}。",
+                                    "设置已保存并生效。当前：{} · {}，本地大模型重排{}。",
                                     st.persistent_cfg.ai_config.provider.short_tag(),
                                     st.persistent_cfg.ai_config.model,
                                     if st.persistent_cfg.ai_config.enabled { "已开启" } else { "已关闭" }
@@ -5439,6 +5419,17 @@ unsafe extern "system" fn wnd_proc_settings(
                                 "设置已生效，但写入 ime_config.json 失败，请检查磁盘权限。".to_string()
                             });
                         }
+                    }
+                    if next_enabled && next_api_base.contains("18434") {
+                        ManagedLocalLlm::auto_start_if_configured(&next_api_base, &next_model, true);
+                    } else if (!next_enabled || !next_api_base.contains("18434"))
+                        && !DOWNLOAD_IN_PROGRESS.load(Ordering::SeqCst)
+                    {
+                        std::thread::spawn(|| {
+                            if ManagedLocalLlm::is_server_running() {
+                                ManagedLocalLlm::stop_server();
+                            }
+                        });
                     }
                     if let Some(m) = saved_msg {
                         set_ctrl_text(ctrls.lbl_status, &m);
@@ -5584,9 +5575,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let screen_w = GetSystemMetrics(SM_CXSCREEN).max(1280);
         let screen_h = GetSystemMetrics(SM_CYSCREEN).max(800);
         let wa = get_work_area();
+        let (raw_status_x, raw_status_y) = persistent_cfg
+            .status_bar_pos
+            .unwrap_or((wa.right - init_status_w - 20, wa.bottom - STATUS_H - 12));
         let init_status_pos = clamp_to_work_area(
-            wa.right - init_status_w - 20,
-            wa.bottom - STATUS_H - 12,
+            raw_status_x,
+            raw_status_y,
             init_status_w,
             STATUS_H,
         );
@@ -5755,6 +5749,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         update_status_bar_visibility(hwnd_status);
+        arm_status_autohide(hwnd_status, init_status_pos);
         SetTimer(hwnd_status, STATUS_VIS_TIMER_ID, 250, null());
         spawn_tsf_ipc_server(hwnd_cand);
         if args.iter().any(|a| a == "--open-settings") {
@@ -5781,7 +5776,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if mouse_hook != 0 {
             UnhookWindowsHookEx(mouse_hook);
         }
-        ManagedLocalLlm::stop_server();
+        if ManagedLocalLlm::is_server_running() {
+            ManagedLocalLlm::stop_server();
+        }
     }
     Ok(())
 }

@@ -301,18 +301,42 @@ impl BilingualDecoder {
                             continue;
                         }
                         if urec.dynamic_score >= 4.5
-                            || urec.commit_count >= 2
-                            || (is_whole_input && urec.code_key != raw_slice && urec.commit_count >= 1)
+                            || (urec.commit_count >= 2 && urec.dynamic_score >= 2.2)
+                            || (is_whole_input
+                                && urec.code_key != raw_slice
+                                && urec.commit_count >= 1
+                                && urec.dynamic_score >= 1.5)
                         {
-                            // 若晶格图中该区间已存在同名非纠错边（如常用词「怎么」「时候」「选词」已在词库中），
-                            // 绝不重复塞入 `base_cost = 0.15` 的幽灵边（否则再叠加下方 `user_boost` 会产生负数代价，
-                            // 导致两个被用过的 2 字词拼出负数代价而压垮 4 字成语/词组如「怎么回事」）。
+                            // 若晶格图中该区间已存在同名非纠错边（如常用词「怎么」「时候」「选词」「右下角」已在词库中），
+                            // 绝不重复塞入额外边（其词频记忆统一由下方 `user_boost` 扣减）。
                             if edges_at_i
                                 .iter()
                                 .any(|e| !e.is_fuzzy && e.end == end_pos && e.text == urec.text)
                             {
                                 continue;
                             }
+                            // 对词库外的个人自造词（或超出词库截断的冷门同音词），以该跨度上词库最优精确词的 `base_cost + 0.55`
+                            // 作为统一起跑线（无词库词时按词库规模取标准基准），使其完全依靠真实衰减后的 `user_boost` 公平竞争，
+                            // 彻底杜绝陈旧误输词（如多天前误输 2 次的「右下叫」）凭固定低 `base_cost` 压过词库正词「右下角」！
+                            let best_exact_span_cost = lattice.edges_from[i]
+                                .iter()
+                                .filter(|e| {
+                                    !e.is_fuzzy && e.end == end_pos && e.kind == EdgeKind::ChineseWord
+                                })
+                                .map(|e| e.base_cost)
+                                .fold(None, |acc: Option<f32>, c| {
+                                    Some(acc.map_or(c, |a| a.min(c)))
+                                });
+                            let default_custom_cost = if is_whole_input {
+                                4.2
+                            } else if lexicon.entry_count() > 50_000 {
+                                9.2
+                            } else {
+                                5.2
+                            };
+                            let injected_base_cost = best_exact_span_cost
+                                .map(|c| c + 0.55)
+                                .unwrap_or(default_custom_cost);
                             let is_ascii = urec.text.is_ascii();
                             let hint = crate::corrector::lookup_hint_flat(raw_slice, &urec.text);
                             edges_at_i.push(LatticeEdge {
@@ -327,7 +351,7 @@ impl BilingualDecoder {
                                 } else {
                                     EdgeKind::ChineseChar
                                 },
-                                base_cost: if is_whole_input { 3.2 } else { 4.8 },
+                                base_cost: injected_base_cost,
                                 domain: DomainTag::General,
                                 syllable_count: if is_ascii { 1 } else { char_cnt.max(1) },
                                 is_fuzzy: false,
@@ -1758,6 +1782,23 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
         } else if w == "行" && matches!(prev_word, "私" | "公" | "支" | "分" | "总" | "同" | "外" | "内") {
             bonus += 2.65;
         }
+    }
+    if matches!(prev_word, "右上" | "右下" | "左上" | "左下") {
+        if matches!(w, "角" | "方" | "边" | "侧" | "部") {
+            bonus += 3.45;
+        } else if w == "叫" {
+            bonus -= 2.25;
+        }
+    }
+    if matches!(
+        w,
+        "右下角" | "左下角" | "右上角" | "左上角" | "右下方" | "左下方" | "右上方" | "左上方"
+    ) && matches!(
+        prev_word,
+        "让" | "把" | "在" | "放" | "放在" | "点" | "点击" | "看" | "拖到" | "移到" | "从"
+            | "往" | "向" | "屏幕" | "桌面" | "窗口" | "界面" | "图片" | "页面"
+    ) {
+        bonus += 2.45;
     }
 
     // 2. 指代/数量/动词+量词短语（如「这个」「那个」「一个」「每个」「哪个」「几个」「这些」「这种」「换个」「加个」）+ 可数名词 vs 文言代词/虚词

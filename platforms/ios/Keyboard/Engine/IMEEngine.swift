@@ -131,7 +131,7 @@ struct IMEView: Decodable, Equatable {
     static let idle = IMEView()
 }
 
-/// 引擎请宿主帮忙选词（Apple 端侧模型或云端），宿主算完后调用 deliverChoice
+/// 引擎请宿主帮忙选词（Apple 端侧模型），宿主算完后调用 deliverChoice
 struct IMEChoiceRequest: Decodable, Equatable {
     let id: UInt64
     /// 光标前的上文（引擎已截到合适长度）

@@ -2,7 +2,7 @@
 
 [English](#english) · 简体中文
 
-一个用 Rust 编写的 Windows 拼音输入法：大词库整句解码、中英文混输、拼音原位改错，可选接入本地或云端大模型来帮助选词。
+一个用 Rust 编写的 Windows 拼音输入法：大词库整句解码、中英文混输、拼音原位改错，可选接入纯本地离线大模型来帮助选词。
 
 > [!NOTE]
 > 这是一个个人实验性项目，目前处于早期阶段（v0.1），欢迎试用、反馈与贡献。
@@ -15,9 +15,9 @@
 - **拼音原位编辑**：`←/→` 按音节跳动光标、点击音节定位，在句中直接改错；逐段选词时已选部分会锁定并以绿色标出。
 - **模糊音与纠错**：平翘舌、前后鼻音、n/l、f/h 以及常见按键顺序错误；精确拼写的结果始终优先。
 - **个人词频记忆**：记住你的选词习惯与常用搭配，数据只保存在本机 `%LOCALAPPDATA%\RustAiPinyinIME`。
-- **可选的大模型选词**（默认关闭）：
+- **可选的纯本地大模型选词**（默认关闭，绝不联网上传打字内容）：
   - 内置本地引擎：一键下载 llama.cpp + Qwen2.5 0.5B / 1.5B GGUF 模型，完全离线运行；
-  - 也可以接入 Ollama、LM Studio、llama.cpp Server，或任何 OpenAI 兼容接口（ChatGPT / Claude / Gemini / 自定义）。
+  - 也支持接入本机运行的 Ollama、LM Studio、llama.cpp Server（仅允许本机回环地址 `127.0.0.1` / `localhost`）。
 - **两种接入方式**：
   - **TSF 系统输入法**（推荐）：注册为 Windows 正式输入法，可通过 `Win + Space` 切换；
   - **全局键盘钩子模式**：无需管理员权限，即装即用。
@@ -70,14 +70,14 @@ powershell -ExecutionPolicy Bypass -File scripts\package_release.ps1 -Version 0.
 | --- | --- |
 | `crates/ime-lexicon` | 多源词库融合、紧凑二进制格式（mmap 加载）、音节 / 简拼 / 英文 Trie；`lexicon-builder` 编译工具 |
 | `crates/ime-core` | 拼音切分、模糊音纠错、词图构建与整句解码、个人词频记忆 |
-| `crates/ime-ai` | 大模型重排（OpenAI 兼容客户端、本地 llama.cpp 托管、拼音约束解码） |
+| `crates/ime-ai` | 纯本地大模型重排（本机回环 HTTP 客户端、本地 llama.cpp 托管与进程内推理、拼音约束解码） |
 | `crates/ime-tsf-win` | Windows TSF COM 组件（`ime_tsf_win.dll`）、全局服务 / 候选窗 / 状态栏 / 设置窗口、安装程序、桌面体验台 |
 | `crates/ime-playground` | 命令行试验工具 |
 
 ## 🔒 隐私
 
-- 个人词频、配置与 API Key 只保存在本机 `%LOCALAPPDATA%\RustAiPinyinIME`，不会上传；
-- 大模型选词默认关闭；开启云端接口后，候选所需的上下文会发送给你配置的服务商；
+- 所有输入与选词均**纯本地运行**，不会向任何云端/远程服务器发送打字内容或上下文；
+- 个人词频与配置只保存在本机 `%LOCALAPPDATA%\RustAiPinyinIME`，本地 AI 仅允许连接本机回环地址（`127.0.0.1` / `localhost` / `[::1]`）；
 - 在 Win32 密码输入框中，输入法会自动放行，不拦截、也不记忆。
 
 ## 📚 致谢与第三方数据
@@ -101,7 +101,7 @@ powershell -ExecutionPolicy Bypass -File scripts\package_release.ps1 -Version 0.
 - seamless mixed Chinese/English input without switching modes;
 - in-place pinyin editing with syllable-level cursor movement, plus fuzzy-pinyin and typo correction;
 - on-device personal frequency memory;
-- optional LLM-assisted candidate re-ranking (bundled local llama.cpp + Qwen2.5, or any OpenAI-compatible API);
+- optional local-only LLM-assisted candidate re-ranking (bundled local llama.cpp + Qwen2.5, or loopback Ollama / llama.cpp / LM Studio — strictly offline, zero cloud upload);
 - a native TSF text service and a no-admin global-hook mode.
 
 Download a prebuilt package from [Releases](../../releases), or build from source with the steps above.

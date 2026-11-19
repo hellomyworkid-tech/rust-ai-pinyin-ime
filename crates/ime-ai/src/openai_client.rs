@@ -1,127 +1,66 @@
-//! `openai_client`: 多模态本地与云端大模型客户端（支持本地 Qwen2.5 + ChatGPT + Claude + Gemini + 自定义云端）
+//! `openai_client`: 纯本地回环大模型客户端（支持内置 llama.cpp 18434 / Ollama 11434 / llama.cpp 8080 / LM Studio 1234）
 //!
-//! 职责：
-//! 1. **本地最优模型接入**：支持 `Qwen2.5-1.5B-Instruct` (`qwen2.5:1.5b`) 与 `Qwen2.5-0.5B-Instruct` (`qwen2.5:0.5b`)，
-//!    自动探测本机 Ollama (`11434`)、`llama.cpp server` (`8080`) 或 LM Studio (`1234`)。
-//! 2. **主流云端大模型原生协议支持**：
-//!    - **OpenAI (ChatGPT)**：`https://api.openai.com/v1/chat/completions` (`gpt-4o-mini` / `gpt-4.1-mini`)
-//!    - **Anthropic (Claude)**：`https://api.anthropic.com/v1/messages` (`claude-3-5-haiku-latest` / `claude-sonnet-4-20250514`)
-//!    - **Google (Gemini)**：`https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` (`gemini-2.5-flash`)
-//!    - **自定义云端 (Custom Cloud)**：支持任意 OpenAI 兼容接口（如 DeepSeek、硅基流动 SiliconFlow、阿里云百炼、OpenRouter 等）
-//! 3. **零外部依赖原生 HTTPS (`winhttp.dll`) + 本地回环极速 TCP**：
-//!    在 Windows 下直接调用系统级 `WinHTTP` TLS 1.3 栈访问云端 HTTPS API，无需额外部署代理。
+//! 隐私与架构原则：
+//! 1. **仅限本机回环（Local-Only）**：严格校验目标地址仅允许 `http://127.0.0.1` / `http://localhost` / `http://[::1]`，
+//!    并在建立 TCP 连接前二次校验解析结果 `SocketAddr::ip().is_loopback()`，彻底杜绝任何击键或上下文离开本机。
+//! 2. **本地最优模型接入**：支持内置托管 `Qwen2.5-1.5B-Instruct` / `Qwen2.5-0.5B-Instruct`（Vulkan GPU 加速），
+//!    并可自动探测本机 Ollama (`11434`)、`llama.cpp server` (`8080`) 或 LM Studio (`1234`)。
+//! 3. **零外部网络库依赖**：完全基于标准库 `TcpStream` 本机回环通信，不再链接 `winhttp.dll`。
 
+use crate::lm_text::{
+    normalize_for_lm_scoring, LM_SCORE_CONTEXT_TAIL_CHARS, LM_SCORE_PROMPT_PREFIX,
+};
 use ime_core::{AppScene, Candidate};
-use crate::lm_text::{normalize_for_lm_scoring, LM_SCORE_CONTEXT_TAIL_CHARS, LM_SCORE_PROMPT_PREFIX};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
-/// AI 模型服务商类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// 本地 AI 模型服务类型（仅支持本机离线模型，保留单枚举变体以兼容历史 `ime_config.json`）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize)]
 pub enum AiProvider {
-    /// 本地大模型（推荐 Qwen2.5-1.5B-Instruct / Qwen2.5-0.5B-Instruct，通过 Ollama / llama.cpp 运行）
+    /// 本地大模型（内置 Qwen2.5-1.5B / 0.5B，或本机 Ollama / llama.cpp / LM Studio）
+    #[default]
     LocalQwen,
-    /// OpenAI 官方或兼容接口 (ChatGPT: gpt-4o-mini / gpt-4.1-mini)
-    OpenAiChatGpt,
-    /// Anthropic 官方或兼容接口 (Claude: claude-3-5-haiku-latest)
-    AnthropicClaude,
-    /// Google 官方或兼容接口 (Gemini: gemini-2.5-flash)
-    GoogleGemini,
-    /// 自定义云端大模型 (DeepSeek / 硅基流动 / OpenRouter / 自建 vLLM 等)
-    CustomCloud,
 }
 
-impl Default for AiProvider {
-    fn default() -> Self {
-        Self::LocalQwen
+impl<'de> Deserialize<'de> for AiProvider {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // 任何历史配置中残留的云端枚举值（如 "OpenAiChatGpt" / "CustomCloud" 等）均平滑迁移到本地模式
+        let _ = String::deserialize(deserializer)?;
+        Ok(Self::LocalQwen)
     }
 }
 
 impl AiProvider {
-    pub const ALL: [AiProvider; 5] = [
-        AiProvider::LocalQwen,
-        AiProvider::OpenAiChatGpt,
-        AiProvider::AnthropicClaude,
-        AiProvider::GoogleGemini,
-        AiProvider::CustomCloud,
-    ];
+    pub const ALL: [AiProvider; 1] = [AiProvider::LocalQwen];
 
     pub fn key_id(self) -> &'static str {
-        match self {
-            Self::LocalQwen => "local_qwen",
-            Self::OpenAiChatGpt => "openai_chatgpt",
-            Self::AnthropicClaude => "anthropic_claude",
-            Self::GoogleGemini => "google_gemini",
-            Self::CustomCloud => "custom_cloud",
-        }
+        "local_qwen"
     }
 
     pub fn display_name(self) -> &'static str {
-        match self {
-            Self::LocalQwen => "本地模型 · Qwen2.5 (推荐 RTX4070 用 qwen2.5:1.5b)",
-            Self::OpenAiChatGpt => "云端大模型 · OpenAI (ChatGPT)",
-            Self::AnthropicClaude => "云端大模型 · Anthropic (Claude)",
-            Self::GoogleGemini => "云端大模型 · Google (Gemini)",
-            Self::CustomCloud => "自定义云端 (DeepSeek / 硅基流动 / OpenRouter 等)",
-        }
+        "本地模型 · Qwen2.5 (离线 GPU / CPU 加速)"
     }
 
     pub fn short_tag(self) -> &'static str {
-        match self {
-            Self::LocalQwen => "本地Qwen",
-            Self::OpenAiChatGpt => "ChatGPT",
-            Self::AnthropicClaude => "Claude",
-            Self::GoogleGemini => "Gemini",
-            Self::CustomCloud => "云端AI",
-        }
+        "本地Qwen"
     }
 
     pub fn default_base_url(self) -> &'static str {
-        match self {
-            Self::LocalQwen => "http://127.0.0.1:11434/v1",
-            Self::OpenAiChatGpt => "https://api.openai.com/v1",
-            Self::AnthropicClaude => "https://api.anthropic.com/v1",
-            Self::GoogleGemini => "https://generativelanguage.googleapis.com/v1beta",
-            Self::CustomCloud => "https://api.deepseek.com/v1",
-        }
+        "http://127.0.0.1:11434/v1"
     }
 
     pub fn default_model(self) -> &'static str {
-        match self {
-            Self::LocalQwen => "qwen2.5:1.5b",
-            Self::OpenAiChatGpt => "gpt-4o-mini",
-            Self::AnthropicClaude => "claude-3-5-haiku-latest",
-            Self::GoogleGemini => "gemini-2.5-flash",
-            Self::CustomCloud => "deepseek-chat",
-        }
+        "qwen2.5:1.5b"
     }
 
     pub fn default_timeout_ms(self) -> u64 {
-        match self {
-            Self::LocalQwen => 900,
-            Self::OpenAiChatGpt | Self::AnthropicClaude | Self::GoogleGemini | Self::CustomCloud => 2500,
-        }
-    }
-}
-
-/// 单个服务商的独立配置档案（方便用户在 GUI 中自由切换不同服务商而不丢失已填的 Key 与地址）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderProfile {
-    pub api_base: String,
-    pub api_key: String,
-    pub model: String,
-}
-
-impl ProviderProfile {
-    pub fn default_for(provider: AiProvider) -> Self {
-        Self {
-            api_base: provider.default_base_url().to_string(),
-            api_key: String::new(),
-            model: provider.default_model().to_string(),
-        }
+        900
     }
 }
 
@@ -132,80 +71,133 @@ pub struct LocalEndpointStatus {
     pub online: bool,
 }
 
+fn default_local_api_base() -> String {
+    AiProvider::LocalQwen.default_base_url().to_string()
+}
+
+fn default_local_model() -> String {
+    AiProvider::LocalQwen.default_model().to_string()
+}
+
+fn default_local_timeout_ms() -> u64 {
+    AiProvider::LocalQwen.default_timeout_ms()
+}
+
+/// 本地大模型连接配置（兼容读取历史 `ime_config.json`，自动忽略旧版云端 `api_key`/`saved_profiles` 字段）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiCompatibleConfig {
-    /// 当前选中的 AI 服务商
+    /// 当前 AI 服务类型（固定为本地回环模式）
     #[serde(default)]
     pub provider: AiProvider,
-    /// 当前生效的 API Base URL
+    /// 本机推理服务 Base URL（仅允许 `http://127.0.0.1...` / `http://localhost...` / `http://[::1]...`）
+    #[serde(default = "default_local_api_base")]
     pub api_base: String,
-    /// 当前生效的 API Key（本地 Ollama 可留空）
-    pub api_key: String,
-    /// 当前生效的模型名称
+    /// 本地模型名称（如 `qwen2.5-1.5b-builtin`、`qwen2.5:1.5b`、`qwen3:1.7b`）
+    #[serde(default = "default_local_model")]
     pub model: String,
     /// 请求超时毫秒数
+    #[serde(default = "default_local_timeout_ms")]
     pub timeout_ms: u64,
-    /// 是否启用大模型联网/本地推理重排（端侧微模型特征层始终开启）
-    pub enabled: bool,
-    /// 各服务商独立保存的参数档案
+    /// 是否启用本地大模型后台异步重排（端侧轻量语义模型始终开启）
     #[serde(default)]
-    pub saved_profiles: HashMap<String, ProviderProfile>,
+    pub enabled: bool,
 }
 
 impl Default for OpenAiCompatibleConfig {
     fn default() -> Self {
-        let mut saved_profiles = HashMap::new();
-        for p in AiProvider::ALL {
-            saved_profiles.insert(p.key_id().to_string(), ProviderProfile::default_for(p));
-        }
+        let env_base = std::env::var("IME_LOCAL_LLM_API_BASE")
+            .or_else(|_| std::env::var("IME_OPENAI_API_BASE"))
+            .ok()
+            .filter(|u| is_loopback_http_url(u))
+            .unwrap_or_else(default_local_api_base);
+        let env_model = std::env::var("IME_LOCAL_LLM_MODEL")
+            .or_else(|_| std::env::var("IME_OPENAI_MODEL"))
+            .unwrap_or_else(|_| default_local_model());
         Self {
             provider: AiProvider::LocalQwen,
-            api_base: std::env::var("IME_OPENAI_API_BASE")
-                .unwrap_or_else(|_| AiProvider::LocalQwen.default_base_url().to_string()),
-            api_key: std::env::var("IME_OPENAI_API_KEY").unwrap_or_default(),
-            model: std::env::var("IME_OPENAI_MODEL")
-                .unwrap_or_else(|_| AiProvider::LocalQwen.default_model().to_string()),
-            timeout_ms: AiProvider::LocalQwen.default_timeout_ms(),
+            api_base: env_base,
+            model: env_model,
+            timeout_ms: default_local_timeout_ms(),
             enabled: false,
-            saved_profiles,
         }
     }
 }
 
 impl OpenAiCompatibleConfig {
-    /// 将当前输入框内容同步至当前 provider 的档案，并切换到新的 provider
-    pub fn switch_provider(&mut self, next_provider: AiProvider) {
-        self.save_current_to_profile();
-        self.provider = next_provider;
-        let profile = self
-            .saved_profiles
-            .entry(next_provider.key_id().to_string())
-            .or_insert_with(|| ProviderProfile::default_for(next_provider))
-            .clone();
-        self.api_base = if profile.api_base.trim().is_empty() {
-            next_provider.default_base_url().to_string()
-        } else {
-            profile.api_base
+    /// 清洗历史配置中可能残留的远程云端地址：若 `api_base` 不是合法的本机回环 HTTP 地址，
+    /// 则重置为默认本地配置并关闭大模型开关，防止升级后尝试外连或反复报错。
+    pub fn sanitize_local_only(&mut self) {
+        self.provider = AiProvider::LocalQwen;
+        if !is_loopback_http_url(&self.api_base) {
+            self.api_base = default_local_api_base();
+            self.model = default_local_model();
+            self.enabled = false;
+        }
+        if self.model.trim().is_empty() {
+            self.model = default_local_model();
+        }
+        self.timeout_ms = self.timeout_ms.clamp(200, 5000);
+    }
+}
+
+/// 判断给定 URL 是否为合法的本机回环 HTTP 地址（严格拦截 `https://`、远程域名、公网/局域网 IP 及 `@` 伪装主机）
+pub fn is_loopback_http_url(url: &str) -> bool {
+    parse_loopback_http_url(url).is_ok()
+}
+
+/// 校验并提取本机回环 HTTP 地址的 `host[:port]/path` 部分（不含 `http://`）
+pub fn parse_loopback_http_url(url: &str) -> Result<String, String> {
+    let trimmed = url.trim();
+    if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!("无效的本机服务地址（包含空白或控制字符）: {trimmed}"));
+    }
+    let rest = trimmed
+        .strip_prefix("http://")
+        .ok_or_else(|| "仅支持本机回环 HTTP 服务（例如 http://127.0.0.1:18434/v1），已禁止远程或 HTTPS 云端地址".to_string())?;
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains('?') || authority.contains('#') {
+        return Err(format!("无效的本机服务地址: {trimmed}"));
+    }
+    let (host, port_opt) = if let Some(after_bracket) = authority.strip_prefix('[') {
+        let Some((ipv6, tail)) = after_bracket.split_once(']') else {
+            return Err(format!("无效的 IPv6 地址: {trimmed}"));
         };
-        self.api_key = profile.api_key;
-        self.model = if profile.model.trim().is_empty() {
-            next_provider.default_model().to_string()
+        if ipv6 != "::1" {
+            return Err(format!("仅允许本机回环地址 (127.0.0.1 / localhost / [::1])，已拒绝: {trimmed}"));
+        }
+        let port = if tail.is_empty() {
+            None
+        } else if let Some(p) = tail.strip_prefix(':') {
+            Some(p)
         } else {
-            profile.model
+            return Err(format!("无效的端口格式: {trimmed}"));
         };
-        self.timeout_ms = next_provider.default_timeout_ms();
+        ("[::1]", port)
+    } else if let Some((h, p)) = authority.split_once(':') {
+        (h, Some(p))
+    } else {
+        (authority, None)
+    };
+
+    if let Some(port_str) = port_opt {
+        let parsed_port = port_str
+            .parse::<u16>()
+            .ok()
+            .filter(|&p| p > 0);
+        if parsed_port.is_none() {
+            return Err(format!("无效的端口号 ({port_str}): {trimmed}"));
+        }
     }
 
-    pub fn save_current_to_profile(&mut self) {
-        self.saved_profiles.insert(
-            self.provider.key_id().to_string(),
-            ProviderProfile {
-                api_base: self.api_base.trim().to_string(),
-                api_key: self.api_key.trim().to_string(),
-                model: self.model.trim().to_string(),
-            },
-        );
+    let is_local_host = host == "127.0.0.1"
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "[::1]";
+    if !is_local_host {
+        return Err(format!(
+            "仅允许连接本机回环地址 (127.0.0.1 / localhost)，已拒绝远程地址: {trimmed}"
+        ));
     }
+    Ok(rest.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,7 +364,7 @@ impl OpenAiCompatibleClient {
         }
     }
 
-    /// 测试当前配置的连通性与响应延迟（供设置界面「测试连接」按钮使用）
+    /// 测试本机大模型服务的连通性与响应延迟（供设置界面「测试本地连接」按钮使用）
     pub fn test_connection(&self) -> Result<(String, Duration), String> {
         let start = Instant::now();
         let dummy_cands = vec![
@@ -414,7 +406,7 @@ impl OpenAiCompatibleClient {
         Ok((reply, start.elapsed()))
     }
 
-    /// 调用已配置的本地大模型或云端大模型（支持 Local Qwen / OpenAI ChatGPT / Anthropic Claude / Google Gemini / 自定义云端）
+    /// 调用已配置的本机回环大模型服务（内置 llama.cpp / Ollama / LM Studio），严格禁止远程云端请求
     pub fn query_best_candidate_http(
         &self,
         pinyin_input: &str,
@@ -423,15 +415,18 @@ impl OpenAiCompatibleClient {
         candidates: &[Candidate],
     ) -> Result<String, String> {
         if !self.config.enabled {
-            return Err("AI 大模型开关当前处于关闭状态".to_string());
+            return Err("本地大模型开关当前处于关闭状态".to_string());
         }
         let api_base = self.config.api_base.trim().trim_end_matches('/');
         if api_base.is_empty() {
-            return Err("API Base URL 不能为空".to_string());
+            return Err("本机服务地址不能为空".to_string());
         }
+        // 强制仅允许本机回环地址，杜绝任何远程网络请求
+        let _ = parse_loopback_http_url(api_base)?;
+
         let model = self.config.model.trim();
         if model.is_empty() {
-            return Err("模型名称 (Model) 不能为空".to_string());
+            return Err("本地模型名称不能为空".to_string());
         }
 
         let plausible = Self::filter_plausible_candidates(candidates);
@@ -449,9 +444,10 @@ impl OpenAiCompatibleClient {
         if let Some(root) = self.llama_native_root() {
             match self.pick_by_lm_likelihood(&root, surrounding_context, cand_pool) {
                 Ok(best) => return Ok(best),
-                Err(_) if self.config.provider == AiProvider::LocalQwen && root.contains(":18434") => {
-                    // 内置引擎打分失败（如正在启动），保持 L1 首选，绝不退回到不稳定的生成式选择
-                    return Ok(cand_pool[0].text.clone());
+                Err(e) if root.contains(":18434") => {
+                    // 内置引擎未就绪或打分失败时直接返回错误（调用方自动保留 L1 首选且不污染缓存，
+                    // 设置页「测试本地连接」也能准确报告离线而非误报成功）
+                    return Err(e);
                 }
                 Err(_) => {}
             }
@@ -459,20 +455,8 @@ impl OpenAiCompatibleClient {
 
         let (system_prompt, user_prompt) =
             Self::build_prompts(pinyin_input, surrounding_context, scene, cand_pool);
-
-        // 根据服务商或 URL 特征选择原生协议
-        let is_native_anthropic = self.config.provider == AiProvider::AnthropicClaude
-            && (api_base.contains("anthropic.com") || api_base.ends_with("/messages"));
-        let is_native_gemini = self.config.provider == AiProvider::GoogleGemini
-            && (api_base.contains("googleapis.com") || api_base.contains("generativelanguage"));
-
-        let raw_reply = if is_native_anthropic {
-            self.call_anthropic_messages(api_base, model, &system_prompt, &user_prompt)?
-        } else if is_native_gemini {
-            self.call_gemini_generate_content(api_base, model, &system_prompt, &user_prompt)?
-        } else {
-            self.call_openai_chat_completions(api_base, model, &system_prompt, &user_prompt)?
-        };
+        let raw_reply =
+            self.call_local_chat_completions(api_base, model, &system_prompt, &user_prompt)?;
 
         Ok(sanitize_llm_candidate_output(&raw_reply, cand_pool))
     }
@@ -480,14 +464,8 @@ impl OpenAiCompatibleClient {
     /// 若当前配置指向本机 llama.cpp 兼容服务（内置 18434 / llama-server 8080 / 其他本地端口），
     /// 返回其原生接口根地址（不含 `http://` 与 `/v1`），例如 `127.0.0.1:18434`
     fn llama_native_root(&self) -> Option<String> {
-        if !matches!(self.config.provider, AiProvider::LocalQwen | AiProvider::CustomCloud) {
-            return None;
-        }
         let base = self.config.api_base.trim().trim_end_matches('/');
-        let rest = base.strip_prefix("http://")?;
-        if !(rest.starts_with("127.0.0.1") || rest.starts_with("localhost")) {
-            return None;
-        }
+        let rest = parse_loopback_http_url(base).ok()?;
         // Ollama (11434) / LM Studio (1234) 不提供 llama.cpp 原生 /tokenize 与 /completion 概率接口
         if rest.contains(":11434") || rest.contains(":1234") {
             return None;
@@ -528,8 +506,8 @@ impl OpenAiCompatibleClient {
         .to_string();
         let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
         let resp = http_post_local_tcp(&format!("{root}/completion"), &headers, &body, timeout_ms)?;
-        let v: serde_json::Value =
-            serde_json::from_str(resp.trim()).map_err(|e| format!("completion 响应解析失败: {e}"))?;
+        let v: serde_json::Value = serde_json::from_str(resp.trim())
+            .map_err(|e| format!("completion 响应解析失败: {e}"))?;
         let tops = v["completion_probabilities"][0]["top_logprobs"]
             .as_array()
             .ok_or_else(|| "completion 响应缺少 top_logprobs".to_string())?;
@@ -553,6 +531,7 @@ impl OpenAiCompatibleClient {
         candidates: &[Candidate],
         timeout_ms: u64,
     ) -> Result<Vec<f64>, String> {
+        let _ = parse_loopback_http_url(&format!("http://{root}"))?;
         let started = Instant::now();
         let budget = Duration::from_millis(timeout_ms.clamp(400, 4000));
         let ctx_tail: String = {
@@ -621,14 +600,19 @@ impl OpenAiCompatibleClient {
         if pool.len() == 1 {
             return Ok(pool[0].text.clone());
         }
-        let scores =
-            Self::score_candidates_by_lm(root, surrounding_context, &pool, self.config.timeout_ms.max(1500))?;
+        let scores = Self::score_candidates_by_lm(
+            root,
+            surrounding_context,
+            &pool,
+            self.config.timeout_ms.max(1500),
+        )?;
         Ok(pool[choose_by_lm_margin(&scores, !surrounding_context.trim().is_empty())]
             .text
             .clone())
     }
 
-    fn call_openai_chat_completions(
+    /// 调用本机 OpenAI 兼容聊天接口（用于本地 Ollama / LM Studio 等不支持 llama.cpp 原生打分的服务）
+    fn call_local_chat_completions(
         &self,
         api_base: &str,
         model: &str,
@@ -640,22 +624,18 @@ impl OpenAiCompatibleClient {
         } else {
             format!("{api_base}/chat/completions")
         };
+        let rest = parse_loopback_http_url(&endpoint)?;
 
         let m_lower = model.trim().to_ascii_lowercase();
         let base_lower = api_base.to_ascii_lowercase();
         let is_qwen3 = m_lower.contains("qwen3");
-        let is_openai_reasoning = m_lower.starts_with("o1")
-            || m_lower.starts_with("o3")
-            || m_lower.starts_with("o4")
-            || m_lower.starts_with("gpt-5");
         let is_pure_reasoner = m_lower.contains("reasoner")
             || m_lower.contains("deepseek-r1")
             || m_lower.contains("-r1")
-            || m_lower.contains("qwq")
-            || m_lower.contains("glm-z1");
+            || m_lower.contains("qwq");
 
-        // Qwen3 系列（含 Ollama / llama.cpp / vLLM / 硅基流动 / 百炼）原生支持在 Prompt 末尾加 `/no_think` 软开关，
-        // 让 Jinja 聊天模板直接输出空 `<think>\n\n</think>` 并立即给出候选词，避免长思维链耗时或耗尽 max_tokens
+        // 本地 Qwen3 系列（Ollama / llama.cpp / LM Studio）支持 `/no_think` 软开关，
+        // 让聊天模板直接输出空 `<think>\n\n</think>` 并立即给出候选词，避免慢思考耗时
         let final_user_prompt = if is_qwen3 && !user_prompt.contains("/no_think") {
             format!("{user_prompt}\n/no_think")
         } else {
@@ -668,58 +648,27 @@ impl OpenAiCompatibleClient {
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": final_user_prompt }
             ],
-            "stream": false
+            "stream": false,
+            "temperature": 0.0,
+            "max_tokens": if is_pure_reasoner { 256 } else { 32 }
         });
 
-        if is_openai_reasoning {
-            // OpenAI o1/o3/o4/gpt-5 推理模型使用 max_completion_tokens 且支持最小推理强度
-            body_val["max_completion_tokens"] = serde_json::json!(128);
-            body_val["reasoning_effort"] = serde_json::json!("low");
-        } else {
-            body_val["temperature"] = serde_json::json!(0.0);
-            // 若用户配置了无法关闭思考的纯推理模型（如 deepseek-reasoner / deepseek-r1 / qwq），
-            // 放宽 token 上限避免在 `<think>` 阶段被截断；普通模型与已关思考的模型保持 32
-            let max_toks = if is_pure_reasoner { 256 } else { 32 };
-            body_val["max_tokens"] = serde_json::json!(max_toks);
-        }
-
-        // 针对支持显式关闭思考字段的平台（硅基流动 / 阿里云百炼 / 本地 Ollama / vLLM / 智谱 GLM-4.5 / 火山豆包），
-        // 附带对应的免思考开关（仅在对应模型或非严格官方 OpenAI 端点下附加，避免 api.openai.com 报未知字段 400）
-        if is_qwen3
-            && (base_lower.contains("127.0.0.1")
-                || base_lower.contains("localhost")
-                || base_lower.contains("siliconflow")
-                || base_lower.contains("dashscope")
-                || base_lower.contains("aliyuncs"))
-        {
+        if is_qwen3 {
             body_val["enable_thinking"] = serde_json::json!(false);
             if base_lower.contains("11434") {
                 body_val["think"] = serde_json::json!(false);
             }
-        } else if (m_lower.starts_with("glm-4.5")
-            || m_lower.starts_with("doubao-1-5-thinking")
-            || m_lower.starts_with("doubao-seed"))
-            && !base_lower.contains("api.openai.com")
-        {
-            body_val["thinking"] = serde_json::json!({ "type": "disabled" });
         }
 
         let body_json = serde_json::to_string(&body_val).map_err(|e| e.to_string())?;
+        let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
 
-        let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
-        if !self.config.api_key.trim().is_empty() {
-            headers.push((
-                "Authorization".to_string(),
-                format!("Bearer {}", self.config.api_key.trim()),
-            ));
-        }
-
-        let resp_json = http_or_https_post(&endpoint, &headers, &body_json, self.config.timeout_ms)?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(resp_json.trim()).map_err(|e| format!("JSON 解析失败: {e} (响应: {resp_json})"))?;
+        let resp_json = http_post_local_tcp(&rest, &headers, &body_json, self.config.timeout_ms)?;
+        let parsed: serde_json::Value = serde_json::from_str(resp_json.trim())
+            .map_err(|e| format!("JSON 解析失败: {e} (响应: {resp_json})"))?;
 
         if let Some(err_msg) = parsed["error"]["message"].as_str() {
-            return Err(format!("API 错误: {err_msg}"));
+            return Err(format!("本地服务错误: {err_msg}"));
         }
 
         parsed["choices"][0]["message"]["content"]
@@ -727,146 +676,7 @@ impl OpenAiCompatibleClient {
             .map(|s| s.trim().to_string())
             .ok_or_else(|| format!("响应未包含 choices[0].message.content: {resp_json}"))
     }
-
-    fn call_anthropic_messages(
-        &self,
-        api_base: &str,
-        model: &str,
-        system_prompt: &str,
-        user_prompt: &str,
-    ) -> Result<String, String> {
-        if self.config.api_key.trim().is_empty() {
-            return Err("Claude API 需要填写 API Key".to_string());
-        }
-        let endpoint = if api_base.ends_with("/messages") {
-            api_base.to_string()
-        } else if api_base.ends_with("/v1") {
-            format!("{api_base}/messages")
-        } else {
-            format!("{api_base}/v1/messages")
-        };
-
-        let body_val = serde_json::json!({
-            "model": model,
-            "max_tokens": 32,
-            "temperature": 0.0,
-            "system": system_prompt,
-            "messages": [
-                { "role": "user", "content": user_prompt }
-            ]
-        });
-        let body_json = serde_json::to_string(&body_val).map_err(|e| e.to_string())?;
-
-        let headers = vec![
-            ("Content-Type".to_string(), "application/json".to_string()),
-            ("x-api-key".to_string(), self.config.api_key.trim().to_string()),
-            ("anthropic-version".to_string(), "2023-06-01".to_string()),
-        ];
-
-        let resp_json = http_or_https_post(&endpoint, &headers, &body_json, self.config.timeout_ms)?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(resp_json.trim()).map_err(|e| format!("Claude JSON 解析失败: {e}"))?;
-
-        if let Some(err_msg) = parsed["error"]["message"].as_str() {
-            return Err(format!("Claude API 错误: {err_msg}"));
-        }
-
-        // 遍历 content 数组，跳过可能存在的 `{ "type": "thinking", ... }` 思考块，只取正文 text 块
-        if let Some(arr) = parsed["content"].as_array() {
-            for item in arr {
-                if item["type"].as_str() == Some("thinking") {
-                    continue;
-                }
-                if let Some(text) = item["text"].as_str() {
-                    if !text.trim().is_empty() {
-                        return Ok(text.trim().to_string());
-                    }
-                }
-            }
-        }
-        if let Some(text) = parsed["choices"][0]["message"]["content"].as_str() {
-            return Ok(text.trim().to_string());
-        }
-        Err(format!("Claude 响应未包含有效 text 内容块: {resp_json}"))
-    }
-
-    fn call_gemini_generate_content(
-        &self,
-        api_base: &str,
-        model: &str,
-        system_prompt: &str,
-        user_prompt: &str,
-    ) -> Result<String, String> {
-        let key = self.config.api_key.trim();
-        if key.is_empty() {
-            return Err("Gemini API 需要填写 API Key".to_string());
-        }
-        let clean_model = model.strip_prefix("models/").unwrap_or(model);
-        let m_lower = clean_model.to_ascii_lowercase();
-        // API Key 仅通过 `x-goog-api-key` 请求头传递，不拼进 URL，避免出现在代理/错误日志中泄露
-        let endpoint = format!("{api_base}/models/{clean_model}:generateContent");
-
-        // Gemini 2.5 系列（如默认 gemini-2.5-flash）默认开启内部思考，且 thinking tokens 计入 maxOutputTokens！
-        // 若不关闭 thinkingBudget，32 个输出 token 会被内部思考全部耗尽导致返回空内容。
-        // - 对 gemini-2.5-flash*：显式设置 thinkingBudget = 0 彻底关闭思考，延迟直降 70%；
-        // - 对不支持关闭思考的 gemini-2.5-pro*：将 maxOutputTokens 放宽至 256。
-        let mut gen_cfg = serde_json::json!({
-            "temperature": 0.0,
-            "maxOutputTokens": if m_lower.contains("2.5-pro") { 256 } else { 32 }
-        });
-        if m_lower.contains("2.5-flash") {
-            gen_cfg["thinkingConfig"] = serde_json::json!({ "thinkingBudget": 0 });
-        }
-
-        let body_val = serde_json::json!({
-            "systemInstruction": {
-                "parts": [{ "text": system_prompt }]
-            },
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{ "text": user_prompt }]
-                }
-            ],
-            "generationConfig": gen_cfg
-        });
-        let body_json = serde_json::to_string(&body_val).map_err(|e| e.to_string())?;
-
-        let headers = vec![
-            ("Content-Type".to_string(), "application/json".to_string()),
-            ("x-goog-api-key".to_string(), key.to_string()),
-        ];
-
-        let resp_json = http_or_https_post(&endpoint, &headers, &body_json, self.config.timeout_ms)?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(resp_json.trim()).map_err(|e| format!("Gemini JSON 解析失败: {e}"))?;
-
-        if let Some(err_msg) = parsed["error"]["message"].as_str() {
-            return Err(format!("Gemini API 错误: {err_msg}"));
-        }
-
-        // 遍历 parts 数组，跳过 `{ "thought": true, "text": "..." }` 思考分片，提取真正的最终候选输出
-        if let Some(parts) = parsed["candidates"][0]["content"]["parts"].as_array() {
-            for part in parts {
-                if part["thought"].as_bool() == Some(true) {
-                    continue;
-                }
-                if let Some(text) = part["text"].as_str() {
-                    if !text.trim().is_empty() {
-                        return Ok(text.trim().to_string());
-                    }
-                }
-            }
-        }
-        if let Some(text) = parsed["choices"][0]["message"]["content"].as_str() {
-            return Ok(text.trim().to_string());
-        }
-        Err(format!("Gemini 响应未包含有效 candidates[0].content.parts 文本: {resp_json}"))
-    }
 }
-
-// 打分引导语 `LM_SCORE_PROMPT_PREFIX`、上文截取长度与 `normalize_for_lm_scoring` 定义在 `crate::lm_text`，
-// 与进程内打分器（iOS 键盘使用）共用同一份，保证两条路径构造的打分文本完全一致。
 
 /// 根据各候选对数似然（索引 0 为 L1 首选）决定最终首选：
 /// 只有当最佳候选比 L1 首选的概率高出足够倍数时才替换，避免模型在两可情况下来回抖动。
@@ -918,7 +728,8 @@ pub fn sanitize_llm_candidate_output(raw: &str, candidates: &[Candidate]) -> Str
 
     let cleaned = without_arrow
         .trim_matches(|c: char| {
-            c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’' | '【' | '】' | '。')
+            c.is_whitespace()
+                || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’' | '【' | '】' | '。')
         })
         .trim();
 
@@ -952,7 +763,6 @@ pub fn sanitize_llm_candidate_output(raw: &str, candidates: &[Candidate]) -> Str
         }
     }
     // 若大模型输出了类似 "选：级数" 或包含候选词本身，优先匹配被包含的「最长」候选词
-    // （避免输出「现在再研究一下」时被更短的候选「现在」抢先匹配）
     if let Some(c) = candidates
         .iter()
         .take(4)
@@ -968,35 +778,7 @@ pub fn sanitize_llm_candidate_output(raw: &str, candidates: &[Candidate]) -> Str
         .unwrap_or_default()
 }
 
-/// 统一发送 HTTP 或 HTTPS POST 请求：
-/// - 对于本机回环 HTTP (`http://127.0.0.1` / `http://localhost`)，走零开销 `TcpStream` 直连；
-/// - 对于云端 HTTPS (`https://...`) 或远程地址，在 Windows 下调用系统原生 `WinHTTP` TLS 1.3 客户端。
-fn http_or_https_post(
-    url: &str,
-    headers: &[(String, String)],
-    body_json: &str,
-    timeout_ms: u64,
-) -> Result<String, String> {
-    if let Some(rest) = url.strip_prefix("http://") {
-        if rest.starts_with("127.0.0.1") || rest.starts_with("localhost") {
-            return http_post_local_tcp(rest, headers, body_json, timeout_ms);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        winhttp_post(url, headers, body_json, timeout_ms)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let rest = url
-            .strip_prefix("http://")
-            .ok_or_else(|| "非 Windows 平台仅支持 http:// 直连".to_string())?;
-        http_post_local_tcp(rest, headers, body_json, timeout_ms)
-    }
-}
-
+/// 仅向本机回环地址发起零依赖 HTTP POST 请求（二次校验目标 IP 必须为 loopback）
 fn http_post_local_tcp(
     url_without_http: &str,
     headers: &[(String, String)],
@@ -1008,16 +790,28 @@ fn http_post_local_tcp(
         None => (url_without_http, "/"),
     };
 
-    let mut addrs = host_port
+    let has_port = if let Some(after_bracket) = host_port.strip_prefix('[') {
+        after_bracket.contains("]:")
+    } else {
+        host_port.contains(':')
+    };
+    let dial_target = if has_port {
+        host_port.to_string()
+    } else {
+        format!("{host_port}:80")
+    };
+
+    let addrs = dial_target
         .to_socket_addrs()
         .map_err(|e| format!("本地地址解析失败 ({host_port}): {e}"))?;
     let addr = addrs
-        .next()
-        .ok_or_else(|| format!("无法解析地址: {host_port}"))?;
+        .into_iter()
+        .find(|a| a.ip().is_loopback())
+        .ok_or_else(|| format!("安全拦截：目标地址 ({host_port}) 不是本机回环 IP，已拒绝连接"))?;
 
     let timeout = Duration::from_millis(timeout_ms.max(150));
-    let mut stream =
-        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("连接本地推理服务失败 ({host_port}): {e}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|e| format!("连接本地推理服务失败 ({host_port}): {e}"))?;
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
 
@@ -1038,226 +832,50 @@ fn http_post_local_tcp(
     stream
         .read_to_end(&mut resp_bytes)
         .map_err(|e| format!("读取响应失败: {e}"))?;
-    let resp_str = String::from_utf8_lossy(&resp_bytes);
 
-    let (header_part, body_part) = resp_str
-        .split_once("\r\n\r\n")
+    let sep_pos = resp_bytes
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
         .ok_or_else(|| "无效的 HTTP 响应格式".to_string())?;
+    let header_str = String::from_utf8_lossy(&resp_bytes[..sep_pos]);
+    let body_bytes = &resp_bytes[sep_pos + 4..];
 
-    if header_part.to_ascii_lowercase().contains("transfer-encoding: chunked") {
-        Ok(decode_chunked_body(body_part))
+    if header_str
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        Ok(decode_chunked_bytes(body_bytes))
     } else {
-        Ok(body_part.trim().to_string())
+        Ok(String::from_utf8_lossy(body_bytes).trim().to_string())
     }
 }
 
-fn decode_chunked_body(raw: &str) -> String {
-    let mut out = String::new();
+fn decode_chunked_bytes(raw: &[u8]) -> String {
+    let mut out = Vec::new();
     let mut rest = raw;
-    while let Some((len_str, after_len)) = rest.split_once("\r\n") {
-        let clean_len = len_str.split(';').next().unwrap_or("").trim();
+    while let Some(line_end) = rest.windows(2).position(|w| w == b"\r\n") {
+        let len_line = String::from_utf8_lossy(&rest[..line_end]);
+        let clean_len = len_line.split(';').next().unwrap_or("").trim();
         let Ok(chunk_len) = usize::from_str_radix(clean_len, 16) else {
             break;
         };
+        rest = &rest[line_end + 2..];
         if chunk_len == 0 {
             break;
         }
-        if after_len.len() < chunk_len {
-            out.push_str(after_len);
+        if rest.len() < chunk_len {
+            out.extend_from_slice(rest);
             break;
         }
-        out.push_str(&after_len[..chunk_len]);
-        rest = &after_len[chunk_len..];
-        if let Some(stripped) = rest.strip_prefix("\r\n") {
-            rest = stripped;
+        out.extend_from_slice(&rest[..chunk_len]);
+        rest = &rest[chunk_len..];
+        if rest.starts_with(b"\r\n") {
+            rest = &rest[2..];
         }
     }
     if out.is_empty() {
-        raw.trim().to_string()
+        String::from_utf8_lossy(raw).trim().to_string()
     } else {
-        out
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn winhttp_post(
-    url: &str,
-    headers: &[(String, String)],
-    body_json: &str,
-    timeout_ms: u64,
-) -> Result<String, String> {
-    use std::ffi::c_void;
-    use std::ptr::{null, null_mut};
-
-    type HInternet = *mut c_void;
-    const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: u32 = 0;
-    const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
-
-    #[link(name = "winhttp")]
-    extern "system" {
-        fn WinHttpOpen(
-            psz_agent_w: *const u16,
-            dw_access_type: u32,
-            psz_proxy_w: *const u16,
-            psz_proxy_bypass_w: *const u16,
-            dw_flags: u32,
-        ) -> HInternet;
-        fn WinHttpSetTimeouts(
-            h_internet: HInternet,
-            n_resolve_timeout: i32,
-            n_connect_timeout: i32,
-            n_send_timeout: i32,
-            n_receive_timeout: i32,
-        ) -> i32;
-        fn WinHttpConnect(
-            h_session: HInternet,
-            pswz_server_name: *const u16,
-            n_server_port: u16,
-            dw_reserved: u32,
-        ) -> HInternet;
-        fn WinHttpOpenRequest(
-            h_connect: HInternet,
-            pwsz_verb: *const u16,
-            pwsz_object_name: *const u16,
-            pwsz_version: *const u16,
-            pwsz_referrer: *const u16,
-            ppwsz_accept_types: *const *const u16,
-            dw_flags: u32,
-        ) -> HInternet;
-        fn WinHttpSendRequest(
-            h_request: HInternet,
-            lpsz_headers: *const u16,
-            dw_headers_length: u32,
-            lp_optional: *const c_void,
-            dw_optional_length: u32,
-            dw_total_length: u32,
-            dw_context: usize,
-        ) -> i32;
-        fn WinHttpReceiveResponse(h_request: HInternet, lp_reserved: *mut c_void) -> i32;
-        fn WinHttpReadData(
-            h_request: HInternet,
-            lp_buffer: *mut u8,
-            dw_number_of_bytes_to_read: u32,
-            lpdw_number_of_bytes_read: *mut u32,
-        ) -> i32;
-        fn WinHttpCloseHandle(h_internet: HInternet) -> i32;
-    }
-
-    struct HandleGuard(HInternet);
-    impl Drop for HandleGuard {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe {
-                    WinHttpCloseHandle(self.0);
-                }
-            }
-        }
-    }
-
-    fn to_wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    let (is_https, rest) = if let Some(r) = url.strip_prefix("https://") {
-        (true, r)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        (false, r)
-    } else {
-        return Err(format!("URL 必须以 https:// 或 http:// 开头: {url}"));
-    };
-
-    let (host_port, path_and_query) = match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
-        None => (rest, "/"),
-    };
-
-    let (host, port) = if let Some((h, p_str)) = host_port.rsplit_once(':') {
-        let p = p_str.parse::<u16>().unwrap_or(if is_https { 443 } else { 80 });
-        (h, p)
-    } else {
-        (host_port, if is_https { 443 } else { 80 })
-    };
-
-    let t_ms = timeout_ms.clamp(300, 15_000) as i32;
-
-    unsafe {
-        let agent = to_wide("RustAiPinyinIME/1.0");
-        let h_session = HandleGuard(WinHttpOpen(
-            agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-            null(),
-            null(),
-            0,
-        ));
-        if h_session.0.is_null() {
-            return Err("WinHttpOpen 初始化失败".to_string());
-        }
-        WinHttpSetTimeouts(h_session.0, t_ms, t_ms, t_ms, t_ms);
-
-        let host_w = to_wide(host);
-        let h_connect = HandleGuard(WinHttpConnect(h_session.0, host_w.as_ptr(), port, 0));
-        if h_connect.0.is_null() {
-            return Err(format!("WinHttpConnect 无法连接主机: {host}:{port}"));
-        }
-
-        let verb_w = to_wide("POST");
-        let path_w = to_wide(path_and_query);
-        let flags = if is_https { WINHTTP_FLAG_SECURE } else { 0 };
-        let h_request = HandleGuard(WinHttpOpenRequest(
-            h_connect.0,
-            verb_w.as_ptr(),
-            path_w.as_ptr(),
-            null(),
-            null(),
-            null(),
-            flags,
-        ));
-        if h_request.0.is_null() {
-            return Err("WinHttpOpenRequest 创建请求失败".to_string());
-        }
-
-        let mut header_str = String::new();
-        for (k, v) in headers {
-            header_str.push_str(&format!("{k}: {v}\r\n"));
-        }
-        let header_w = to_wide(&header_str);
-        let header_len = (header_w.len().saturating_sub(1)) as u32;
-        let body_bytes = body_json.as_bytes();
-
-        let sent = WinHttpSendRequest(
-            h_request.0,
-            header_w.as_ptr(),
-            header_len,
-            body_bytes.as_ptr() as *const c_void,
-            body_bytes.len() as u32,
-            body_bytes.len() as u32,
-            0,
-        );
-        if sent == 0 {
-            return Err(format!("HTTPS 请求发送失败 ({host}:{port})，请检查网络或 API 地址"));
-        }
-
-        let received = WinHttpReceiveResponse(h_request.0, null_mut());
-        if received == 0 {
-            return Err(format!("等待 {host} 响应超时或被拒绝"));
-        }
-
-        let mut response_data = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            let mut bytes_read = 0u32;
-            let ok = WinHttpReadData(
-                h_request.0,
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                &mut bytes_read,
-            );
-            if ok == 0 || bytes_read == 0 {
-                break;
-            }
-            response_data.extend_from_slice(&buf[..bytes_read as usize]);
-        }
-
-        String::from_utf8(response_data).map_err(|e| format!("响应不是合法 UTF-8: {e}"))
+        String::from_utf8_lossy(&out).trim().to_string()
     }
 }

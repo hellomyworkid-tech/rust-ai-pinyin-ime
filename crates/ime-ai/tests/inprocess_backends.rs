@@ -272,7 +272,7 @@ fn guards_keep_the_scorer_out() {
     assert!(!ai.inprocess_result_pending());
 
     // 大模型重排关闭
-    ai.cloud_client.config.enabled = false;
+    ai.local_llm_client.config.enabled = false;
     rerank(&mut ai, "shiyan", CONTEXT);
     assert!(!ai.inprocess_result_pending());
 

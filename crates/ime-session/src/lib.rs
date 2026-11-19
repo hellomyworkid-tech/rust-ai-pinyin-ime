@@ -24,6 +24,9 @@ pub struct ImePersistentConfig {
     pub ai_config: OpenAiCompatibleConfig,
     #[serde(default)]
     pub fuzzy_config: FuzzyPinyinConfig,
+    /// Windows 右下角悬浮状态栏用户拖放后的记忆坐标 `(x, y)`（`None` 时使用桌面右下角默认初始位置）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_bar_pos: Option<(i32, i32)>,
 }
 
 impl ImePersistentConfig {
@@ -48,7 +51,8 @@ impl ImePersistentConfig {
     /// 由宿主传入 App Group 容器内的路径
     pub fn load_from(path: &std::path::Path) -> Self {
         if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(cfg) = serde_json::from_str::<Self>(&content) {
+            if let Ok(mut cfg) = serde_json::from_str::<Self>(&content) {
+                cfg.ai_config.sanitize_local_only();
                 return cfg;
             }
         }
@@ -1589,7 +1593,9 @@ impl KeySession {
     /// 动态应用并保存 AI 模型与模糊音配置
     pub fn apply_persistent_config(&mut self, cfg: &ImePersistentConfig) {
         self.core.fuzzy_config = cfg.fuzzy_config.clone();
-        self.ai.cloud_client.config = cfg.ai_config.clone();
+        let mut local_ai = cfg.ai_config.clone();
+        local_ai.sanitize_local_only();
+        self.ai.local_llm_client.config = local_ai;
         if !self.input_buffer.is_empty() {
             self.recompute_candidates();
         }
@@ -3395,7 +3401,7 @@ mod tests {
     /// 装上假打分器、设好上文后敲 `pinyin`，等打分结束再按结果重排
     fn type_with_scorer(s: &mut KeySession, scorer: &std::sync::Arc<PreferSecond>, pinyin: &str) {
         s.ai.set_candidate_scorer(Some(scorer.clone()));
-        s.ai.cloud_client.config.enabled = true;
+        s.ai.local_llm_client.config.enabled = true;
         s.set_context_before_cursor("我们今天下午在会议上讨论了");
         type_str(s, pinyin);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -3687,5 +3693,77 @@ mod tests {
         assert!(ji_hungry_idx > 30, "『饥』应排在 jie 单字之后: idx={ji_hungry_idx}");
         s.select_candidate(ji_hungry_idx);
         assert_eq!(s.current_candidates[0].text, "饿");
+
+        // 6) `rangyouxiajiao` 分步选「让」后联想「右下角」，以及 `ImePersistentConfig::status_bar_pos` 记忆坐标序列化往返验证
+        s.cancel_composition();
+        type_str(&mut s, "rangyouxiajiao");
+        assert_eq!(s.current_candidates[0].text, "让右下角");
+        let rang_idx = s.current_candidates.iter().position(|c| c.text == "让").unwrap();
+        s.select_candidate(rang_idx);
+        assert_eq!(s.last_full_sentence, "让右下角");
+        assert_eq!(s.current_candidates[0].text, "右下角");
+
+        let mut cfg = ImePersistentConfig::default();
+        assert_eq!(cfg.status_bar_pos, None);
+        cfg.status_bar_pos = Some((1480, 960));
+        let json = serde_json::to_string(&cfg).unwrap();
+        let loaded: ImePersistentConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.status_bar_pos, Some((1480, 960)));
+        let legacy: ImePersistentConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.status_bar_pos, None);
+    }
+
+    #[test]
+    fn test_legacy_cloud_config_load_from_migrates_to_local_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "rust_ai_ime_legacy_cfg_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ime_config.json");
+        let legacy_json = r#"{
+            "ai_config": {
+                "enabled": true,
+                "provider": "OpenAiChatGpt",
+                "api_base": "https://api.openai.com/v1",
+                "api_key": "sk-legacy-secret",
+                "model": "gpt-4.1-mini",
+                "saved_profiles": {
+                    "AnthropicClaude": {
+                        "api_base": "https://api.anthropic.com/v1",
+                        "api_key": "sk-ant-legacy",
+                        "model": "claude-3-5-haiku-latest"
+                    }
+                },
+                "timeout_ms": 1200
+            },
+            "fuzzy_config": {
+                "z_zh": true,
+                "c_ch": true,
+                "s_sh": true,
+                "an_ang": false,
+                "en_eng": false,
+                "in_ing": false,
+                "n_l": true,
+                "f_h": false,
+                "typo_correction": true
+            },
+            "status_bar_pos": [1520, 940]
+        }"#;
+        std::fs::write(&path, legacy_json).unwrap();
+
+        let loaded = ImePersistentConfig::load_from(&path);
+        assert_eq!(loaded.ai_config.provider, ime_ai::AiProvider::LocalQwen);
+        assert!(
+            !loaded.ai_config.enabled,
+            "旧云端配置迁移后必须自动关闭联网开关，防止误连远端"
+        );
+        assert!(ime_ai::is_loopback_http_url(&loaded.ai_config.api_base));
+        assert_eq!(loaded.status_bar_pos, Some((1520, 940)));
+        assert!(loaded.fuzzy_config.n_l);
+        assert!(!loaded.fuzzy_config.an_ang);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

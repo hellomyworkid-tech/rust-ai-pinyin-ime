@@ -1,12 +1,11 @@
-//! `ime-ai`: 双模「AI 理解选词」与异步无阻塞并发调度引擎
+//! `ime-ai`: 纯本地双模「AI 理解选词」与异步无阻塞并发调度引擎
 //!
-//! 同时支持：
+//! 全部能力均在本地离线运行，绝不联网上传击键或上下文，支持：
 //! 1. **端侧极速模式（默认，`<0.15ms`）**：基于 KV-Cache 上下文状态预热 + 单次前向 N-Best 重打分 + 句内同音搭配矩阵 + 拼音 Trie 掩码约束 (`PinyinLogitsMask`)
-//! 2. **本地/云端大模型模式（可选，后台异步无阻塞）**：
-//!    - 本地最优解：`Qwen2.5-1.5B-Instruct` / `Qwen2.5-0.5B-Instruct`（Ollama / llama.cpp）
-//!    - 主流云端大模型：**OpenAI (ChatGPT)**、**Anthropic (Claude)**、**Google (Gemini)**
-//!    - **自定义云端 (Custom Cloud)**：DeepSeek、硅基流动、阿里云百炼、OpenRouter 等
-//! 3. **进程内打分器 / 宿主选词器（可选，见 [`inprocess`]）**：不经过 HTTP 的大模型选词后端，
+//! 2. **本机本地大模型模式（可选，后台异步无阻塞）**：
+//!    - 内置一键托管：`Qwen2.5-1.5B-Instruct` / `Qwen2.5-0.5B-Instruct`（Vulkan GPU 加速，仅监听 `127.0.0.1:18434`）
+//!    - 本机回环服务：自动探测并接入本机 Ollama (`11434`)、llama.cpp Server (`8080`)、LM Studio (`1234`)
+//! 3. **进程内打分器 / 宿主选词器（可选，见 [`inprocess`]）**：不经过 HTTP 的本地大模型选词后端，
 //!    供不能创建子进程的平台（iOS 键盘扩展）使用；未安装时行为与上面两种模式完全相同
 
 pub mod inprocess;
@@ -25,8 +24,8 @@ pub use inprocess::{
 pub use local_engine::{AiRerankReport, CachedContextState, OnDeviceAiEngine};
 pub use managed_llm::{BuiltinModelTier, ManagedLocalLlm, MANAGED_LLM_BASE_URL, MANAGED_LLM_PORT};
 pub use openai_client::{
-    AiProvider, ChatCompletionRequest, LocalEndpointStatus, OpenAiCompatibleClient,
-    OpenAiCompatibleConfig, ProviderProfile,
+    is_loopback_http_url, parse_loopback_http_url, AiProvider, ChatCompletionRequest,
+    LocalEndpointStatus, OpenAiCompatibleClient, OpenAiCompatibleConfig,
 };
 pub use pinyin_mask::{PinyinLogitsMask, VocabTokenEntry};
 
@@ -48,7 +47,7 @@ struct AsyncRerankJob {
 
 /// 投递给后台线程的任务
 enum AsyncJob {
-    /// HTTP 路径（本机 llama-server / 云端接口）
+    /// 本机回环 HTTP 路径（内置 llama-server / Ollama / LM Studio）
     Http(AsyncRerankJob),
     /// 进程内打分器
     Score(InProcessJob),
@@ -56,15 +55,15 @@ enum AsyncJob {
     Choose(Option<InProcessJob>),
 }
 
-/// 带版本号防抖、后台异步推理与结果缓存的双模 AI 选词调度器
+/// 带版本号防抖、后台异步推理与结果缓存的纯本地双模 AI 选词调度器
 ///
 /// 关键设计：
-/// Windows `WH_KEYBOARD_LL` 低级键盘钩子严禁在回调线程执行耗时网络 I/O。
-/// 因此当开启本地 Ollama 或云端 ChatGPT/Claude/Gemini 时，击键线程仅做 `<0.15ms` 的端侧重排与缓存查表；
-/// 未命中的大模型请求通过 `mpsc` 投递给后台常驻线程，推理完成后写入 `llm_cache` 并触发 UI 刷新回调。
+/// Windows `WH_KEYBOARD_LL` 低级键盘钩子严禁在回调线程执行耗时 I/O。
+/// 因此当开启本地 Qwen / Ollama / llama.cpp 时，击键线程仅做 `<0.15ms` 的端侧重排与缓存查表；
+/// 未命中的本地大模型请求通过 `mpsc` 投递给后台常驻线程，推理完成后写入 `llm_cache` 并触发 UI 刷新回调。
 pub struct DualModeAiOrchestrator {
     pub local_engine: OnDeviceAiEngine,
-    pub cloud_client: OpenAiCompatibleClient,
+    pub local_llm_client: OpenAiCompatibleClient,
     generation_counter: Arc<AtomicU64>,
     /// 缓存键 → (被选中的候选文本, 来源简称)
     llm_cache: Arc<Mutex<HashMap<String, (String, String)>>>,
@@ -172,7 +171,8 @@ impl Default for DualModeAiOrchestrator {
 }
 
 impl DualModeAiOrchestrator {
-    pub fn new(cloud_config: OpenAiCompatibleConfig) -> Self {
+    pub fn new(mut local_llm_config: OpenAiCompatibleConfig) -> Self {
+        local_llm_config.sanitize_local_only();
         let generation_counter = Arc::new(AtomicU64::new(0));
         let llm_cache: Arc<Mutex<HashMap<String, (String, String)>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -249,7 +249,7 @@ impl DualModeAiOrchestrator {
 
         Self {
             local_engine: OnDeviceAiEngine::new(),
-            cloud_client: OpenAiCompatibleClient::new(cloud_config),
+            local_llm_client: OpenAiCompatibleClient::new(local_llm_config),
             generation_counter,
             llm_cache,
             async_tx,
@@ -262,15 +262,15 @@ impl DualModeAiOrchestrator {
 
     /// 安装（`Some`）或卸载（`None`）进程内打分器。
     ///
-    /// 安装后，只要大模型重排处于开启状态（`cloud_client.config.enabled`），后台任务就改用打分器而不再发起
-    /// HTTP 请求：候选池为 [`select_scoring_pool`]（至多 8 个覆盖整段输入的候选），按 [`choose_by_exact_scores`]
+    /// 安装后，只要本地大模型重排处于开启状态（`local_llm_client.config.enabled`），后台任务就改用打分器而不再发起
+    /// 本机 HTTP 请求：候选池为 [`select_scoring_pool`]（至多 8 个覆盖整段输入的候选），按 [`choose_by_exact_scores`]
     /// 决定首选，结果同样写入缓存并触发刷新回调。更新的击键会调用 [`CandidateScorer::cancel`] 让在途的打分中途退出，
     /// 同一时刻至多有一个打分任务在执行、一个在排队。
     pub fn set_candidate_scorer(&self, scorer: Option<Arc<dyn CandidateScorer>>) {
         self.inprocess.set_scorer(scorer);
     }
 
-    /// 安装（`Some`）或卸载（`None`）宿主选词器（Swift 一侧的系统模型或云端调用）。
+    /// 安装（`Some`）或卸载（`None`）宿主选词器（如 Swift 一侧的 Apple 端侧系统模型）。
     ///
     /// 只有在没有安装打分器时才会使用：调度器在后台线程上通过 [`HostChooser::callback`] 发出
     /// [`ChooserEvent::Request`]，宿主算完后调用 [`ChooserHandle::deliver`]（或
@@ -368,7 +368,7 @@ impl DualModeAiOrchestrator {
 
     /// 执行上下文感知选词重排：
     /// 1. 立即执行端侧微模型毫秒级重排（`<0.15ms`）
-    /// 2. 若开启了本地 Qwen / 云端大模型，先查 `llm_cache` 是否已有该上下文+拼音的仲裁结果；
+    /// 2. 若开启了本机本地大模型，先查 `llm_cache` 是否已有该上下文+拼音的仲裁结果；
     ///    若未命中，则异步投递给后台推理线程，绝不阻塞当前击键！
     ///
     /// 不提供个人记忆：首选是个人记忆词（`[记忆·N次]`）时照旧不请求大模型，见 [`Self::rerank_with_user_priors`]
@@ -467,7 +467,7 @@ impl DualModeAiOrchestrator {
         } else {
             true
         };
-        let llm_wanted = self.cloud_client.config.enabled
+        let llm_wanted = self.local_llm_client.config.enabled
             && !memory_blocks_llm
             && !is_single_char_lookup
             && has_context_or_clause
@@ -511,8 +511,8 @@ impl DualModeAiOrchestrator {
             if plausible.len() >= 2 {
                 let cache_key = format!(
                     "{}:{}:{}\t{}",
-                    self.cloud_client.config.provider.key_id(),
-                    self.cloud_client.config.model,
+                    self.local_llm_client.config.provider.key_id(),
+                    self.local_llm_client.config.model,
                     surrounding_context,
                     pinyin_input
                 );
@@ -538,7 +538,7 @@ impl DualModeAiOrchestrator {
                         surrounding_context: surrounding_context.to_string(),
                         scene,
                         candidates: plausible,
-                        config: self.cloud_client.config.clone(),
+                        config: self.local_llm_client.config.clone(),
                     }));
                 }
             }
@@ -740,32 +740,81 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_provider_config_switching() {
-        let mut cfg = OpenAiCompatibleConfig::default();
+    fn test_local_only_loopback_guard_and_legacy_config_migration() {
+        let cfg = OpenAiCompatibleConfig::default();
         assert_eq!(cfg.provider, AiProvider::LocalQwen);
-        assert_eq!(cfg.model, "qwen2.5:1.5b");
+        assert!(is_loopback_http_url(&cfg.api_base));
 
-        cfg.switch_provider(AiProvider::OpenAiChatGpt);
-        assert_eq!(cfg.api_base, "https://api.openai.com/v1");
-        assert_eq!(cfg.model, "gpt-4o-mini");
-        cfg.api_key = "sk-test-openai".to_string();
+        // 合法的本机回环 HTTP 地址
+        assert!(is_loopback_http_url("http://127.0.0.1:18434/v1"));
+        assert!(is_loopback_http_url("http://127.0.0.1:11434/v1"));
+        assert!(is_loopback_http_url("http://localhost:8080/v1"));
+        assert!(is_loopback_http_url("http://localhost/v1"));
+        assert!(is_loopback_http_url("http://[::1]:1234/v1"));
 
-        cfg.switch_provider(AiProvider::AnthropicClaude);
-        assert_eq!(cfg.api_base, "https://api.anthropic.com/v1");
-        assert_eq!(cfg.model, "claude-3-5-haiku-latest");
-        cfg.api_key = "sk-ant-test".to_string();
+        // 任何远程云端、HTTPS、局域网 IP、非法端口、控制字符或 `@` 伪装地址必须全部拦截
+        for forbidden in [
+            "https://api.openai.com/v1",
+            "https://api.deepseek.com/v1",
+            "https://api.anthropic.com/v1",
+            "https://generativelanguage.googleapis.com/v1beta",
+            "https://127.0.0.1:18434/v1",
+            "http://api.openai.com/v1",
+            "http://192.168.1.10:11434/v1",
+            "http://127.0.0.1@evil.com/v1",
+            "http://127.0.0.1.evil.com/v1",
+            "http://localhost.evil.com:11434/v1",
+            "http://127.0.0.1:0/v1",
+            "http://127.0.0.1:99999/v1",
+            "http://127.0.0.1:abc/v1",
+            "http://127.0.0.1:18434/v1\r\nHost: evil.com",
+        ] {
+            assert!(!is_loopback_http_url(forbidden), "should reject {forbidden}");
+        }
 
-        cfg.switch_provider(AiProvider::GoogleGemini);
-        assert_eq!(cfg.api_base, "https://generativelanguage.googleapis.com/v1beta");
-        assert_eq!(cfg.model, "gemini-2.5-flash");
+        // 历史旧版云端配置 JSON 必须能无损反序列化并安全清洗回本地默认配置
+        let legacy_json = r#"{
+            "provider": "OpenAiChatGpt",
+            "api_base": "https://api.openai.com/v1",
+            "api_key": "sk-legacy-key",
+            "model": "gpt-4o-mini",
+            "timeout_ms": 2500,
+            "enabled": true,
+            "saved_profiles": {
+                "openai_chatgpt": {
+                    "api_base": "https://api.openai.com/v1",
+                    "api_key": "sk-legacy-key",
+                    "model": "gpt-4o-mini"
+                }
+            }
+        }"#;
+        let mut migrated: OpenAiCompatibleConfig = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(migrated.provider, AiProvider::LocalQwen);
+        migrated.sanitize_local_only();
+        assert_eq!(migrated.api_base, "http://127.0.0.1:11434/v1");
+        assert_eq!(migrated.model, "qwen2.5:1.5b");
+        assert!(!migrated.enabled);
 
-        cfg.switch_provider(AiProvider::CustomCloud);
-        assert_eq!(cfg.api_base, "https://api.deepseek.com/v1");
-        assert_eq!(cfg.model, "deepseek-chat");
-
-        // 切回 OpenAI 时应完整保留之前填写的 Key
-        cfg.switch_provider(AiProvider::OpenAiChatGpt);
-        assert_eq!(cfg.api_key, "sk-test-openai");
+        // 即使强行构造远程 URL，客户端调用层也必须直接拒绝
+        let remote_client = OpenAiCompatibleClient::new(OpenAiCompatibleConfig {
+            provider: AiProvider::LocalQwen,
+            api_base: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            timeout_ms: 900,
+            enabled: true,
+        });
+        let err = remote_client
+            .query_best_candidate_http(
+                "jishu",
+                "微积分",
+                AppScene::Academic,
+                &[
+                    synthetic_cand("技术", 99.0, &["技术"]),
+                    synthetic_cand("级数", 98.0, &["级数"]),
+                ],
+            )
+            .unwrap_err();
+        assert!(err.contains("本机回环"), "unexpected err: {err}");
     }
 
     #[test]

@@ -283,16 +283,63 @@ impl ManagedLocalLlm {
         cmd.spawn()
             .map_err(|e| format!("启动 llama-server.exe 失败: {e}"))?;
 
-        // 等待服务端口就绪（最长 10 秒）
+        // 等待服务端口就绪（最长 10 秒），并在端口监听后异步执行 1-token mmap / Vulkan 预热，消除首次击键冷启动延迟
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(10) {
             if Self::is_server_running() {
+                Self::spawn_background_warmup();
                 return Ok(());
             }
-            std::thread::sleep(Duration::from_millis(180));
+            std::thread::sleep(Duration::from_millis(120));
         }
 
         Err("内置推理引擎启动超时（端口 18434 未响应）".to_string())
+    }
+
+    /// 移植自 iOS 端的 1-token 预热机制：在后台线程等待 `llama-server` 模型权重加载完毕（`/health` 200），
+    /// 随后投递一次 1-token 前向推理，将 GGUF mmap 页与 Vulkan GPU 着色器提前预热进显存
+    fn spawn_background_warmup() {
+        std::thread::spawn(|| {
+            use std::io::{Read, Write};
+            let addr = SocketAddr::from(([127, 0, 0, 1], MANAGED_LLM_PORT));
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut ready = false;
+            while Instant::now() < deadline {
+                if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+                    let _ = s.set_write_timeout(Some(Duration::from_millis(500)));
+                    if s.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                        .is_ok()
+                    {
+                        let mut buf = [0u8; 256];
+                        if let Ok(n) = s.read(&mut buf) {
+                            let head = String::from_utf8_lossy(&buf[..n]);
+                            if head.contains("200") {
+                                ready = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            if !ready {
+                return;
+            }
+            if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+                let _ = s.set_read_timeout(Some(Duration::from_secs(4)));
+                let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
+                let body = r#"{"prompt":"好","max_tokens":1,"temperature":0.0}"#;
+                let req = format!(
+                    "POST /v1/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(req.as_bytes());
+                let mut sink = [0u8; 512];
+                let _ = s.read(&mut sink);
+            }
+        });
     }
 }
 

@@ -6,11 +6,11 @@
 //! - `extern "C"` 函数只是对它的薄封装，另外负责指针检查和拦截 panic（panic 不能越过 FFI 边界）。
 //!   唯一的例外是 `ime_engine_free`：它销毁引擎，不能与同一引擎上的任何其他调用并发。
 //!
-//! 经由本封装使用时引擎不发起网络请求。调度器里 Windows 版用的 HTTP 路径只在「大模型重排」开关
-//! （`cloud_client.config.enabled`）打开且没有进程内后端时才走；本封装只在装有本地模型或宿主选词器时
+//! 经由本封装使用时引擎不发起网络请求。调度器里 Windows 版用的本机回环 HTTP 路径只在「大模型重排」开关
+//! （`local_llm_client.config.enabled`）打开且没有进程内后端时才走；本封装只在装有本地模型或宿主选词器时
 //! 才打开这个开关（见 `sync_llm_switch`），而装有它们时调度器不走 HTTP。
-//! 环境变量：创建引擎时 `OpenAiCompatibleConfig::default()` 会读 `IME_OPENAI_API_BASE`、
-//! `IME_OPENAI_API_KEY`、`IME_OPENAI_MODEL` 作为 HTTP 路径的默认配置，按上面所说这里用不到它们。
+//! 环境变量：创建引擎时 `OpenAiCompatibleConfig::default()` 会读 `IME_OPENAI_API_BASE`（仅限本机回环地址）、
+//! `IME_OPENAI_MODEL` 作为本机 HTTP 路径的默认配置，按上面所说这里用不到它们。
 //! 文件只有三处：只读 mmap 的词库、（可选的）个人词库 JSON（后台线程读写，见 `ime_core`），
 //! 以及（可选的）只读 mmap 的本地模型。
 //!
@@ -640,9 +640,9 @@ impl ImeEngine {
     }
 
     /// 调度器只在「大模型重排」开关打开时才用打分器 / 选词器；两者都没装时必须关掉，
-    /// 否则它会退回 Windows 版的 HTTP 路径（去连本机的 llama-server）
+    /// 否则它会退回 Windows 版的本机 HTTP 路径（去连本机的 llama-server）
     fn sync_llm_switch(&self, session: &mut KeySession) {
-        session.ai.cloud_client.config.enabled = self.llm_backend_active();
+        session.ai.local_llm_client.config.enabled = self.llm_backend_active();
     }
 
     /// 这个构建是否包含进程内本地模型支持（`llama` 特性）
@@ -1417,9 +1417,9 @@ mod tests {
         }
     }
 
-    /// 「大模型重排」开关：开着却没有进程内后端时，调度器会走 Windows 版的 HTTP 路径
+    /// 「大模型重排」开关：开着却没有进程内后端时，调度器会走 Windows 版的本机 HTTP 路径
     fn llm_switch(engine: &ImeEngine) -> bool {
-        engine.session().ai.cloud_client.config.enabled
+        engine.session().ai.local_llm_client.config.enabled
     }
 
     #[test]
@@ -1503,7 +1503,7 @@ mod tests {
         // 模拟「持锁期间 panic，留下不一致的状态」：开关被打开而没有后端
         let poisoned = catch_unwind(AssertUnwindSafe(|| {
             let mut session = engine.session();
-            session.ai.cloud_client.config.enabled = true;
+            session.ai.local_llm_client.config.enabled = true;
             session.english_passthrough_mode = true;
             panic!("panic while holding the session lock");
         }));

@@ -229,7 +229,7 @@ fn main() {
 
     // 规则重排：大模型关闭的调度器（与 Windows 默认配置相同）
     let mut rules = DualModeAiOrchestrator::new(OpenAiCompatibleConfig::default());
-    assert!(!rules.cloud_client.config.enabled);
+    assert!(!rules.local_llm_client.config.enabled);
 
     // 规则 + 大模型：开启大模型重排并安装进程内打分器
     let mut config = OpenAiCompatibleConfig::default();
