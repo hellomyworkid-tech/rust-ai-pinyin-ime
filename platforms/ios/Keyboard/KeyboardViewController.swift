@@ -51,7 +51,10 @@ final class KeyboardViewController: UIInputViewController {
         return hasFullAccess
     }
 
+    private var pendingDeferredRestore: (docID: UUID, excluded: UUID?)?
+
     deinit {
+        LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self), hostResigned: true)
         for observer in lifecycleObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -115,6 +118,7 @@ final class KeyboardViewController: UIInputViewController {
                     self.setSettingsExpanded(false)
                     self.render()
                 }
+                LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self), hostResigned: true)
             },
             center.addObserver(forName: .NSExtensionHostDidBecomeActive, object: nil, queue: .main) { [weak self] note in
                 guard let self, self.matchesExtensionContext(note) else { return }
@@ -138,7 +142,7 @@ final class KeyboardViewController: UIInputViewController {
     private func hostDidBecomeActive() {
         guard isViewLoaded else { return }
         if currentDocumentID != nil, currentDocumentID != documentID {
-            syncField()
+            syncField(restorePending: isVisible)
         } else {
             // 下拉控制中心等回到同一个输入框：这次中断已经结束，之后从 A 直接点到 B 时仍要排除 A
             hostInterrupted = false
@@ -146,22 +150,19 @@ final class KeyboardViewController: UIInputViewController {
         // 切应用再切回时，若键盘原本开着，iOS 有时只发 DidBecomeActive 而不重走 viewWillAppear / viewDidAppear：
         // 重新同步设置并让 AI 控制器接回（或重试加载）本地模型，无需手动切走输入法再切回
         guard isVisible else { return }
+        LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
         settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
         input.apply(settings)
         feedback.configure(settings: settings, hasFullAccess: hasFullAccess)
         if !input.isComposing {
             input.keyboardWillAppear()
         }
-        ai.apply(settings)
-        input.ensureEngine()
-        if settings.aiMode != .off, input.isComposing {
-            input.requestAIRefresh()
-        }
+        ensureEngineAndAI(deferColdLocalLoad: true)
         render()
     }
 
-    private func ensureEngineAndAI() {
-        ai.apply(settings)
+    private func ensureEngineAndAI(deferColdLocalLoad: Bool = false) {
+        ai.apply(settings, deferColdLocalLoad: deferColdLocalLoad)
         input.ensureEngine()
         if settings.aiMode != .off, input.isComposing {
             input.requestAIRefresh()
@@ -170,38 +171,35 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
         // settings.json 只有几百字节，读一次很快；未开完全访问但快捷面板改过开关时合并读取本地覆盖配置
         settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
         setSettingsExpanded(false)
         input.apply(settings)
         feedback.configure(settings: settings, hasFullAccess: hasFullAccess)
-        // 先同步词库和个人词库，再恢复或初始化当前输入框（否则词库变化丢掉旧引擎时会冲掉刚恢复的组合）
-        input.keyboardWillAppear()
-        syncField()
-        // 关键区分：
-        // - 热启动（当前扩展进程已驻留且引擎已创建，如跨 App 切换输入框）：在下一拍立即接回 AI，利用 SHARED_LLM 亚毫秒复用；
-        // - 冷启动（长时间未用后首次拉起进程，input.engine == nil）：viewWillAppear 阶段绝不创建引擎或触发任何模型/XPC 预热，
-        //   保证宿主远程窗口（remoteKeyboardWindow）零阻塞瞬间弹出，全部初始化放到 viewDidAppear 首帧显示完成之后。
-        if input.engine != nil {
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.input.engine != nil else { return }
-                self.ensureEngineAndAI()
-            }
-        }
+        // viewWillAppear 阶段绝不做重 I/O、宿主 XPC（documentContextBeforeInput）或创建引擎/加载模型：
+        // 让 remoteKeyboardWindow 零阻塞完成弹出与握手，避免系统因首帧/握手超时把键盘切回自带输入法。
+        // 个人词库同步、未提交拼音恢复与引擎/AI 接线统一放到 viewDidAppear 之后的下一拍。
+        syncField(restorePending: false)
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         isVisible = true
+        LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
 
         if currentDocumentID != nil, currentDocumentID != documentID {
-            syncField()
+            syncField(restorePending: false)
         }
         // 屏幕底边的系统手势会推迟最下一行键的 touchesBegan
         view.window?.gestureRecognizers?.forEach { $0.delaysTouchesBegan = false }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isVisible else { return }
-            self.ensureEngineAndAI()
+            if !self.input.isComposing {
+                self.input.keyboardWillAppear()
+            }
+            self.restoreDeferredPendingCompositionIfNeeded()
+            self.ensureEngineAndAI(deferColdLocalLoad: true)
             if self.pendingCompositions.mayHaveEntries {
                 self.pendingCompositions.purgeExpired()
             }
@@ -213,9 +211,11 @@ final class KeyboardViewController: UIInputViewController {
         isVisible = false
         hostInterrupted = true
         saveCurrentComposition()
+        pendingDeferredRestore = nil
         documentID = nil
         input.resetComposition()
         ai.keyboardWillHide()
+        LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self), hostResigned: false)
         page = traits.startPage
         isSymbolPanelLocked = false
         setGridExpanded(false)
@@ -236,6 +236,9 @@ final class KeyboardViewController: UIInputViewController {
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
         ai.didReceiveMemoryWarning()
+        if isViewLoaded {
+            rootView.releaseHiddenPanels()
+        }
     }
 
     // MARK: - 输入框
@@ -251,7 +254,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         if newID != documentID || currentTraits() != traits {
             // 换了输入框（或同一输入框在消失后重新获得焦点）
-            syncField()
+            syncField(restorePending: isVisible)
         } else {
             hostInterrupted = false
             input.hostTextDidChange()
@@ -278,12 +281,31 @@ final class KeyboardViewController: UIInputViewController {
         guard let docID = documentID else { return }
         if let snapshot = input.compositionSnapshot() {
             pendingCompositions.save(snapshot, for: docID, traits: traits, contextBefore: input.context.text)
-        } else {
+        } else if pendingDeferredRestore?.docID != docID {
             pendingCompositions.remove(for: docID)
         }
     }
 
-    private func syncField() {
+    private func restoreDeferredPendingCompositionIfNeeded() {
+        guard let pending = pendingDeferredRestore else { return }
+        pendingDeferredRestore = nil
+        guard documentID == pending.docID,
+              !input.isComposing,
+              !traits.startsInEnglish,
+              pendingCompositions.mayHaveEntries else { return }
+        let snapshot = pendingCompositions.take(
+            for: pending.docID,
+            traits: traits,
+            contextBefore: textDocumentProxy.documentContextBeforeInput,
+            excludingFallbackID: pending.excluded
+        )
+        if let snapshot, !snapshot.isEmpty {
+            input.beginField(traits, restoring: snapshot)
+        }
+    }
+
+    private func syncField(restorePending: Bool = true) {
+        pendingDeferredRestore = nil
         let previousDocID = documentID
         let wasInterrupted = hostInterrupted
         hostInterrupted = false
@@ -313,12 +335,17 @@ final class KeyboardViewController: UIInputViewController {
             // 同一屏幕直接从输入框 A 点到另一个同类型输入框 B 时（previousDocID 非空且未经过收起 / 失活），
             // 排除刚存下的 A，不把 A 的未完成拼音带到 B；等稍后点回 A 时再恢复
             let excluded = (!wasInterrupted && previousDocID != newID) ? previousDocID : nil
-            snapshot = pendingCompositions.take(
-                for: newID,
-                traits: newTraits,
-                contextBefore: textDocumentProxy.documentContextBeforeInput,
-                excludingFallbackID: excluded
-            )
+            if restorePending {
+                snapshot = pendingCompositions.take(
+                    for: newID,
+                    traits: newTraits,
+                    contextBefore: textDocumentProxy.documentContextBeforeInput,
+                    excludingFallbackID: excluded
+                )
+            } else {
+                pendingDeferredRestore = (docID: newID, excluded: excluded)
+                snapshot = nil
+            }
         } else {
             snapshot = nil
         }
@@ -356,7 +383,7 @@ final class KeyboardViewController: UIInputViewController {
                 rootView.grid.show(pager.candidates, hasMore: pager.hasMore, landscape: landscape)
             }
         } else {
-            if pendingCompositions.mayHaveEntries, let docID = documentID {
+            if pendingDeferredRestore == nil, pendingCompositions.mayHaveEntries, let docID = documentID {
                 pendingCompositions.remove(for: docID)
             }
             setGridExpanded(false)

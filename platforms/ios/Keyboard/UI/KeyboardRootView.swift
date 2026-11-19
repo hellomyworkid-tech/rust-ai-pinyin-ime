@@ -195,4 +195,21 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
         keyboard.isHidden = showGrid || showSettings || showSymbols
         if keyboard.isHidden { preview.hide() }
     }
+
+    /// 内存紧张时释放当前不可见的重型面板（UICollectionView 与 SwiftUI 宿主），降低扩展常驻内存
+    func releaseHiddenPanels() {
+        if let existing = gridIfLoaded, existing.isHidden {
+            existing.removeFromSuperview()
+            gridIfLoaded = nil
+        }
+        if let existing = symbolPanelIfLoaded, existing.isHidden {
+            existing.removeFromSuperview()
+            symbolPanelIfLoaded = nil
+        }
+        if let existing = settingsPanelIfLoaded, existing.isHidden {
+            existing.removeLinkHosts()
+            existing.removeFromSuperview()
+            settingsPanelIfLoaded = nil
+        }
+    }
 }

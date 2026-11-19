@@ -188,6 +188,9 @@ int32_t ime_engine_deliver_choice(ime_engine *engine, uint64_t id, const char *t
 // 当前进程的 phys_footprint（字节），也就是 iOS 用来判定键盘扩展是否超限的那个数。非 Apple 平台返回 0
 uint64_t ime_phys_footprint(void);
 
+// 立即释放进程级本地模型缓存并向系统归还空闲堆页（用于 iOS 内存警告或键盘退入后台防 Jetsam 强杀）
+void ime_release_memory_caches(void);
+
 void ime_string_free(char *string);
 
 #ifdef __cplusplus

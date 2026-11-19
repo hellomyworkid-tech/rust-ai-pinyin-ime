@@ -15,8 +15,9 @@ struct LocalModel: Identifiable, Equatable {
     /// 文件的 SHA-256（十六进制小写）。下载完先核对它再交给键盘；nil 表示不核对
     var sha256: String? = nil
 
-    /// 加载前要求的最小剩余可用内存（MiB）：覆盖模型本身的驻留增量并预留约 20–30 MiB 安全余量，防止触发 177 MB Jetsam 上限
-    var minimumAvailableMiB: Int { max(75, residentMiB + 2) }
+    /// 加载前要求的最小剩余可用内存（MiB）：真机 Jetsam 日志实测峰值比稳态高约 20–25 MiB，
+    /// 必须预留至少 25 MiB 瞬时余量（Qwen2.5 ≥ 95 MiB、Qwen3 ≥ 118 MiB），避免刚呼出键盘加载模型瞬间触碰内存红线被系统切回自带输入法
+    var minimumAvailableMiB: Int { max(95, residentMiB + 25) }
 
     var localURL: URL? { AppGroup.modelsDirectory?.appendingPathComponent(fileName) }
 

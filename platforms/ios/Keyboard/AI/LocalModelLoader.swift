@@ -12,9 +12,24 @@ import os
 /// - 新控制器请求同一个模型时，先复用进程内已加载的模型实例（零额外内存、毫秒内完成），再从旧控制器卸下引用；
 /// - 新控制器请求别的模型、关闭本地模型或收到内存警告时，先把旧控制器的模型一并卸掉，再测内存或加载。
 final class LocalModelCoordinator {
-    static let shared = LocalModelCoordinator()
+    static let shared: LocalModelCoordinator = {
+        let coordinator = LocalModelCoordinator(
+            queue: DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .utility),
+            releaseCaches: { RustEngine.releaseMemoryCaches() }
+        )
+        coordinator.installMemoryPressureMonitor()
+        return coordinator
+    }()
 
     let queue: DispatchQueue
+    private let releaseCaches: () -> Void
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var visibleControllers: Set<ObjectIdentifier> = []
+    private var backgroundEvictWorkItem: DispatchWorkItem?
+    /// 键盘全部隐藏后延迟释放本地模型的宽限期（秒）：
+    /// 同应用内短时间收起再唤起（≤2s）零耗时复用；超过宽限或切换宿主 App（0.4s）即在系统挂起进程前主动卸载，
+    /// 把挂起态内存从 70-90 MiB 压回 ~18 MiB，杜绝 iOS Jetsam 后台强杀导致下次刚呼出键盘就被切回自带输入法
+    private let backgroundUnloadDelay: TimeInterval
 
     private final class Entry {
         weak var loader: LocalModelLoader?
@@ -28,8 +43,105 @@ final class LocalModelCoordinator {
 
     private var entries: [Entry] = []
 
-    init(queue: DispatchQueue = DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .userInitiated)) {
+    init(queue: DispatchQueue = DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .utility),
+         backgroundUnloadDelay: TimeInterval = 2.0,
+         releaseCaches: @escaping () -> Void = {}) {
         self.queue = queue
+        self.backgroundUnloadDelay = backgroundUnloadDelay
+        self.releaseCaches = releaseCaches
+    }
+
+    deinit {
+        backgroundEvictWorkItem?.cancel()
+        memoryPressureSource?.cancel()
+    }
+
+    private func installMemoryPressureMonitor() {
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            self?.evictAllForMemoryWarning()
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    /// 某个键盘控制器即将出现或恢复显示：取消待执行的后台卸载
+    func controllerWillAppear(_ id: ObjectIdentifier) {
+        visibleControllers.insert(id)
+        backgroundEvictWorkItem?.cancel()
+        backgroundEvictWorkItem = nil
+    }
+
+    /// 某个键盘控制器消失或宿主切后台：若进程内已无可见键盘，安排在系统冻结前主动卸掉本地模型并归还空闲堆页
+    func controllerDidDisappear(_ id: ObjectIdentifier, hostResigned: Bool = false) {
+        visibleControllers.remove(id)
+        guard visibleControllers.isEmpty else { return }
+        scheduleBackgroundEviction(after: hostResigned ? min(0.4, backgroundUnloadDelay) : backgroundUnloadDelay)
+    }
+
+    private func scheduleBackgroundEviction(after delay: TimeInterval) {
+        backgroundEvictWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.visibleControllers.isEmpty else { return }
+            self.backgroundEvictWorkItem = nil
+            self.evictAllForBackground()
+        }
+        backgroundEvictWorkItem = item
+        if delay <= 0 {
+            item.perform()
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+    }
+
+    /// 键盘退入后台/闲置时主动卸载所有本地模型：状态回到 .idle（下次唤起时可正常重新加载）
+    func evictAllForBackground() {
+        entries.removeAll { $0.loader == nil && $0.engine == nil }
+        var engines: [IMEEngine] = []
+        for entry in entries {
+            let active = entry.loader?.state == .loading || entry.loader?.state == .loaded
+            if active {
+                entry.loader?.yieldToPeer()
+            }
+            if let engine = entry.engine,
+               (active || engine.isLocalModelLoaded),
+               !engines.contains(where: { $0 === engine }) {
+                engines.append(engine)
+            }
+        }
+        let release = releaseCaches
+        guard !engines.isEmpty else {
+            queue.async { release() }
+            return
+        }
+        queue.async {
+            for engine in engines where engine.isLocalModelLoaded {
+                engine.unloadLocalModel()
+            }
+            release()
+        }
+    }
+
+    /// 内核发出内存压力信号时，无条件卸掉进程内全部本地模型并清空共享缓存
+    func evictAllForMemoryWarning() {
+        let engines = evictPeersForMemoryWarning(excluding: nil, keepingEngine: nil)
+        let release = releaseCaches
+        queue.async {
+            for engine in engines where engine.isLocalModelLoaded {
+                engine.unloadLocalModel()
+            }
+            release()
+        }
+    }
+
+    func hasResidentModel(url: URL) -> Bool {
+        let targetURL = url.standardizedFileURL
+        return entries.contains { entry in
+            guard let loader = entry.loader,
+                  loader.state == .loading || loader.state == .loaded,
+                  loader.loadedURL?.standardizedFileURL == targetURL else { return false }
+            return entry.engine?.isLocalModelLoaded == true
+        }
     }
 
     func register(loader: LocalModelLoader, engine: IMEEngine) {
@@ -110,6 +222,10 @@ final class LocalModelCoordinator {
         }
         return peerEngines
     }
+
+    fileprivate func releaseProcessCaches() {
+        releaseCaches()
+    }
 }
 
 /// 本地 GGUF 模型（llama.cpp，在键盘进程内用 mmap 从 App Group 只读加载）的装载与卸载。
@@ -163,9 +279,22 @@ final class LocalModelLoader {
          availableMemory: @escaping () -> UInt64 = LocalModelLoader.systemAvailableMemory,
          fileExists: @escaping (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) {
         self.coordinator = coordinator
-        self.queue = queue ?? coordinator?.queue ?? DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .userInitiated)
+        self.queue = queue ?? coordinator?.queue ?? DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .utility)
         self.availableMemory = availableMemory
         self.fileExists = fileExists
+    }
+
+    /// 进程内是否已经常驻同一个本地模型（本引擎已加载/加载中，或同进程其他控制器已加载可零耗时复用）
+    func hasResidentModel(at url: URL, engine: IMEEngine) -> Bool {
+        let target = url.standardizedFileURL
+        if (state == .loading || state == .loaded), loadedURL?.standardizedFileURL == target {
+            return true
+        }
+        return coordinator?.hasResidentModel(url: target) ?? false
+    }
+
+    func hasModelFile(at url: URL) -> Bool {
+        fileExists(url)
     }
 
     /// 离系统的内存上限还有多少
@@ -234,7 +363,7 @@ final class LocalModelLoader {
             if let engine {
                 let canReuseFromPeer = sameModelResident && peerEngines.contains { $0.isLocalModelLoaded }
                 if canReuseFromPeer {
-                    // 同进程旧控制器已加载同一模型：先装到新引擎上（Rust 层升级 Weak 复用，零额外内存），再从旧引擎卸下引用
+                    // 同进程旧控制器已加载同一模型：先装到新引擎上（Rust 层复用，零额外内存），再从旧引擎卸下引用
                     if engine.isLocalModelLoaded { engine.unloadLocalModel() }
                     let reused = (try? engine.loadLocalModel(at: url)) != nil
                     for peer in peerEngines where peer.isLocalModelLoaded { peer.unloadLocalModel() }
@@ -299,27 +428,36 @@ final class LocalModelLoader {
         if active { state = .idle }
     }
 
-    /// 内存警告：立刻卸载
-    func didReceiveMemoryWarning(engine: IMEEngine) {
-        coordinator?.register(loader: self, engine: engine)
+    /// 内存警告：立刻卸载（即便本控制器 engine 尚未创建，也要卸掉同进程其他控制器和静态缓存）
+    func didReceiveMemoryWarning(engine: IMEEngine?) {
+        if let engine {
+            coordinator?.register(loader: self, engine: engine)
+        }
         let peerEngines = coordinator?.evictPeersForMemoryWarning(excluding: self, keepingEngine: engine) ?? []
-        let selfHasModel = state == .loading || state == .loaded || engine.isLocalModelLoaded
-        guard selfHasModel || !peerEngines.isEmpty else { return }
-        enqueueUnload(engine, extraEngines: peerEngines)
-        if selfHasModel {
-            state = .unloadedForMemory
+        let selfHasModel = state == .loading || state == .loaded || (engine?.isLocalModelLoaded == true)
+        if selfHasModel || !peerEngines.isEmpty {
+            enqueueUnload(engine, extraEngines: peerEngines, releaseCaches: true)
+            if selfHasModel {
+                state = .unloadedForMemory
+            }
+        } else if let coordinator {
+            queue.async { coordinator.releaseProcessCaches() }
         }
     }
 
-    private func enqueueUnload(_ engine: IMEEngine, extraEngines: [IMEEngine] = []) {
+    private func enqueueUnload(_ engine: IMEEngine?, extraEngines: [IMEEngine] = [], releaseCaches: Bool = false) {
         generation += 1
         loadedURL = nil
+        let coordinator = self.coordinator
         // 和加载排在同一个队列上：正在加载的话，等它加载完再卸载
         queue.async { [weak engine] in
             for peer in extraEngines where peer.isLocalModelLoaded {
                 peer.unloadLocalModel()
             }
             engine?.unloadLocalModel()
+            if releaseCaches {
+                coordinator?.releaseProcessCaches()
+            }
         }
     }
 }

@@ -37,12 +37,19 @@ final class AIController {
     private var appleRoute = AppleRoute.rules
     private var applyGeneration: UInt64 = 0
     private var probeTask: Task<Void, Never>?
+    private var deferredLocalLoadWorkItem: DispatchWorkItem?
+    /// `apply(..., deferColdLocalLoad: true)` 在引擎尚未创建前调用时暂存，等紧随其后的 `attach(_:)` 生效
+    private var pendingDeferColdLocalLoad = false
+    /// 冷启动或从后台重载本地模型时，等待键盘滑入动画与 InputUI 握手完成后再启动加载（秒）
+    private let coldLocalLoadDelay: TimeInterval
 
     init(chooser: AppleModelChooser, localLoader: LocalModelLoader = LocalModelLoader(),
-         localModelURL: @escaping (IMESettings) -> URL? = { ModelCatalog.find($0.localModelID)?.localURL }) {
+         localModelURL: @escaping (IMESettings) -> URL? = { ModelCatalog.find($0.localModelID)?.localURL },
+         coldLocalLoadDelay: TimeInterval = 0.30) {
         self.chooser = chooser
         self.localLoader = localLoader
         self.localModelURL = localModelURL
+        self.coldLocalLoadDelay = coldLocalLoadDelay
         localLoader.onStateChange = { [weak self] _ in self?.statusChanged() }
     }
 
@@ -66,23 +73,32 @@ final class AIController {
         }
         // 引擎作废了请求（输入结束等）：中止那次推理，不再交回结果
         engine.onChoiceCancel = { [weak self] id in self?.chooser.cancel(id: id) }
-        apply(settings)
+        let deferLoad = pendingDeferColdLocalLoad
+        pendingDeferColdLocalLoad = false
+        apply(settings, deferColdLocalLoad: deferLoad)
     }
 
     /// 引擎被丢掉（词库换了）：停掉进行中的请求，清掉选词器为旧引擎记下的状态（新引擎的请求编号从头算）；
     /// 先把本地模型从旧引擎上卸掉，加载记录作废，新引擎 attach 时按设置重新加载
     func detachEngine() {
+        pendingDeferColdLocalLoad = false
+        deferredLocalLoadWorkItem?.cancel()
+        deferredLocalLoadWorkItem = nil
         chooser.reset()
         localLoader.engineReplaced(old: engine)
         engine = nil
     }
 
-    /// 键盘每次出现（首帧之后）调用
-    func apply(_ newSettings: IMESettings) {
+    /// 键盘每次出现（首帧之后）调用。
+    /// `deferColdLocalLoad == true` 时，若本地模型尚未常驻进程（需冷加载），等待键盘弹出动画完成（~300ms）后再启动后台加载，
+    /// 避免刚呼出键盘瞬间抢占 CPU/I/O 与内存余量导致系统切回自带输入法
+    func apply(_ newSettings: IMESettings, deferColdLocalLoad: Bool = false) {
         settings = newSettings
         applyGeneration &+= 1
         probeTask?.cancel()
         probeTask = nil
+        deferredLocalLoadWorkItem?.cancel()
+        deferredLocalLoadWorkItem = nil
 
         if newSettings.aiMode == .apple {
             if let known = chooser.knownAvailability {
@@ -102,7 +118,7 @@ final class AIController {
                           self.settings.aiMode == .apple else { return }
                     self.appleRoute = self.resolveAppleRoute(self.settings, available: available)
                     if let engine = self.engine {
-                        self.wireAppleRoute(into: engine)
+                        self.wireAppleRoute(into: engine, deferColdLocalLoad: deferColdLocalLoad)
                     }
                     self.statusChanged()
                 }
@@ -112,15 +128,19 @@ final class AIController {
         }
 
         defer { statusChanged() }
-        guard let engine else { return }
+        guard let engine else {
+            pendingDeferColdLocalLoad = deferColdLocalLoad
+            return
+        }
+        pendingDeferColdLocalLoad = false
         switch newSettings.aiMode {
         case .apple:
-            wireAppleRoute(into: engine)
+            wireAppleRoute(into: engine, deferColdLocalLoad: deferColdLocalLoad)
         case .local:
             engine.onChoiceRequest = nil
             chooser.cancel()
             localLoader.keyboardWillAppear()
-            localLoader.load(localModelURL(newSettings), into: engine)
+            scheduleLocalLoad(localModelURL(newSettings), into: engine, deferIfCold: deferColdLocalLoad)
         case .off:
             engine.onChoiceRequest = nil
             chooser.cancel()
@@ -128,7 +148,28 @@ final class AIController {
         }
     }
 
-    private func wireAppleRoute(into engine: IMEEngine) {
+    private func scheduleLocalLoad(_ url: URL?, into engine: IMEEngine, deferIfCold: Bool) {
+        deferredLocalLoadWorkItem?.cancel()
+        deferredLocalLoadWorkItem = nil
+        guard deferIfCold,
+              coldLocalLoadDelay > 0,
+              let url,
+              localLoader.hasModelFile(at: url),
+              !localLoader.hasResidentModel(at: url, engine: engine) else {
+            localLoader.load(url, into: engine)
+            return
+        }
+        let generation = applyGeneration
+        let item = DispatchWorkItem { [weak self, weak engine] in
+            guard let self, let engine, self.applyGeneration == generation else { return }
+            self.deferredLocalLoadWorkItem = nil
+            self.localLoader.load(url, into: engine)
+        }
+        deferredLocalLoadWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + coldLocalLoadDelay, execute: item)
+    }
+
+    private func wireAppleRoute(into engine: IMEEngine, deferColdLocalLoad: Bool) {
         switch appleRoute {
         case .probing:
             engine.onChoiceRequest = nil
@@ -140,7 +181,7 @@ final class AIController {
             engine.onChoiceRequest = nil
             chooser.cancel()
             localLoader.keyboardWillAppear()
-            localLoader.load(url, into: engine)
+            scheduleLocalLoad(url, into: engine, deferIfCold: deferColdLocalLoad)
         case .rules:
             localLoader.unload(into: engine)
             engine.onChoiceRequest = nil
@@ -149,7 +190,7 @@ final class AIController {
 
     /// 键盘一直可见时，若同进程里的另一个键盘控制器（如弹出的系统搜索层）曾借走本地模型使本控制器回到 .idle，按需重新接回
     func restoreLocalModelIfYielded() {
-        guard let engine, localLoader.state == .idle else { return }
+        guard let engine, localLoader.state == .idle, deferredLocalLoadWorkItem == nil else { return }
         switch settings.aiMode {
         case .local:
             localLoader.load(localModelURL(settings), into: engine)
@@ -163,11 +204,17 @@ final class AIController {
     }
 
     func keyboardWillHide() {
+        applyGeneration &+= 1
+        pendingDeferColdLocalLoad = false
+        deferredLocalLoadWorkItem?.cancel()
+        deferredLocalLoadWorkItem = nil
         chooser.cancel()
     }
 
     func didReceiveMemoryWarning() {
-        guard let engine else { return }
+        pendingDeferColdLocalLoad = false
+        deferredLocalLoadWorkItem?.cancel()
+        deferredLocalLoadWorkItem = nil
         localLoader.didReceiveMemoryWarning(engine: engine)
     }
 
@@ -186,6 +233,8 @@ final class AIController {
                 switch localLoader.state {
                 case .loaded: return "AI 选词 · 本地模型（Apple 端侧模型不可用）"
                 case .loading: return "Apple 端侧模型不可用，正在加载本地模型…"
+                case .idle where deferredLocalLoadWorkItem != nil:
+                    return "Apple 端侧模型不可用，正在加载本地模型…"
                 // 没下载、加载失败、内存不够没加载或被内存警告卸掉：实际只按词频和规则
                 default: return "Apple 端侧模型不可用，按词频选词"
                 }
@@ -200,7 +249,8 @@ final class AIController {
             case .failed: return "本地模型加载失败"
             case .skippedLowMemory: return "内存不足，本地模型没有加载"
             case .unloadedForMemory: return "内存紧张，本地模型已卸载"
-            case .idle: return "本地模型未加载"
+            case .idle:
+                return deferredLocalLoadWorkItem != nil ? "正在加载本地模型…" : "本地模型未加载"
             }
         }
     }

@@ -597,4 +597,116 @@ final class AIWiringTests: XCTestCase {
         try? FileManager.default.removeItem(at: missingURL)
         XCTAssertFalse(store.mayHaveEntries)
     }
+
+    // MARK: - 后台释放、冷启动延后加载与内存余量保护
+
+    func testBackgroundDisappearEvictsLocalModelAndReleasesCaches() async throws {
+        let queue = DispatchQueue(label: "test.local-model.bg-evict")
+        var releaseCount = 0
+        let coordinator = LocalModelCoordinator(
+            queue: queue,
+            backgroundUnloadDelay: 0.06,
+            releaseCaches: { releaseCount += 1 }
+        )
+        let loader = LocalModelLoader(coordinator: coordinator, availableMemory: { .max })
+        let engine = RecordingEngine()
+        let url = try makeModelFile()
+        let token = ObjectIdentifier(engine)
+
+        coordinator.controllerWillAppear(token)
+        loader.load(url, into: engine)
+        await waitForState(loader, .loaded)
+        XCTAssertTrue(engine.isLocalModelLoaded)
+
+        // 宽限期内重新唤起键盘：取消后台卸载，模型继续零耗时复用
+        coordinator.controllerDidDisappear(token, hostResigned: false)
+        coordinator.controllerWillAppear(token)
+        try await Task.sleep(for: .milliseconds(90))
+        await drain(queue)
+        XCTAssertTrue(engine.isLocalModelLoaded, "宽限期内重新出现应取消后台卸载")
+        XCTAssertEqual(releaseCount, 0)
+
+        // 宿主切后台且超时未再出现：主动卸掉模型、归还堆缓存，状态回 .idle 方便下次重载
+        coordinator.controllerDidDisappear(token, hostResigned: true)
+        try await Task.sleep(for: .milliseconds(100))
+        await drain(queue)
+        XCTAssertFalse(engine.isLocalModelLoaded)
+        XCTAssertEqual(loader.state, .idle, "后台主动卸载应回到 .idle 而不是 .unloadedForMemory")
+        XCTAssertGreaterThanOrEqual(releaseCount, 1)
+
+        // 下次唤起可正常重新加载
+        coordinator.controllerWillAppear(token)
+        loader.load(url, into: engine)
+        await waitForState(loader, .loaded)
+        XCTAssertTrue(engine.isLocalModelLoaded)
+    }
+
+    func testMemoryWarningFlushesCachesEvenWhenEngineNotCreated() async throws {
+        let queue = DispatchQueue(label: "test.local-model.mem-nil-engine")
+        var releaseCount = 0
+        let coordinator = LocalModelCoordinator(
+            queue: queue,
+            releaseCaches: { releaseCount += 1 }
+        )
+        let loader1 = LocalModelLoader(coordinator: coordinator, availableMemory: { .max })
+        let loader2 = LocalModelLoader(coordinator: coordinator, availableMemory: { .max })
+        let engine1 = RecordingEngine()
+        let url = try makeModelFile()
+
+        loader1.load(url, into: engine1)
+        await waitForState(loader1, .loaded)
+        XCTAssertTrue(engine1.isLocalModelLoaded)
+
+        // 控制器 2 尚未 attach 任何 engine 时收到内存警告，也必须清掉同进程模型并归还静态缓存
+        let ai2 = AIController(chooser: AppleModelChooser(model: FakeChoiceModel()), localLoader: loader2)
+        ai2.didReceiveMemoryWarning()
+        await drain(queue)
+        XCTAssertFalse(engine1.isLocalModelLoaded)
+        XCTAssertEqual(loader1.state, .unloadedForMemory)
+        XCTAssertGreaterThanOrEqual(releaseCount, 1)
+    }
+
+    func testDeferredColdLocalLoadPropagatesThroughAttachAndCancelsOnHide() async throws {
+        let queue = DispatchQueue(label: "test.local-model.defer-cold")
+        let loader = LocalModelLoader(queue: queue, availableMemory: { .max })
+        let url = try makeModelFile()
+        let ai = AIController(
+            chooser: AppleModelChooser(model: FakeChoiceModel()),
+            localLoader: loader,
+            localModelURL: { _ in url },
+            coldLocalLoadDelay: 0.08
+        )
+        let engine = RecordingEngine()
+        var settings = IMESettings()
+        settings.aiMode = .local
+        settings.localModelID = "qwen2.5-0.5b-q4km"
+
+        // 模拟冷启动顺序：先 apply(deferColdLocalLoad: true)，再 attach(engine)
+        ai.apply(settings, deferColdLocalLoad: true)
+        ai.attach(engine)
+        XCTAssertEqual(loader.state, .idle, "冷启动本地模型应等待键盘弹出动画完成后再加载")
+        XCTAssertEqual(ai.statusText, "正在加载本地模型…")
+        XCTAssertFalse(engine.isLocalModelLoaded)
+
+        // 延迟窗口内键盘收起：取消冷加载，不抢占内存
+        ai.keyboardWillHide()
+        try await Task.sleep(for: .milliseconds(120))
+        await drain(queue)
+        XCTAssertEqual(loader.state, .idle)
+        XCTAssertFalse(engine.isLocalModelLoaded)
+
+        // 再次出现并保持可见：延后窗口结束后正常加载完成
+        ai.apply(settings, deferColdLocalLoad: true)
+        XCTAssertEqual(loader.state, .idle)
+        await poll(loader, until: .loaded)
+        XCTAssertEqual(loader.state, .loaded)
+        XCTAssertTrue(engine.isLocalModelLoaded)
+    }
+
+    func testModelCatalogMinimumAvailableHeadroom() {
+        for model in ModelCatalog.all {
+            XCTAssertGreaterThanOrEqual(model.minimumAvailableMiB, 95)
+            XCTAssertGreaterThanOrEqual(model.minimumAvailableMiB, model.residentMiB + 25)
+        }
+    }
 }

@@ -237,6 +237,11 @@ final class RustEngine: IMEEngine {
     /// 键盘进程当前的内存占用（字节），也就是系统判定是否超限的那个数
     static var memoryFootprint: UInt64 { ime_phys_footprint() }
 
+    /// 清空 Rust 层进程级本地模型缓存并向系统归还空闲堆页（收到内存警告或键盘退入后台时调用）
+    static func releaseMemoryCaches() {
+        ime_release_memory_caches()
+    }
+
     // MARK: - 内部
 
     private func send(_ kind: Int) -> IMEResult {

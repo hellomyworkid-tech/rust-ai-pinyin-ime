@@ -119,6 +119,17 @@ final class QuickSettingsPanelView: UIView {
         syncLinkHosts()
     }
 
+    /// 内存警告释放隐藏面板时，完整解除 SwiftUI 子控制器绑定
+    func removeLinkHosts() {
+        for host in [openAppLinkHost, localModelLinkHost].compactMap({ $0 }) {
+            host.willMove(toParent: nil)
+            host.view.removeFromSuperview()
+            host.removeFromParent()
+        }
+        openAppLinkHost = nil
+        localModelLinkHost = nil
+    }
+
     func setLinksInteractive(_ interactive: Bool) {
         guard linksInteractive != interactive else { return }
         linksInteractive = interactive

@@ -280,20 +280,6 @@ ime_llm *ime_llm_load(const char *model_path, int32_t n_ctx, int32_t n_threads, 
         h->batch = llama_batch_init(h->n_batch, 0, 1);
         h->batch_ready = true;
         h->scratch.reserve((size_t)h->n_vocab);
-
-        // 在后台加载线程预先跑一次单 token 空载前向（不取 logits，不占输出缓冲），
-        // 提前触发各层 mmap 权重缺页与 ggml 线程池初始化，避免用户第一次敲字时现触发冷缺页抖动
-        {
-            llama_batch &wb = h->batch;
-            wb.n_tokens = 1;
-            wb.token[0] = 0;
-            wb.pos[0] = 0;
-            wb.n_seq_id[0] = 1;
-            wb.seq_id[0][0] = 0;
-            wb.logits[0] = false;
-            (void)llama_decode(h->ctx, wb);
-            llama_memory_clear(h->mem, false);
-        }
         return h;
     } catch (const std::exception &e) {
         write_err(err, err_cap, std::string("exception: ") + e.what());

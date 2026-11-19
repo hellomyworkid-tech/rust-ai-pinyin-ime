@@ -762,10 +762,16 @@ impl ImeEngine {
     /// 下次加载会复用，不会无限增长。权重本身是只读 mmap，从来不计入 phys_footprint
     pub fn unload_llm(&self) {
         let detached = self.detach_llm();
-        if ACTIVE_LLM_ENGINES.load(Ordering::Acquire) == 0 {
-            *lock_ignoring_poison(&SHARED_LLM) = None;
-        }
+        let dropped_shared = if ACTIVE_LLM_ENGINES.load(Ordering::Acquire) == 0 {
+            lock_ignoring_poison(&SHARED_LLM).take()
+        } else {
+            None
+        };
         drop(detached);
+        drop(dropped_shared);
+        if ACTIVE_LLM_ENGINES.load(Ordering::Acquire) == 0 {
+            release_allocator_pressure();
+        }
     }
 
     pub fn is_llm_loaded(&self) -> bool {
@@ -834,10 +840,32 @@ impl ImeEngine {
 
 impl Drop for ImeEngine {
     fn drop(&mut self) {
-        if lock_ignoring_poison(&self.llm).take().is_some() {
-            ACTIVE_LLM_ENGINES.fetch_sub(1, Ordering::AcqRel);
+        if self.llm_loaded.load(Ordering::Acquire) || lock_ignoring_poison(&self.llm).is_some() {
+            // 先把 session.ai 里的 scorer、self.llm 与 SHARED_LLM 全部释放，再触发 malloc_zone_pressure_relief，
+            // 防止 70-93 MiB 模型在控制器销毁后仍常驻进程触发 iOS Jetsam
+            self.unload_llm();
         }
     }
+}
+
+/// 主动向系统归还 libsystem_malloc 的空闲脏页（iOS 键盘扩展防 Jetsam 关键步骤）
+fn release_allocator_pressure() {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
+        }
+        unsafe {
+            let _ = malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
+    }
+}
+
+/// 立即清空进程级本地模型共享缓存并归还空闲堆页（即便当前控制器尚未持有引擎也能生效）
+pub fn release_memory_caches() {
+    let old = lock_ignoring_poison(&SHARED_LLM).take();
+    drop(old);
+    release_allocator_pressure();
 }
 
 /// 在后台以低优先级分批把词库文件的页读进内存，免得冷启动时与首帧渲染或模型加载争抢闪存带宽。
@@ -1398,6 +1426,11 @@ pub unsafe extern "C" fn ime_engine_llm_loaded(engine: *const ime_engine) -> boo
 #[no_mangle]
 pub extern "C" fn ime_phys_footprint() -> u64 {
     phys_footprint_bytes()
+}
+
+#[no_mangle]
+pub extern "C" fn ime_release_memory_caches() {
+    let _ = catch_unwind(AssertUnwindSafe(release_memory_caches));
 }
 
 /// # Safety
