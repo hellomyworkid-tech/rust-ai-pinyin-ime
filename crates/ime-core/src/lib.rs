@@ -18,6 +18,7 @@ pub use user_dict::{FileStamp, UserDict};
 use ime_lexicon::CompiledLexicon;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,13 +37,18 @@ struct UserDictPersistence {
     /// 本引擎上次读入或写出的那份词库文件的修改时间与长度（`None` = 当时文件不存在）。
     /// 写盘线程每写成功一次就更新；与文件现状不一致说明别的进程改过它
     stamp: Arc<Mutex<Option<FileStamp>>>,
+    /// 已投递给写盘线程但尚未落盘完成的 `Save` 消息数（为 0 时 `wait_for_writer` 无需唤醒后台线程）
+    pending_writes: Arc<AtomicUsize>,
     /// 内存里的词库有还没交给写盘线程的改动
     dirty: bool,
 }
 
 impl UserDictPersistence {
-    /// 等写盘线程处理完已经排队的快照（最多等 `timeout`）。线程已经退出时立刻返回
+    /// 等写盘线程处理完已经排队的快照（最多等 `timeout`）。没有在途写盘或线程已经退出时立刻返回
     fn wait_for_writer(&self, timeout: Duration) {
+        if self.pending_writes.load(Ordering::Acquire) == 0 {
+            return;
+        }
         let (ack_tx, ack_rx) = mpsc::channel();
         if self.tx.send(PersistMessage::Sync(ack_tx)).is_ok() {
             let _ = ack_rx.recv_timeout(timeout);
@@ -63,17 +69,22 @@ fn run_user_dict_writer(
     path: PathBuf,
     rx: mpsc::Receiver<PersistMessage>,
     stamp: Arc<Mutex<Option<FileStamp>>>,
+    pending_writes: Arc<AtomicUsize>,
 ) {
     // 以前写到一半被杀掉的进程留下的临时文件（留 10 分钟余量，不碰别的进程正在写的）
     user_dict::remove_stale_tmp_files(&path, Duration::from_secs(600));
     let mut failure_reported = false;
     while let Ok(first) = rx.recv() {
         let mut latest: Option<UserDict> = None;
+        let mut drained_saves = 0usize;
         let mut waiters: Vec<mpsc::Sender<()>> = Vec::new();
         let mut next = Some(first);
         while let Some(message) = next {
             match message {
-                PersistMessage::Save(snapshot) => latest = Some(snapshot),
+                PersistMessage::Save(snapshot) => {
+                    drained_saves += 1;
+                    latest = Some(snapshot);
+                }
                 PersistMessage::Sync(ack) => waiters.push(ack),
             }
             next = rx.try_recv().ok();
@@ -100,6 +111,9 @@ fn run_user_dict_writer(
                     }
                 }
             }
+        }
+        if drained_saves > 0 {
+            pending_writes.fetch_sub(drained_saves, Ordering::Release);
         }
         for ack in waiters {
             let _ = ack.send(());
@@ -201,14 +215,19 @@ impl ImeCoreEngine {
         };
         self.user_dict = dict;
         let stamp = Arc::new(Mutex::new(stamp));
+        let pending_writes = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::channel::<PersistMessage>();
         let writer_path = path.clone();
         let writer_stamp = Arc::clone(&stamp);
-        std::thread::spawn(move || run_user_dict_writer(writer_path, rx, writer_stamp));
+        let writer_pending = Arc::clone(&pending_writes);
+        std::thread::spawn(move || {
+            run_user_dict_writer(writer_path, rx, writer_stamp, writer_pending)
+        });
         self.persistence = Some(UserDictPersistence {
             path,
             tx,
             stamp,
+            pending_writes,
             // 读入时清掉了历史残片：把清理后的结果写回去（经写盘线程，不在调用线程上做 I/O）
             dirty: cleaned,
         });
@@ -234,9 +253,14 @@ impl ImeCoreEngine {
         persistence.dirty = false;
         // 快照是整个词库的克隆，序列化留给写盘线程。实测 20,000 条记录的词库克隆一次约 1.8 ms，
         // 在调用线程上直接序列化反而要约 3 ms
-        let _ = persistence
+        persistence.pending_writes.fetch_add(1, Ordering::AcqRel);
+        if persistence
             .tx
-            .send(PersistMessage::Save(self.user_dict.clone()));
+            .send(PersistMessage::Save(self.user_dict.clone()))
+            .is_err()
+        {
+            persistence.pending_writes.fetch_sub(1, Ordering::Release);
+        }
     }
 
     /// 词库文件若被别的进程改过（修改时间或长度与本引擎上次读入 / 写出时不同）就重新读入，

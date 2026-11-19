@@ -64,15 +64,41 @@ enum AppleModelStatus: Equatable {
 final class AppleModelMonitor: ObservableObject {
     @Published private(set) var status: AppleModelStatus
 
-    private let read: () -> AppleModelStatus
+    private let read: (() -> AppleModelStatus)?
+    private var refreshTask: Task<Void, Never>?
 
     init(read: @escaping () -> AppleModelStatus = AppleModelStatus.current) {
         self.read = read
         status = read()
     }
 
+    private init(initialStatus: AppleModelStatus) {
+        self.read = nil
+        self.status = initialStatus
+    }
+
+    /// 正式运行用：不在主线程同步访问 `SystemLanguageModel.default.availability`（守护进程休眠时会 XPC 卡住主线程 0.5–1.5s）
+    static func live() -> AppleModelMonitor {
+        let monitor = AppleModelMonitor(initialStatus: .unknown)
+        monitor.refresh()
+        return monitor
+    }
+
     func refresh() {
-        let next = read()
-        if next != status { status = next }
+        if let read {
+            let next = read()
+            if next != status { status = next }
+            return
+        }
+        refreshTask?.cancel()
+        refreshTask = Task { @MainActor [weak self] in
+            let next = await Task.detached(priority: .utility) {
+                AppleModelStatus.current()
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            if next != self.status {
+                self.status = next
+            }
+        }
     }
 }

@@ -177,10 +177,22 @@ final class KeyboardViewController: UIInputViewController {
         setSettingsExpanded(false)
         input.apply(settings)
         feedback.configure(settings: settings, hasFullAccess: hasFullAccess)
-        // viewWillAppear 阶段绝不做重 I/O、宿主 XPC（documentContextBeforeInput）或创建引擎/加载模型：
-        // 让 remoteKeyboardWindow 零阻塞完成弹出与握手，避免系统因首帧/握手超时把键盘切回自带输入法。
-        // 个人词库同步、未提交拼音恢复与引擎/AI 接线统一放到 viewDidAppear 之后的下一拍。
-        syncField(restorePending: false)
+        if input.engine != nil {
+            // 热呼出（日常 97%+ 场景，引擎已驻留）：
+            // `keyboardWillAppear` 无在途写盘时只是单次微秒级 `stat`，`PendingCompositionStore.take` 精确命中时也不走宿主 XPC，
+            // 直接在首帧恢复未完成拼音，既无候选栏延迟跳变，也杜绝滑入动画期间快速敲字漏同步词库的竞态
+            input.keyboardWillAppear()
+            syncField(restorePending: true)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.input.engine != nil else { return }
+                self.ensureEngineAndAI(deferColdLocalLoad: true)
+            }
+        } else {
+            // 冷呼出（进程刚拉起，input.engine == nil）：
+            // viewWillAppear 阶段零引擎创建、零宿主 XPC，保证 remoteKeyboardWindow 瞬间完成弹出与握手，
+            // 引擎构建与未提交拼音恢复统一放到 viewDidAppear 首帧显示完成之后
+            syncField(restorePending: false)
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -189,7 +201,7 @@ final class KeyboardViewController: UIInputViewController {
         LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
 
         if currentDocumentID != nil, currentDocumentID != documentID {
-            syncField(restorePending: false)
+            syncField(restorePending: input.engine != nil)
         }
         // 屏幕底边的系统手势会推迟最下一行键的 touchesBegan
         view.window?.gestureRecognizers?.forEach { $0.delaysTouchesBegan = false }
@@ -468,10 +480,22 @@ final class KeyboardViewController: UIInputViewController {
         } else {
             subtitle = "去 App 下载"
         }
+        // `.local` / `.off` 模式下尚未探测过 Apple 智能可用性时，绝不在主线程同步访问 `chooser.isAvailable`（会触发 0.6–1.5s 跨进程 XPC 阻塞），
+        // 先用缓存值绘制面板并在后台探测后自动刷新
+        let appleAvailable: Bool
+        if let known = ai.chooser.knownAvailability {
+            appleAvailable = known
+        } else {
+            appleAvailable = false
+            ai.probeAppleAvailabilityIfNeeded { [weak self] in
+                guard let self, self.rootView.isSettingsExpanded else { return }
+                self.render()
+            }
+        }
         return QuickSettingsPanelView.State(
             settings: settings,
             hasFullAccess: effectiveHasFullAccess,
-            appleAvailable: ai.chooser.isAvailable,
+            appleAvailable: appleAvailable,
             localModelSubtitle: subtitle,
             hasDownloadedLocalModel: active != nil,
             landscape: landscape
@@ -492,6 +516,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardView(_ keyboardView: KeyboardView, didTrigger action: KeyAction) {
         switch action {
         case .letter(let c):
+            restoreDeferredPendingCompositionIfNeeded()
             if isVisible { ai.restoreLocalModelIfYielded() }
             let letter = shift.isUppercase ? Character(c.uppercased()) : c
             shift.didTypeLetter()
@@ -598,7 +623,7 @@ extension KeyboardViewController: QuickSettingsPanelDelegate {
 
         case .apple:
             settings.aiMode = .apple
-            if !ai.chooser.isAvailable {
+            if ai.chooser.knownAvailability == false {
                 panelNotice = "当前设备或系统设置未启用 Apple 智能"
             }
 

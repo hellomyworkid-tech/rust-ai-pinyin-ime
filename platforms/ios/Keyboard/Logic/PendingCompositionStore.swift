@@ -74,9 +74,10 @@ final class PendingCompositionStore {
         persistToDisk()
     }
 
-    /// 取出并移除与当前输入框匹配的暂存快照；不存在或已过期时返回 nil
+    /// 取出并移除与当前输入框匹配的暂存快照；不存在或已过期时返回 nil。
+    /// `contextBefore` 按需惰性求值：精确命中同一 `documentIdentifier` 或全部过期时，不触发宿主 `documentContextBeforeInput` XPC
     func take(for documentID: UUID, traits: FieldTraits = FieldTraits(),
-              contextBefore: String? = nil, excludingFallbackID: UUID? = nil,
+              contextBefore: @autoclosure () -> String? = nil, excludingFallbackID: UUID? = nil,
               now: Date = Date()) -> String? {
         reloadFromDiskIfAvailable()
         let pruned = pruneExpired(now: now)
@@ -87,8 +88,15 @@ final class PendingCompositionStore {
             return exact.snapshot
         }
 
+        guard !entries.isEmpty else {
+            if pruned {
+                persistToDisk()
+            }
+            return nil
+        }
+
         let excludedKey = excludingFallbackID?.uuidString
-        let currentContext = contextBefore ?? ""
+        let currentContext = contextBefore() ?? ""
         let fallbackKey = entries
             .filter { key, entry in
                 guard key != excludedKey else { return false }

@@ -762,14 +762,31 @@ impl ImeEngine {
     /// 下次加载会复用，不会无限增长。权重本身是只读 mmap，从来不计入 phys_footprint
     pub fn unload_llm(&self) {
         let detached = self.detach_llm();
-        let dropped_shared = if ACTIVE_LLM_ENGINES.load(Ordering::Acquire) == 0 {
+        let last_active = ACTIVE_LLM_ENGINES.load(Ordering::Acquire) == 0;
+        let dropped_shared = if last_active {
             lock_ignoring_poison(&SHARED_LLM).take()
         } else {
             None
         };
+        if last_active {
+            // 若后台打分线程此刻还握着一份 Arc 正在跑最后一块前缀（最多 ≤16 token），先取消并短暂等待其放手，
+            // 保证 llama_free 在 release_allocator_pressure 之前真正执行完毕
+            if let Some(scorer) = detached
+                .as_ref()
+                .or_else(|| dropped_shared.as_ref().map(|c| &c.scorer))
+            {
+                scorer.cancel();
+                let owned_refs =
+                    usize::from(detached.is_some()) + usize::from(dropped_shared.is_some());
+                let deadline = Instant::now() + Duration::from_millis(200);
+                while Arc::strong_count(scorer) > owned_refs && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
         drop(detached);
         drop(dropped_shared);
-        if ACTIVE_LLM_ENGINES.load(Ordering::Acquire) == 0 {
+        if last_active {
             release_allocator_pressure();
         }
     }
@@ -861,10 +878,20 @@ fn release_allocator_pressure() {
     }
 }
 
-/// 立即清空进程级本地模型共享缓存并归还空闲堆页（即便当前控制器尚未持有引擎也能生效）
+/// 立即清理空闲缓存并向系统归还空闲堆页：
+/// - 若当前进程内已无任何引擎挂载本地模型（`ACTIVE_LLM_ENGINES == 0`），一并清空 `SHARED_LLM` 并等待在途打分放手；
+/// - 若仍有引擎热驻留本地模型，则保留 `SHARED_LLM` 供亚毫秒复用，仅触发 `malloc_zone_pressure_relief` 归还空闲脏页。
 pub fn release_memory_caches() {
-    let old = lock_ignoring_poison(&SHARED_LLM).take();
-    drop(old);
+    if ACTIVE_LLM_ENGINES.load(Ordering::Acquire) == 0 {
+        if let Some(cached) = lock_ignoring_poison(&SHARED_LLM).take() {
+            cached.scorer.cancel();
+            let deadline = Instant::now() + Duration::from_millis(200);
+            while Arc::strong_count(&cached.scorer) > 1 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            drop(cached);
+        }
+    }
     release_allocator_pressure();
 }
 

@@ -101,7 +101,7 @@ final class AppModel: ObservableObject {
         #endif
         let model = AppModel(settings: SettingsStore(), downloads: downloads,
                              lexicon: lexiconDownloads(release, network: network, freeSpace: freeSpace),
-                             apple: AppleModelMonitor(), keyboard: KeyboardInstallMonitor(), network: network,
+                             apple: .live(), keyboard: KeyboardInstallMonitor(), network: network,
                              skipsLexiconAutoDownload: skipsLexicon)
         // 自动下载词库由 AIPinyinApp 的 .task 和回到前台时触发（ensureLexicon 会等传输层查完后台任务）
         return model

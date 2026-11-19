@@ -45,12 +45,23 @@ final class AIController {
 
     init(chooser: AppleModelChooser, localLoader: LocalModelLoader = LocalModelLoader(),
          localModelURL: @escaping (IMESettings) -> URL? = { ModelCatalog.find($0.localModelID)?.localURL },
-         coldLocalLoadDelay: TimeInterval = 0.30) {
+         coldLocalLoadDelay: TimeInterval = 0.12) {
         self.chooser = chooser
         self.localLoader = localLoader
         self.localModelURL = localModelURL
         self.coldLocalLoadDelay = coldLocalLoadDelay
         localLoader.onStateChange = { [weak self] _ in self?.statusChanged() }
+    }
+
+    /// 当用户在 `.local` / `.off` 模式下打开快捷设置面板时，若尚未探测过 Apple 智能可用性，
+    /// 在后台异步探测并在完成后通知刷新，绝不在主线程同步读取 `isAvailable`
+    func probeAppleAvailabilityIfNeeded(onUpdate: (() -> Void)? = nil) {
+        guard chooser.knownAvailability == nil else { return }
+        let chooser = self.chooser
+        Task { @MainActor in
+            _ = await chooser.refreshAvailability()
+            onUpdate?()
+        }
     }
 
     /// 根据给定的可用性结果定下 Apple 模式的路线

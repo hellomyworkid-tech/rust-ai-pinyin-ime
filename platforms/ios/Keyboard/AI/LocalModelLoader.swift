@@ -12,9 +12,15 @@ import os
 /// - 新控制器请求同一个模型时，先复用进程内已加载的模型实例（零额外内存、毫秒内完成），再从旧控制器卸下引用；
 /// - 新控制器请求别的模型、关闭本地模型或收到内存警告时，先把旧控制器的模型一并卸掉，再测内存或加载。
 final class LocalModelCoordinator {
+    /// 键盘全部隐藏或切走宿主时，若进程剩余可用内存已低于该水位（48 MiB），立即主动卸载本地模型腾出安全余量；
+    /// 余量充足（如 Qwen2.5 常驻后仍剩 ~108 MiB）则保持 `SHARED_LLM` 热驻留（仅归还空闲堆页），
+    /// 既避免下次呼出时重新冷加载，也根绝 `asyncAfter` 跨进程挂起后在下次唤醒瞬间误卸模型的竞态
+    static let defaultLowHeadroomUnloadBytes: UInt64 = 48 * 1024 * 1024
+
     static let shared: LocalModelCoordinator = {
         let coordinator = LocalModelCoordinator(
-            queue: DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .utility),
+            queue: DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .userInitiated),
+            availableMemory: LocalModelLoader.systemAvailableMemory,
             releaseCaches: { RustEngine.releaseMemoryCaches() }
         )
         coordinator.installMemoryPressureMonitor()
@@ -22,14 +28,11 @@ final class LocalModelCoordinator {
     }()
 
     let queue: DispatchQueue
+    private let availableMemory: () -> UInt64
+    private let lowHeadroomUnloadBytes: UInt64
     private let releaseCaches: () -> Void
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var visibleControllers: Set<ObjectIdentifier> = []
-    private var backgroundEvictWorkItem: DispatchWorkItem?
-    /// 键盘全部隐藏后延迟释放本地模型的宽限期（秒）：
-    /// 同应用内短时间收起再唤起（≤2s）零耗时复用；超过宽限或切换宿主 App（0.4s）即在系统挂起进程前主动卸载，
-    /// 把挂起态内存从 70-90 MiB 压回 ~18 MiB，杜绝 iOS Jetsam 后台强杀导致下次刚呼出键盘就被切回自带输入法
-    private let backgroundUnloadDelay: TimeInterval
 
     private final class Entry {
         weak var loader: LocalModelLoader?
@@ -43,16 +46,17 @@ final class LocalModelCoordinator {
 
     private var entries: [Entry] = []
 
-    init(queue: DispatchQueue = DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .utility),
-         backgroundUnloadDelay: TimeInterval = 2.0,
+    init(queue: DispatchQueue = DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .userInitiated),
+         availableMemory: @escaping () -> UInt64 = { .max },
+         lowHeadroomUnloadBytes: UInt64 = LocalModelCoordinator.defaultLowHeadroomUnloadBytes,
          releaseCaches: @escaping () -> Void = {}) {
         self.queue = queue
-        self.backgroundUnloadDelay = backgroundUnloadDelay
+        self.availableMemory = availableMemory
+        self.lowHeadroomUnloadBytes = lowHeadroomUnloadBytes
         self.releaseCaches = releaseCaches
     }
 
     deinit {
-        backgroundEvictWorkItem?.cancel()
         memoryPressureSource?.cancel()
     }
 
@@ -65,36 +69,27 @@ final class LocalModelCoordinator {
         memoryPressureSource = source
     }
 
-    /// 某个键盘控制器即将出现或恢复显示：取消待执行的后台卸载
+    /// 某个键盘控制器即将出现或恢复显示
     func controllerWillAppear(_ id: ObjectIdentifier) {
         visibleControllers.insert(id)
-        backgroundEvictWorkItem?.cancel()
-        backgroundEvictWorkItem = nil
     }
 
-    /// 某个键盘控制器消失或宿主切后台：若进程内已无可见键盘，安排在系统冻结前主动卸掉本地模型并归还空闲堆页
+    /// 某个键盘控制器消失或宿主切后台：
+    /// - 不使用 `asyncAfter` 延迟定时器（iOS 会在 100–300ms 内冻结扩展进程，延迟任务会拖到下次呼出键盘唤醒瞬间才执行，反而误杀热驻留模型）；
+    /// - 当进程内已无可见键盘时，立即检查当前真实剩余内存：低于安全水位（<48 MiB）才主动卸载模型，余量充裕时保留模型热驻留并仅回收空闲堆页
     func controllerDidDisappear(_ id: ObjectIdentifier, hostResigned: Bool = false) {
+        _ = hostResigned
         visibleControllers.remove(id)
         guard visibleControllers.isEmpty else { return }
-        scheduleBackgroundEviction(after: hostResigned ? min(0.4, backgroundUnloadDelay) : backgroundUnloadDelay)
-    }
-
-    private func scheduleBackgroundEviction(after delay: TimeInterval) {
-        backgroundEvictWorkItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self, self.visibleControllers.isEmpty else { return }
-            self.backgroundEvictWorkItem = nil
-            self.evictAllForBackground()
-        }
-        backgroundEvictWorkItem = item
-        if delay <= 0 {
-            item.perform()
+        if availableMemory() < lowHeadroomUnloadBytes {
+            evictAllForBackground()
         } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            let release = releaseCaches
+            queue.async { release() }
         }
     }
 
-    /// 键盘退入后台/闲置时主动卸载所有本地模型：状态回到 .idle（下次唤起时可正常重新加载）
+    /// 内存余量偏紧退入后台时主动卸载所有本地模型：状态回到 .idle（下次唤起时可正常重新加载）
     func evictAllForBackground() {
         entries.removeAll { $0.loader == nil && $0.engine == nil }
         var engines: [IMEEngine] = []
@@ -279,7 +274,7 @@ final class LocalModelLoader {
          availableMemory: @escaping () -> UInt64 = LocalModelLoader.systemAvailableMemory,
          fileExists: @escaping (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) {
         self.coordinator = coordinator
-        self.queue = queue ?? coordinator?.queue ?? DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .utility)
+        self.queue = queue ?? coordinator?.queue ?? DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .userInitiated)
         self.availableMemory = availableMemory
         self.fileExists = fileExists
     }
