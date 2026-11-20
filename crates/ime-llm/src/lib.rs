@@ -119,7 +119,7 @@ pub mod backend;
 mod engine;
 #[doc(hidden)]
 pub mod fake;
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "llama-dlopen"))]
 mod llama;
 mod scorer;
 pub mod text;
@@ -155,11 +155,11 @@ pub enum LlmError {
 /// 当前进程的 `phys_footprint`（字节），即 iOS 对键盘扩展计内存上限时使用的口径。
 /// 仅在启用 `llama` 特性的 Apple 平台上可用，其它情况返回 `None`。
 pub fn phys_footprint_bytes() -> Option<u64> {
-    #[cfg(feature = "llama")]
+    #[cfg(any(feature = "llama", feature = "llama-dlopen"))]
     {
         llama::phys_footprint_bytes()
     }
-    #[cfg(not(feature = "llama"))]
+    #[cfg(not(any(feature = "llama", feature = "llama-dlopen")))]
     {
         None
     }

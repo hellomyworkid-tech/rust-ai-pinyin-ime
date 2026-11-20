@@ -1,4 +1,3 @@
-import SwiftUI
 import UIKit
 
 enum QuickSettingsToggle: CaseIterable {
@@ -46,8 +45,8 @@ final class QuickSettingsPanelView: UIView {
     private static let settingsURL = URL(string: "aipinyin://settings")!
     private static let aiURL = URL(string: "aipinyin://ai")!
 
-    private var openAppLinkHost: UIHostingController<HostAppLinkSurface>?
-    private var localModelLinkHost: UIHostingController<HostAppLinkSurface>?
+    private var openAppLinkHost: AuxLinkHostControlling?
+    private var localModelLinkHost: AuxLinkHostControlling?
     private var linksInteractive = false
 
     private var state = State()
@@ -96,24 +95,37 @@ final class QuickSettingsPanelView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// 挂载原生 SwiftUI `Link` 子控制器（仅在开启完全访问时显示在对应按钮之上，使用公开扩展可用 API 跳回宿主 App）
+    /// 按需从 `AIPinyinAux.framework` 挂载原生 SwiftUI `Link` 子控制器：
+    /// 仅在用户主动点开设置面板时才触发加载 `SwiftUI.framework`，正常呼出键盘全程零 SwiftUI 映射与初始化开销。
     func installLinkHosts(in parent: UIViewController) {
-        guard openAppLinkHost == nil else { return }
+        guard openAppLinkHost == nil, let bridge = AuxBridgeLoader.shared() else { return }
 
-        let openHost = UIHostingController(rootView: makeOpenAppLinkSurface(for: state))
-        openHost.view.backgroundColor = .clear
-        openHost.safeAreaRegions = []
-        parent.addChild(openHost)
-        addSubview(openHost.view)
-        openHost.didMove(toParent: parent)
+        let openParams = makeOpenAppLinkParams(for: state)
+        let openHost = bridge.makeLinkHost(
+            destination: Self.settingsURL,
+            isInteractive: linksInteractive,
+            accessibilityLabel: openParams.label,
+            accessibilityValue: openParams.value,
+            onPressChanged: openParams.onPressChanged
+        )
+        let openVC = openHost.viewController
+        parent.addChild(openVC)
+        addSubview(openVC.view)
+        openVC.didMove(toParent: parent)
         openAppLinkHost = openHost
 
-        let localHost = UIHostingController(rootView: makeLocalModelLinkSurface(for: state))
-        localHost.view.backgroundColor = .clear
-        localHost.safeAreaRegions = []
-        parent.addChild(localHost)
-        addSubview(localHost.view)
-        localHost.didMove(toParent: parent)
+        let localParams = makeLocalModelLinkParams(for: state)
+        let localHost = bridge.makeLinkHost(
+            destination: Self.aiURL,
+            isInteractive: linksInteractive,
+            accessibilityLabel: localParams.label,
+            accessibilityValue: localParams.value,
+            onPressChanged: localParams.onPressChanged
+        )
+        let localVC = localHost.viewController
+        parent.addChild(localVC)
+        addSubview(localVC.view)
+        localVC.didMove(toParent: parent)
         localModelLinkHost = localHost
 
         syncLinkHosts()
@@ -122,9 +134,10 @@ final class QuickSettingsPanelView: UIView {
     /// 内存警告释放隐藏面板时，完整解除 SwiftUI 子控制器绑定
     func removeLinkHosts() {
         for host in [openAppLinkHost, localModelLinkHost].compactMap({ $0 }) {
-            host.willMove(toParent: nil)
-            host.view.removeFromSuperview()
-            host.removeFromParent()
+            let vc = host.viewController
+            vc.willMove(toParent: nil)
+            vc.view.removeFromSuperview()
+            vc.removeFromParent()
         }
         openAppLinkHost = nil
         localModelLinkHost = nil
@@ -238,25 +251,37 @@ final class QuickSettingsPanelView: UIView {
         openAppButton.isAccessibilityElement = !canOpenSettings
         if !canOpenSettings { openAppButton.isLinkHighlighted = false }
         if let openHost = openAppLinkHost {
-            openHost.view.isHidden = !canOpenSettings
-            openHost.rootView = makeOpenAppLinkSurface(for: state)
+            openHost.viewController.view.isHidden = !canOpenSettings
+            let p = makeOpenAppLinkParams(for: state)
+            openHost.update(
+                destination: Self.settingsURL,
+                isInteractive: linksInteractive,
+                accessibilityLabel: p.label,
+                accessibilityValue: p.value,
+                onPressChanged: p.onPressChanged
+            )
         }
 
         localCard.isAccessibilityElement = !canOpenAIDownload
         if !canOpenAIDownload { localCard.isLinkHighlighted = false }
         if let localHost = localModelLinkHost {
-            localHost.view.isHidden = !canOpenAIDownload
-            localHost.rootView = makeLocalModelLinkSurface(for: state)
+            localHost.viewController.view.isHidden = !canOpenAIDownload
+            let p = makeLocalModelLinkParams(for: state)
+            localHost.update(
+                destination: Self.aiURL,
+                isInteractive: linksInteractive,
+                accessibilityLabel: p.label,
+                accessibilityValue: p.value,
+                onPressChanged: p.onPressChanged
+            )
         }
     }
 
-    private func makeOpenAppLinkSurface(for state: State) -> HostAppLinkSurface {
+    private func makeOpenAppLinkParams(for state: State) -> (label: String, value: String, onPressChanged: (Bool) -> Void) {
         let subtitle = state.hasFullAccess ? "模糊音 · 词库与模型下载" : "模糊音 · 模型下载（需完全访问跳转）"
-        return HostAppLinkSurface(
-            destination: Self.settingsURL,
-            isInteractive: linksInteractive,
-            accessibilityLabel: "打开 AI 拼音设置",
-            accessibilityValue: subtitle,
+        return (
+            label: "打开 AI 拼音设置",
+            value: subtitle,
             onPressChanged: { [weak self] pressed in
                 guard let self else { return }
                 self.openAppButton.isLinkHighlighted = pressed
@@ -267,12 +292,10 @@ final class QuickSettingsPanelView: UIView {
         )
     }
 
-    private func makeLocalModelLinkSurface(for state: State) -> HostAppLinkSurface {
-        HostAppLinkSurface(
-            destination: Self.aiURL,
-            isInteractive: linksInteractive,
-            accessibilityLabel: "本地模型",
-            accessibilityValue: state.localModelSubtitle,
+    private func makeLocalModelLinkParams(for state: State) -> (label: String, value: String, onPressChanged: (Bool) -> Void) {
+        (
+            label: "本地模型",
+            value: state.localModelSubtitle,
             onPressChanged: { [weak self] pressed in
                 guard let self else { return }
                 self.localCard.isLinkHighlighted = pressed
@@ -307,7 +330,7 @@ final class QuickSettingsPanelView: UIView {
             let w = idx == modeCards.count - 1 ? max(0, padX + contentWidth - x) : modeWidth
             card.frame = CGRect(x: x, y: topPad, width: w, height: aiHeight)
         }
-        localModelLinkHost?.view.frame = localCard.frame
+        localModelLinkHost?.viewController.view.frame = localCard.frame
 
         // 第二行：4 个常用开关磁贴
         let tiles = [emojiTile, typoTile, soundTile, hapticsTile]
@@ -322,7 +345,7 @@ final class QuickSettingsPanelView: UIView {
         // 第三行：打开宿主 App 入口
         let openY = tileY + toggleHeight + rowGap
         openAppButton.frame = CGRect(x: padX, y: openY, width: contentWidth, height: openHeight)
-        openAppLinkHost?.view.frame = openAppButton.frame
+        openAppLinkHost?.viewController.view.frame = openAppButton.frame
     }
 }
 
@@ -591,39 +614,5 @@ private final class OpenAppRowButton: UIControl {
         let subX = titleLabel.frame.maxX + 6
         let subW = max(0, trailingIcon.frame.minX - 6 - subX)
         subtitleLabel.frame = CGRect(x: subX, y: 0, width: subW, height: bounds.height)
-    }
-}
-
-/// 键盘扩展内公开可用的原生 SwiftUI `Link` 覆盖层：只允许打开本安装包内的 `aipinyin://` 页面。
-private struct HostAppLinkSurface: View {
-    var destination: URL
-    var isInteractive: Bool
-    var accessibilityLabel: String
-    var accessibilityValue: String
-    var onPressChanged: (Bool) -> Void
-
-    var body: some View {
-        Link(destination: destination) {
-            Color.white.opacity(0.001)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(HostAppLinkPressStyle(onPressChanged: onPressChanged))
-        .disabled(!isInteractive)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityValue(accessibilityValue)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityRemoveTraits(.isLink)
-    }
-}
-
-private struct HostAppLinkPressStyle: ButtonStyle {
-    var onPressChanged: (Bool) -> Void
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .onChange(of: configuration.isPressed) { _, isPressed in
-                onPressChanged(isPressed)
-            }
     }
 }

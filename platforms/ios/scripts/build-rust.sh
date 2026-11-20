@@ -22,7 +22,7 @@ LEXICON="${IME_LEXICON:-$ROOT/data/compiled/merged_lexicon.bin}"
 # cargo 会把新库写到别处，打包的却是这里的旧库，所以固定下来
 export CARGO_TARGET_DIR="$ROOT/target"
 
-FEATURES=(--features llama)
+FEATURES=(--features llama-dlopen)
 for arg in "$@"; do
     case "$arg" in
         --no-llama) FEATURES=() ;;
@@ -34,10 +34,13 @@ if (( ${#FEATURES} )); then
     for slice in ios-arm64 ios-arm64-simulator; do
         if [[ ! -f "$ROOT/third_party/llama/$slice/lib/libime_llama.a" ]]; then
             echo "缺少 third_party/llama/$slice/lib/libime_llama.a。" >&2
-            echo "先在仓库根目录运行 scripts/build_llama.sh ios ios-sim，或加 --no-llama。" >&2
+            echo "先在仓库根目录运行 scripts/build_llama.sh ios ios-sim xcframework，或加 --no-llama。" >&2
             exit 1
         fi
     done
+    if [[ ! -f "$ROOT/third_party/llama/ImeLlama.xcframework/Info.plist" ]]; then
+        bash "$ROOT/scripts/build_llama.sh" xcframework
+    fi
 fi
 
 echo "== 1/4 校验词库 $LEXICON"

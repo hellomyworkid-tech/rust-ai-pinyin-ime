@@ -2,6 +2,9 @@ import Darwin
 import Foundation
 import os
 
+@_silgen_name("aipinyin_dyld_init_epoch_us")
+private func aipinyin_dyld_init_epoch_us() -> Int64
+
 /// 键盘生命周期与本地模型的诊断记录：
 /// 1. 写进系统统一日志（subsystem `com.zengji.aipinyin.keyboard`，category `lifecycle`）；
 /// 2. 异步追加到键盘容器内的滚动诊断文件 `Library/Application Support/AIPinyin/trace.log`（超过 64KB 自动轮转为 `trace.prev.log`），
@@ -20,8 +23,14 @@ enum KeyboardTrace {
 
     /// 进程内第一次碰到 `KeyboardTrace` 的单调时钟时刻
     private static let firstTouchUptime = now
-    /// 内核 `p_starttime` 记录的进程真实诞生时刻（含 dyld、静态构造与 `_NSExtensionMain` 耗时）
+    /// 内核 `p_starttime` 记录的进程真实诞生时刻（含 amfid / dyld / `_NSExtensionMain` 耗时）
     private static let kernelBirthDate: Date? = queryKernelProcessBirthDate()
+    /// C `__attribute__((constructor))` 在 `dyld` 完成镜像加载时记录的时刻（用来精准切分 pre-main 与 XPC 握手耗时）
+    private static let dyldInitDate: Date? = {
+        let us = aipinyin_dyld_init_epoch_us()
+        guard us > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(us) / 1_000_000.0)
+    }()
     private static let pid = ProcessInfo.processInfo.processIdentifier
     private static var controllersCreated = 0
 
@@ -36,6 +45,12 @@ enum KeyboardTrace {
             return max(0, Int((Date().timeIntervalSince(birth) * 1000).rounded()))
         }
         return ms(since: firstTouchUptime)
+    }
+
+    /// 内核 `p_starttime` 到 C constructor（`dyld` 完成加载）的耗时（毫秒）
+    static var preMainMs: Int? {
+        guard let birth = kernelBirthDate, let dyld = dyldInitDate else { return nil }
+        return max(0, Int((dyld.timeIntervalSince(birth) * 1000).rounded()))
     }
 
     static func event(_ name: String, _ detail: @autoclosure () -> String = "") {
@@ -58,8 +73,16 @@ enum KeyboardTrace {
     static func controllerCreated(phase: String = "loadView") {
         _ = firstTouchUptime
         controllersCreated += 1
+        let spawnMs = sinceProcessSpawnMs
+        let breakdown: String
+        if let pre = preMainMs, let dyld = dyldInitDate {
+            let extMs = max(0, Int((Date().timeIntervalSince(dyld) * 1000).rounded()))
+            breakdown = "sinceSpawn=\(spawnMs)ms preMain=\(pre)ms extMain=\(extMs)ms"
+        } else {
+            breakdown = "sinceSpawn=\(spawnMs)ms"
+        }
         event("controller.created",
-              "n=\(controllersCreated) phase=\(phase) sinceSpawn=\(sinceProcessSpawnMs)ms swiftAge=\(ms(since: firstTouchUptime))ms")
+              "n=\(controllersCreated) phase=\(phase) \(breakdown) swiftAge=\(ms(since: firstTouchUptime))ms")
     }
 
     /// 毫秒级耗时

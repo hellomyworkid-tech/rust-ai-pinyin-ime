@@ -28,52 +28,444 @@ struct RawHandle {
 
 type AbortFn = unsafe extern "C" fn(user: *mut c_void) -> bool;
 
-extern "C" {
-    fn ime_llm_abi_version() -> i32;
-    fn ime_llm_load(
-        model_path: *const c_char,
-        n_ctx: i32,
-        n_threads: i32,
-        n_gpu_layers: i32,
-        n_seq_max: i32,
-        n_outputs_max: i32,
-        flags: u32,
-        err: *mut c_char,
-        err_cap: i32,
-    ) -> *mut RawHandle;
-    #[cfg(test)]
-    fn ime_llm_resolve_limits(n_ctx: i32, n_seq_max: *mut i32, n_outputs_max: *mut i32) -> i32;
-    fn ime_llm_free(h: *mut RawHandle);
-    fn ime_llm_release_context(h: *mut RawHandle);
-    fn ime_llm_restore_context(h: *mut RawHandle, err: *mut c_char, err_cap: i32) -> i32;
-    #[cfg(test)]
-    fn ime_llm_context_released(h: *const RawHandle) -> i32;
-    fn ime_llm_n_ctx(h: *const RawHandle) -> i32;
-    fn ime_llm_n_batch(h: *const RawHandle) -> i32;
-    fn ime_llm_n_seq_max(h: *const RawHandle) -> i32;
-    fn ime_llm_n_outputs_max(h: *const RawHandle) -> i32;
-    fn ime_llm_set_abort_callback(h: *mut RawHandle, cb: Option<AbortFn>, user: *mut c_void);
-    fn ime_llm_tokenize(h: *const RawHandle, text: *const c_char, text_len: i32, out: *mut i32, cap: i32) -> i32;
-    fn ime_llm_kv_clear(h: *mut RawHandle);
-    fn ime_llm_kv_seq_rm(h: *mut RawHandle, seq: i32, p0: i32, p1: i32) -> i32;
-    fn ime_llm_kv_seq_cp(h: *mut RawHandle, src: i32, dst: i32, p0: i32, p1: i32);
-    fn ime_llm_decode(
-        h: *mut RawHandle,
-        tokens: *const i32,
-        pos: *const i32,
-        seq: *const i32,
-        want: *const u8,
-        n: i32,
-    ) -> i32;
-    fn ime_llm_logprobs(h: *mut RawHandle, batch_index: i32, targets: *const i32, n_targets: i32, out: *mut f64)
-        -> i32;
-    fn ime_llm_phys_footprint() -> u64;
+#[cfg(not(feature = "llama-dlopen"))]
+mod sys {
+    use super::{c_char, c_void, AbortFn, RawHandle};
+
+    extern "C" {
+        fn ime_llm_abi_version() -> i32;
+        fn ime_llm_load(
+            model_path: *const c_char,
+            n_ctx: i32,
+            n_threads: i32,
+            n_gpu_layers: i32,
+            n_seq_max: i32,
+            n_outputs_max: i32,
+            flags: u32,
+            err: *mut c_char,
+            err_cap: i32,
+        ) -> *mut RawHandle;
+        #[cfg(test)]
+        pub(super) fn ime_llm_resolve_limits(n_ctx: i32, n_seq_max: *mut i32, n_outputs_max: *mut i32) -> i32;
+        fn ime_llm_free(h: *mut RawHandle);
+        fn ime_llm_release_context(h: *mut RawHandle);
+        fn ime_llm_restore_context(h: *mut RawHandle, err: *mut c_char, err_cap: i32) -> i32;
+        #[cfg(test)]
+        pub(super) fn ime_llm_context_released(h: *const RawHandle) -> i32;
+        fn ime_llm_n_ctx(h: *const RawHandle) -> i32;
+        fn ime_llm_n_batch(h: *const RawHandle) -> i32;
+        fn ime_llm_n_seq_max(h: *const RawHandle) -> i32;
+        fn ime_llm_n_outputs_max(h: *const RawHandle) -> i32;
+        fn ime_llm_set_abort_callback(h: *mut RawHandle, cb: Option<AbortFn>, user: *mut c_void);
+        fn ime_llm_tokenize(h: *const RawHandle, text: *const c_char, text_len: i32, out: *mut i32, cap: i32) -> i32;
+        fn ime_llm_kv_clear(h: *mut RawHandle);
+        fn ime_llm_kv_seq_rm(h: *mut RawHandle, seq: i32, p0: i32, p1: i32) -> i32;
+        fn ime_llm_kv_seq_cp(h: *mut RawHandle, src: i32, dst: i32, p0: i32, p1: i32);
+        fn ime_llm_decode(
+            h: *mut RawHandle,
+            tokens: *const i32,
+            pos: *const i32,
+            seq: *const i32,
+            want: *const u8,
+            n: i32,
+        ) -> i32;
+        fn ime_llm_logprobs(h: *mut RawHandle, batch_index: i32, targets: *const i32, n_targets: i32, out: *mut f64)
+            -> i32;
+        fn ime_llm_phys_footprint() -> u64;
+    }
+
+    pub(super) struct ShimApi;
+
+    static INSTANCE: ShimApi = ShimApi;
+
+    impl ShimApi {
+        pub(super) fn get() -> Result<&'static Self, String> {
+            Ok(&INSTANCE)
+        }
+
+        pub(super) unsafe fn abi_version(&self) -> i32 {
+            unsafe { ime_llm_abi_version() }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub(super) unsafe fn load(
+            &self,
+            model_path: *const c_char,
+            n_ctx: i32,
+            n_threads: i32,
+            n_gpu_layers: i32,
+            n_seq_max: i32,
+            n_outputs_max: i32,
+            flags: u32,
+            err: *mut c_char,
+            err_cap: i32,
+        ) -> *mut RawHandle {
+            unsafe {
+                ime_llm_load(
+                    model_path,
+                    n_ctx,
+                    n_threads,
+                    n_gpu_layers,
+                    n_seq_max,
+                    n_outputs_max,
+                    flags,
+                    err,
+                    err_cap,
+                )
+            }
+        }
+
+        pub(super) unsafe fn free(&self, h: *mut RawHandle) {
+            unsafe { ime_llm_free(h) }
+        }
+
+        pub(super) unsafe fn release_context(&self, h: *mut RawHandle) {
+            unsafe { ime_llm_release_context(h) }
+        }
+
+        pub(super) unsafe fn restore_context(&self, h: *mut RawHandle, err: *mut c_char, err_cap: i32) -> i32 {
+            unsafe { ime_llm_restore_context(h, err, err_cap) }
+        }
+
+        pub(super) unsafe fn n_ctx(&self, h: *const RawHandle) -> i32 {
+            unsafe { ime_llm_n_ctx(h) }
+        }
+
+        pub(super) unsafe fn n_batch(&self, h: *const RawHandle) -> i32 {
+            unsafe { ime_llm_n_batch(h) }
+        }
+
+        pub(super) unsafe fn n_seq_max(&self, h: *const RawHandle) -> i32 {
+            unsafe { ime_llm_n_seq_max(h) }
+        }
+
+        pub(super) unsafe fn n_outputs_max(&self, h: *const RawHandle) -> i32 {
+            unsafe { ime_llm_n_outputs_max(h) }
+        }
+
+        pub(super) unsafe fn set_abort_callback(&self, h: *mut RawHandle, cb: Option<AbortFn>, user: *mut c_void) {
+            unsafe { ime_llm_set_abort_callback(h, cb, user) }
+        }
+
+        pub(super) unsafe fn tokenize(
+            &self,
+            h: *const RawHandle,
+            text: *const c_char,
+            text_len: i32,
+            out: *mut i32,
+            cap: i32,
+        ) -> i32 {
+            unsafe { ime_llm_tokenize(h, text, text_len, out, cap) }
+        }
+
+        pub(super) unsafe fn kv_clear(&self, h: *mut RawHandle) {
+            unsafe { ime_llm_kv_clear(h) }
+        }
+
+        pub(super) unsafe fn kv_seq_rm(&self, h: *mut RawHandle, seq: i32, p0: i32, p1: i32) -> i32 {
+            unsafe { ime_llm_kv_seq_rm(h, seq, p0, p1) }
+        }
+
+        pub(super) unsafe fn kv_seq_cp(&self, h: *mut RawHandle, src: i32, dst: i32, p0: i32, p1: i32) {
+            unsafe { ime_llm_kv_seq_cp(h, src, dst, p0, p1) }
+        }
+
+        pub(super) unsafe fn decode(
+            &self,
+            h: *mut RawHandle,
+            tokens: *const i32,
+            pos: *const i32,
+            seq: *const i32,
+            want: *const u8,
+            n: i32,
+        ) -> i32 {
+            unsafe { ime_llm_decode(h, tokens, pos, seq, want, n) }
+        }
+
+        pub(super) unsafe fn logprobs(
+            &self,
+            h: *mut RawHandle,
+            batch_index: i32,
+            targets: *const i32,
+            n_targets: i32,
+            out: *mut f64,
+        ) -> i32 {
+            unsafe { ime_llm_logprobs(h, batch_index, targets, n_targets, out) }
+        }
+    }
+
+    pub(super) fn phys_footprint_bytes() -> Option<u64> {
+        // SAFETY: 无参数、无前置条件的查询函数
+        let bytes = unsafe { ime_llm_phys_footprint() };
+        (bytes > 0).then_some(bytes)
+    }
+}
+
+#[cfg(feature = "llama-dlopen")]
+mod sys {
+    use super::{c_char, c_void, AbortFn, CStr, RawHandle};
+    use std::sync::OnceLock;
+
+    const RTLD_LAZY: i32 = 0x1;
+    const RTLD_LOCAL: i32 = 0x4;
+    const RTLD_DEFAULT: *mut c_void = (-2isize) as *mut c_void;
+
+    extern "C" {
+        fn dlopen(path: *const c_char, mode: i32) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlerror() -> *const c_char;
+    }
+
+    pub(super) struct ShimApi {
+        abi_version_fn: unsafe extern "C" fn() -> i32,
+        load_fn: unsafe extern "C" fn(
+            *const c_char,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            u32,
+            *mut c_char,
+            i32,
+        ) -> *mut RawHandle,
+        free_fn: unsafe extern "C" fn(*mut RawHandle),
+        release_context_fn: unsafe extern "C" fn(*mut RawHandle),
+        restore_context_fn: unsafe extern "C" fn(*mut RawHandle, *mut c_char, i32) -> i32,
+        n_ctx_fn: unsafe extern "C" fn(*const RawHandle) -> i32,
+        n_batch_fn: unsafe extern "C" fn(*const RawHandle) -> i32,
+        n_seq_max_fn: unsafe extern "C" fn(*const RawHandle) -> i32,
+        n_outputs_max_fn: unsafe extern "C" fn(*const RawHandle) -> i32,
+        set_abort_callback_fn: unsafe extern "C" fn(*mut RawHandle, Option<AbortFn>, *mut c_void),
+        tokenize_fn: unsafe extern "C" fn(*const RawHandle, *const c_char, i32, *mut i32, i32) -> i32,
+        kv_clear_fn: unsafe extern "C" fn(*mut RawHandle),
+        kv_seq_rm_fn: unsafe extern "C" fn(*mut RawHandle, i32, i32, i32) -> i32,
+        kv_seq_cp_fn: unsafe extern "C" fn(*mut RawHandle, i32, i32, i32, i32),
+        decode_fn: unsafe extern "C" fn(*mut RawHandle, *const i32, *const i32, *const i32, *const u8, i32) -> i32,
+        logprobs_fn: unsafe extern "C" fn(*mut RawHandle, i32, *const i32, i32, *mut f64) -> i32,
+    }
+
+    unsafe impl Send for ShimApi {}
+    unsafe impl Sync for ShimApi {}
+
+    static LOADED: OnceLock<Result<ShimApi, String>> = OnceLock::new();
+
+    unsafe fn lookup<T>(lib: *mut c_void, name: &'static CStr) -> Result<T, String> {
+        let ptr = unsafe { dlsym(lib, name.as_ptr()) };
+        if ptr.is_null() {
+            return Err(format!("缺少符号 {}", name.to_string_lossy()));
+        }
+        debug_assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<*mut c_void>());
+        Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&ptr) })
+    }
+
+    fn open_shim() -> Result<ShimApi, String> {
+        // 1. 单元测试 / 评测宿主若已直接链接 AIPinyinAux，直接从进程符号表读取
+        let lib = unsafe {
+            let probe = dlsym(RTLD_DEFAULT, c"ime_llm_abi_version".as_ptr());
+            if !probe.is_null() {
+                RTLD_DEFAULT
+            } else {
+                let candidates = [
+                    c"@rpath/AIPinyinAux.framework/AIPinyinAux",
+                    c"@executable_path/../../Frameworks/AIPinyinAux.framework/AIPinyinAux",
+                    c"@executable_path/Frameworks/AIPinyinAux.framework/AIPinyinAux",
+                ];
+                let mut handle = std::ptr::null_mut();
+                for candidate in candidates {
+                    handle = dlopen(candidate.as_ptr(), RTLD_LAZY | RTLD_LOCAL);
+                    if !handle.is_null() {
+                        break;
+                    }
+                }
+                if handle.is_null() {
+                    let err_ptr = dlerror();
+                    let detail = if err_ptr.is_null() {
+                        "找不到 AIPinyinAux.framework".to_string()
+                    } else {
+                        CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
+                    };
+                    return Err(format!("无法加载本地模型运行库: {detail}"));
+                }
+                handle
+            }
+        };
+
+        unsafe {
+            Ok(ShimApi {
+                abi_version_fn: lookup(lib, c"ime_llm_abi_version")?,
+                load_fn: lookup(lib, c"ime_llm_load")?,
+                free_fn: lookup(lib, c"ime_llm_free")?,
+                release_context_fn: lookup(lib, c"ime_llm_release_context")?,
+                restore_context_fn: lookup(lib, c"ime_llm_restore_context")?,
+                n_ctx_fn: lookup(lib, c"ime_llm_n_ctx")?,
+                n_batch_fn: lookup(lib, c"ime_llm_n_batch")?,
+                n_seq_max_fn: lookup(lib, c"ime_llm_n_seq_max")?,
+                n_outputs_max_fn: lookup(lib, c"ime_llm_n_outputs_max")?,
+                set_abort_callback_fn: lookup(lib, c"ime_llm_set_abort_callback")?,
+                tokenize_fn: lookup(lib, c"ime_llm_tokenize")?,
+                kv_clear_fn: lookup(lib, c"ime_llm_kv_clear")?,
+                kv_seq_rm_fn: lookup(lib, c"ime_llm_kv_seq_rm")?,
+                kv_seq_cp_fn: lookup(lib, c"ime_llm_kv_seq_cp")?,
+                decode_fn: lookup(lib, c"ime_llm_decode")?,
+                logprobs_fn: lookup(lib, c"ime_llm_logprobs")?,
+            })
+        }
+    }
+
+    impl ShimApi {
+        pub(super) fn get() -> Result<&'static Self, String> {
+            LOADED.get_or_init(open_shim).as_ref().map_err(Clone::clone)
+        }
+
+        pub(super) unsafe fn abi_version(&self) -> i32 {
+            unsafe { (self.abi_version_fn)() }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub(super) unsafe fn load(
+            &self,
+            model_path: *const c_char,
+            n_ctx: i32,
+            n_threads: i32,
+            n_gpu_layers: i32,
+            n_seq_max: i32,
+            n_outputs_max: i32,
+            flags: u32,
+            err: *mut c_char,
+            err_cap: i32,
+        ) -> *mut RawHandle {
+            unsafe {
+                (self.load_fn)(
+                    model_path,
+                    n_ctx,
+                    n_threads,
+                    n_gpu_layers,
+                    n_seq_max,
+                    n_outputs_max,
+                    flags,
+                    err,
+                    err_cap,
+                )
+            }
+        }
+
+        pub(super) unsafe fn free(&self, h: *mut RawHandle) {
+            unsafe { (self.free_fn)(h) }
+        }
+
+        pub(super) unsafe fn release_context(&self, h: *mut RawHandle) {
+            unsafe { (self.release_context_fn)(h) }
+        }
+
+        pub(super) unsafe fn restore_context(&self, h: *mut RawHandle, err: *mut c_char, err_cap: i32) -> i32 {
+            unsafe { (self.restore_context_fn)(h, err, err_cap) }
+        }
+
+        pub(super) unsafe fn n_ctx(&self, h: *const RawHandle) -> i32 {
+            unsafe { (self.n_ctx_fn)(h) }
+        }
+
+        pub(super) unsafe fn n_batch(&self, h: *const RawHandle) -> i32 {
+            unsafe { (self.n_batch_fn)(h) }
+        }
+
+        pub(super) unsafe fn n_seq_max(&self, h: *const RawHandle) -> i32 {
+            unsafe { (self.n_seq_max_fn)(h) }
+        }
+
+        pub(super) unsafe fn n_outputs_max(&self, h: *const RawHandle) -> i32 {
+            unsafe { (self.n_outputs_max_fn)(h) }
+        }
+
+        pub(super) unsafe fn set_abort_callback(&self, h: *mut RawHandle, cb: Option<AbortFn>, user: *mut c_void) {
+            unsafe { (self.set_abort_callback_fn)(h, cb, user) }
+        }
+
+        pub(super) unsafe fn tokenize(
+            &self,
+            h: *const RawHandle,
+            text: *const c_char,
+            text_len: i32,
+            out: *mut i32,
+            cap: i32,
+        ) -> i32 {
+            unsafe { (self.tokenize_fn)(h, text, text_len, out, cap) }
+        }
+
+        pub(super) unsafe fn kv_clear(&self, h: *mut RawHandle) {
+            unsafe { (self.kv_clear_fn)(h) }
+        }
+
+        pub(super) unsafe fn kv_seq_rm(&self, h: *mut RawHandle, seq: i32, p0: i32, p1: i32) -> i32 {
+            unsafe { (self.kv_seq_rm_fn)(h, seq, p0, p1) }
+        }
+
+        pub(super) unsafe fn kv_seq_cp(&self, h: *mut RawHandle, src: i32, dst: i32, p0: i32, p1: i32) {
+            unsafe { (self.kv_seq_cp_fn)(h, src, dst, p0, p1) }
+        }
+
+        pub(super) unsafe fn decode(
+            &self,
+            h: *mut RawHandle,
+            tokens: *const i32,
+            pos: *const i32,
+            seq: *const i32,
+            want: *const u8,
+            n: i32,
+        ) -> i32 {
+            unsafe { (self.decode_fn)(h, tokens, pos, seq, want, n) }
+        }
+
+        pub(super) unsafe fn logprobs(
+            &self,
+            h: *mut RawHandle,
+            batch_index: i32,
+            targets: *const i32,
+            n_targets: i32,
+            out: *mut f64,
+        ) -> i32 {
+            unsafe { (self.logprobs_fn)(h, batch_index, targets, n_targets, out) }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub(super) fn phys_footprint_bytes() -> Option<u64> {
+        #[repr(C)]
+        #[derive(Default)]
+        struct TaskVmInfo {
+            virtual_size: u64,
+            region_count: i32,
+            page_size: i32,
+            resident_size: u64,
+            resident_size_peak: u64,
+            rest: [u64; 15],
+            tail: [u64; 32],
+        }
+        const TASK_VM_INFO: i32 = 22;
+        extern "C" {
+            static mach_task_self_: u32;
+            fn task_info(target_task: u32, flavor: i32, info_out: *mut TaskVmInfo, count: *mut u32) -> i32;
+        }
+        let mut info = TaskVmInfo::default();
+        let mut count = (std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<i32>()) as u32;
+        let kr = unsafe { task_info(mach_task_self_, TASK_VM_INFO, &mut info, &mut count) };
+        if kr == 0 && count >= 38 {
+            let bytes = info.rest[14];
+            (bytes > 0).then_some(bytes)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    pub(super) fn phys_footprint_bytes() -> Option<u64> {
+        None
+    }
 }
 
 pub(crate) fn phys_footprint_bytes() -> Option<u64> {
-    // SAFETY: 无参数、无前置条件的查询函数
-    let bytes = unsafe { ime_llm_phys_footprint() };
-    (bytes > 0).then_some(bytes)
+    sys::phys_footprint_bytes()
 }
 
 /// llama.cpp 计算过程中反复调用的中止回调。只做原子读取，不会恐慌。
@@ -88,6 +480,7 @@ unsafe extern "C" fn abort_trampoline(user: *mut c_void) -> bool {
 }
 
 pub(crate) struct LlamaBackend {
+    shim: &'static sys::ShimApi,
     handle: NonNull<RawHandle>,
     limits: BackendLimits,
     /// 中止回调读取的取消标记；必须活得比回调的注册更久
@@ -104,16 +497,17 @@ unsafe impl Send for LlamaBackend {}
 
 impl LlamaBackend {
     pub fn load(model_path: &Path, options: &LlmOptions) -> Result<Self, LlmError> {
-        // SAFETY: 无参数的版本查询
-        let abi = unsafe { ime_llm_abi_version() };
-        if abi != SHIM_ABI_VERSION {
-            return Err(LlmError::Load(format!("垫片 ABI 版本不匹配：期望 {SHIM_ABI_VERSION}，实际 {abi}")));
-        }
         let path_str = model_path
             .to_str()
             .ok_or_else(|| LlmError::Load(format!("模型路径不是合法的 UTF-8: {}", model_path.display())))?;
         if !model_path.is_file() {
             return Err(LlmError::Load(format!("模型文件不存在: {path_str}")));
+        }
+        let shim = sys::ShimApi::get().map_err(LlmError::Load)?;
+        // SAFETY: 无参数的版本查询
+        let abi = unsafe { shim.abi_version() };
+        if abi != SHIM_ABI_VERSION {
+            return Err(LlmError::Load(format!("垫片 ABI 版本不匹配：期望 {SHIM_ABI_VERSION}，实际 {abi}")));
         }
         let c_path = CString::new(path_str).map_err(|_| LlmError::Load("模型路径包含 NUL 字符".to_string()))?;
 
@@ -131,7 +525,7 @@ impl LlamaBackend {
         let mut err = [0 as c_char; 512];
         // SAFETY: `c_path` 以 NUL 结尾；`err` 的容量如实传入，垫片保证写入以 NUL 结尾的字符串
         let raw = unsafe {
-            ime_llm_load(
+            shim.load(
                 c_path.as_ptr(),
                 clamp(options.context_size),
                 options.threads.min(i32::MAX as u32) as i32,
@@ -151,13 +545,14 @@ impl LlamaBackend {
         // SAFETY: `handle` 刚由 `ime_llm_load` 返回，非空且有效
         let limits = unsafe {
             BackendLimits {
-                n_ctx: ime_llm_n_ctx(handle.as_ptr()).max(0) as usize,
-                n_batch: ime_llm_n_batch(handle.as_ptr()).max(0) as usize,
-                n_seq_max: ime_llm_n_seq_max(handle.as_ptr()).max(0) as usize,
-                n_outputs_max: ime_llm_n_outputs_max(handle.as_ptr()).max(0) as usize,
+                n_ctx: shim.n_ctx(handle.as_ptr()).max(0) as usize,
+                n_batch: shim.n_batch(handle.as_ptr()).max(0) as usize,
+                n_seq_max: shim.n_seq_max(handle.as_ptr()).max(0) as usize,
+                n_outputs_max: shim.n_outputs_max(handle.as_ptr()).max(0) as usize,
             }
         };
         Ok(Self {
+            shim,
             handle,
             limits,
             cancel: None,
@@ -173,8 +568,8 @@ impl Drop for LlamaBackend {
     fn drop(&mut self) {
         // SAFETY: 句柄有效且此后不再使用；先撤销回调，再释放
         unsafe {
-            ime_llm_set_abort_callback(self.handle.as_ptr(), None, std::ptr::null_mut());
-            ime_llm_free(self.handle.as_ptr());
+            self.shim.set_abort_callback(self.handle.as_ptr(), None, std::ptr::null_mut());
+            self.shim.free(self.handle.as_ptr());
         }
     }
 }
@@ -193,7 +588,7 @@ impl LmBackend for LlamaBackend {
         for _ in 0..2 {
             // SAFETY: 指针与长度来自同一个切片 / Vec，垫片不会越界写
             let n = unsafe {
-                ime_llm_tokenize(
+                self.shim.tokenize(
                     self.handle.as_ptr(),
                     text.as_ptr() as *const c_char,
                     text.len() as i32,
@@ -215,17 +610,17 @@ impl LmBackend for LlamaBackend {
 
     fn kv_clear(&mut self) {
         // SAFETY: 句柄有效，独占访问
-        unsafe { ime_llm_kv_clear(self.handle.as_ptr()) }
+        unsafe { self.shim.kv_clear(self.handle.as_ptr()) }
     }
 
     fn kv_seq_rm(&mut self, seq: i32, p0: i32, p1: i32) -> bool {
         // SAFETY: 句柄有效，独占访问；越界的序列号由垫片拒绝
-        unsafe { ime_llm_kv_seq_rm(self.handle.as_ptr(), seq, p0, p1) != 0 }
+        unsafe { self.shim.kv_seq_rm(self.handle.as_ptr(), seq, p0, p1) != 0 }
     }
 
     fn kv_seq_cp(&mut self, src: i32, dst: i32, p0: i32, p1: i32) {
         // SAFETY: 同上
-        unsafe { ime_llm_kv_seq_cp(self.handle.as_ptr(), src, dst, p0, p1) }
+        unsafe { self.shim.kv_seq_cp(self.handle.as_ptr(), src, dst, p0, p1) }
     }
 
     fn decode(&mut self, batch: &[BatchItem]) -> Result<DecodeOutcome, LlmError> {
@@ -241,7 +636,7 @@ impl LmBackend for LlamaBackend {
         }
         // SAFETY: 四个数组长度都等于 `batch.len()`；垫片先做范围检查再交给 llama.cpp
         let r = unsafe {
-            ime_llm_decode(
+            self.shim.decode(
                 self.handle.as_ptr(),
                 self.buf_tokens.as_ptr(),
                 self.buf_pos.as_ptr(),
@@ -266,7 +661,7 @@ impl LmBackend for LlamaBackend {
         }
         // SAFETY: `out` 至少能容纳 `targets.len()` 个元素；行号与 token 范围由垫片检查
         let r = unsafe {
-            ime_llm_logprobs(
+            self.shim.logprobs(
                 self.handle.as_ptr(),
                 batch_index as i32,
                 targets.as_ptr(),
@@ -284,14 +679,14 @@ impl LmBackend for LlamaBackend {
     fn install_cancel(&mut self, flag: Arc<CancelFlag>) {
         let user = Arc::as_ptr(&flag) as *mut c_void;
         // SAFETY: 句柄有效；`flag` 随后存入 `self.cancel`，生命周期覆盖回调的整个注册期
-        unsafe { ime_llm_set_abort_callback(self.handle.as_ptr(), Some(abort_trampoline), user) };
+        unsafe { self.shim.set_abort_callback(self.handle.as_ptr(), Some(abort_trampoline), user) };
         // 旧标记在新回调生效之后才释放
         self.cancel = Some(flag);
     }
 
     fn release_context(&mut self) {
         // SAFETY: 句柄有效，独占访问；模型与中止回调的注册保持不变
-        unsafe { ime_llm_release_context(self.handle.as_ptr()) };
+        unsafe { self.shim.release_context(self.handle.as_ptr()) };
         // 批缓冲也一并还掉，下次 decode 时按需重新分配
         self.buf_tokens = Vec::new();
         self.buf_pos = Vec::new();
@@ -302,7 +697,7 @@ impl LmBackend for LlamaBackend {
     fn restore_context(&mut self) -> Result<(), LlmError> {
         let mut err = [0 as c_char; 512];
         // SAFETY: 句柄有效，独占访问；`err` 的容量如实传入
-        let r = unsafe { ime_llm_restore_context(self.handle.as_ptr(), err.as_mut_ptr(), err.len() as i32) };
+        let r = unsafe { self.shim.restore_context(self.handle.as_ptr(), err.as_mut_ptr(), err.len() as i32) };
         if r == 0 {
             return Ok(());
         }
@@ -312,15 +707,15 @@ impl LmBackend for LlamaBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "llama-dlopen")))]
 impl LlamaBackend {
     fn context_released(&self) -> bool {
         // SAFETY: 句柄有效
-        unsafe { ime_llm_context_released(self.handle.as_ptr()) != 0 }
+        unsafe { sys::ime_llm_context_released(self.handle.as_ptr()) != 0 }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "llama-dlopen")))]
 mod tests {
     use super::*;
 
@@ -328,7 +723,7 @@ mod tests {
     fn resolve(n_ctx: i32, n_seq_max: i32, n_outputs_max: i32) -> Option<(i32, i32)> {
         let (mut seq, mut outputs) = (n_seq_max, n_outputs_max);
         // SAFETY: 两个指针指向本函数栈上的有效整数
-        let ok = unsafe { ime_llm_resolve_limits(n_ctx, &mut seq, &mut outputs) };
+        let ok = unsafe { sys::ime_llm_resolve_limits(n_ctx, &mut seq, &mut outputs) };
         (ok == 1).then_some((seq, outputs))
     }
 

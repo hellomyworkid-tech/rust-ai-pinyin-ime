@@ -9,6 +9,8 @@ build = "build.rs"
 default = []
 # 启用进程内 llama.cpp 打分（需先运行 scripts/build_llama.sh，或通过环境变量指向已有的 llama.cpp 静态库）
 llama = ["dep:cc"]
+# 运行时按需经 dlopen 加载包含垫片与 llama.cpp 的动态框架（iOS 键盘扩展冷启动不映射 C++ 与 llama.cpp）
+llama-dlopen = []
 
 [dependencies]
 # 打分文本构造规则（`ime_ai::lm_text`）与打分器接口（`ime_ai::CandidateScorer`）定义在 ime-ai；

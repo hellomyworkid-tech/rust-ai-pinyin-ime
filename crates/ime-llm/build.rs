@@ -22,11 +22,11 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(feature = "llama")]
+    #[cfg(all(feature = "llama", not(feature = "llama-dlopen")))]
     llama::build();
 }
 
-#[cfg(feature = "llama")]
+#[cfg(all(feature = "llama", not(feature = "llama-dlopen")))]
 mod llama {
     use std::env;
     use std::path::PathBuf;

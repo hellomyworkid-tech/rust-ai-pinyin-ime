@@ -49,8 +49,60 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # 只上 iPhone。XcodeGen 给每个 iOS target 预设了 "1,2"，会盖掉上面工程级的 "1"，所以 target 里再写一遍
         TARGETED_DEVICE_FAMILY: "1"
+        DEAD_CODE_STRIPPING: YES
+      configs:
+        Release:
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: non-global
     dependencies:
+      - target: AIPinyinAux
+        embed: true
+        codeSign: true
       - target: AIPinyinKeyboard
+  # 按需延迟加载的辅助动态库（嵌入 AIPinyin.app/Frameworks/）：
+  # 承载 llama.cpp C++ 垫片、FoundationModels 与 SwiftUI Link 覆盖层，
+  # 让 AIPinyinKeyboard 主二进制在冷启动 execve / dyld 阶段保持约 1MB 纯 UIKit + Rust 解码器，零 C++ 静态构造。
+  AIPinyinAux:
+    type: framework
+    platform: iOS
+    sources:
+      - Aux
+      - Shared/AuxBridgeProtocol.swift
+      - path: ../../crates/ime-llm/shim/ime_llm_shim.cpp
+    dependencies:
+      - framework: ../../third_party/llama/ImeLlama.xcframework
+        embed: false
+    info:
+      path: Generated/Aux-Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zengji.aipinyin.aux
+        PRODUCT_NAME: AIPinyinAux
+        TARGETED_DEVICE_FAMILY: "1"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        DEFINES_MODULE: YES
+        INSTALL_PATH: "@rpath"
+        SKIP_INSTALL: YES
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES
+        DEAD_CODE_STRIPPING: YES
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../../crates/ime-llm/shim"
+          - "$(SRCROOT)/../../third_party/llama/include"
+        OTHER_LDFLAGS:
+          - "-lc++"
+          - "-framework"
+          - "Accelerate"
+          - "-Wl,-u,_ime_llm_abi_version,-u,_ime_llm_load,-u,_ime_llm_resolve_limits,-u,_ime_llm_free,-u,_ime_llm_release_context,-u,_ime_llm_restore_context,-u,_ime_llm_context_released,-u,_ime_llm_n_vocab,-u,_ime_llm_n_ctx,-u,_ime_llm_n_batch,-u,_ime_llm_n_seq_max,-u,_ime_llm_n_outputs_max,-u,_ime_llm_n_threads,-u,_ime_llm_set_abort_callback,-u,_ime_llm_tokenize,-u,_ime_llm_kv_clear,-u,_ime_llm_kv_seq_rm,-u,_ime_llm_kv_seq_cp,-u,_ime_llm_decode,-u,_ime_llm_logprobs,-u,_ime_llm_phys_footprint"
+      configs:
+        Release:
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: non-global
   AIPinyinKeyboard:
     type: app-extension
     platform: iOS
@@ -76,6 +128,7 @@ targets:
         script: |
           missing=""
           [ -f "$SRCROOT/Frameworks/ImeFFI.xcframework/Info.plist" ] || missing="$missing Frameworks/ImeFFI.xcframework"
+          [ -f "$SRCROOT/../../third_party/llama/ImeLlama.xcframework/Info.plist" ] || missing="$missing ../../third_party/llama/ImeLlama.xcframework"
           # Release 不打完整词库（App 下载），只有调试构建要它；基础词库都要
           if [ "$CONFIGURATION" != "Release" ]; then
             [ -s "$SRCROOT/Resources/merged_lexicon.bin" ] || missing="$missing Resources/merged_lexicon.bin"
@@ -103,7 +156,7 @@ targets:
             fi
           fi
     dependencies:
-      # Rust 引擎的静态库和 C 头文件，同样由 scripts/build-rust.sh 生成
+      # Rust 引擎的静态库和 C 头文件（纯 Rust，本地模型由 AIPinyinAux.framework 按需 dlopen）
       - framework: Frameworks/ImeFFI.xcframework
         embed: false
     info:
@@ -128,12 +181,16 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zengji.aipinyin.keyboard
         TARGETED_DEVICE_FAMILY: "1"
-        # Rust 标准库需要 libiconv；库里的 llama.cpp 是 C++，打分时的 log-softmax 用 Accelerate
-        OTHER_LDFLAGS: ["-liconv", "-lc++", "-framework", "Accelerate"]
+        DEAD_CODE_STRIPPING: YES
+        # Rust 标准库需要 libiconv；C++ 与 Accelerate 已随 llama.cpp 拆进按需加载的 AIPinyinAux.framework
+        OTHER_LDFLAGS: ["-liconv"]
       configs:
         # 完整词库只打进调试构建（见上面 sources 的说明）
         Release:
           EXCLUDED_SOURCE_FILE_NAMES: merged_lexicon.bin
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: non-global
   # 单元测试不挂宿主 App：键盘里的纯逻辑（引擎边界、按键规则、AI 调度）直接编进测试包。
   # 界面代码（Keyboard/UI、KeyboardViewController）不编进来，靠 UI 测试覆盖。
   AIPinyinTests:
@@ -152,6 +209,9 @@ targets:
       # 宿主 App 里不依赖界面的部分（设置存取、下载状态机）
       - App/Core
     dependencies:
+      - target: AIPinyinAux
+        embed: true
+        codeSign: true
       # RustEngineTests 直接对真引擎测；词库从源码目录读
       - framework: Frameworks/ImeFFI.xcframework
         embed: false
@@ -159,7 +219,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zengji.aipinyin.tests
         GENERATE_INFOPLIST_FILE: YES
-        OTHER_LDFLAGS: ["-liconv", "-lc++", "-framework", "Accelerate"]
+        LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@loader_path/Frameworks"]
+        OTHER_LDFLAGS: ["-liconv"]
   # 真机评测：挂在宿主 App 里跑（能读 App Group 里下载好的模型，词库取自 App 包里的键盘扩展），
   # 用真引擎和真模型量准确率、等待时间和内存。只在单独的 AIPinyinDeviceEval scheme 里，平时的测试不跑它
   AIPinyinDeviceEval:
@@ -178,6 +239,8 @@ targets:
       - Shared
     dependencies:
       - target: AIPinyin
+      - target: AIPinyinAux
+        embed: false
       - framework: Frameworks/ImeFFI.xcframework
         embed: false
     settings:
@@ -185,7 +248,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.zengji.aipinyin.deviceeval
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/AIPinyin.app/AIPinyin"
-        OTHER_LDFLAGS: ["-liconv", "-lc++", "-framework", "Accelerate"]
+        OTHER_LDFLAGS: ["-liconv"]
   # 冒烟测试：在宿主 App 的输入框里用 AI 拼音键盘打字（需要先在模拟器里启用键盘，见 README）
   AIPinyinUITests:
     type: bundle.ui-testing

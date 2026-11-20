@@ -16,6 +16,12 @@
 extern "C" {
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define IME_LLM_API __attribute__((visibility("default")))
+#else
+#define IME_LLM_API
+#endif
+
 #define IME_LLM_ABI_VERSION 2
 
 // ime_llm_load 的 flags 位
@@ -38,7 +44,7 @@ typedef struct ime_llm ime_llm;
 // 返回 true 表示请求中止当前的 ime_llm_decode
 typedef bool (*ime_llm_abort_fn)(void *user);
 
-int32_t ime_llm_abi_version(void);
+IME_LLM_API int32_t ime_llm_abi_version(void);
 
 // 加载模型并创建上下文。失败返回 NULL，并把以 NUL 结尾的错误说明写入 err（最多 err_cap 字节）。
 //   n_ctx          上下文长度（所有并行序列共用，kv_unified）
@@ -47,59 +53,59 @@ int32_t ime_llm_abi_version(void);
 //   n_seq_max      并行序列数上限
 //   n_outputs_max  单次 decode 可请求 logits 的 token 数上限（每行占 n_vocab * 4 字节）
 // n_seq_max 与 n_outputs_max 先按 ime_llm_resolve_limits 的规则收敛，实际生效的值用下面的查询函数读取。
-ime_llm *ime_llm_load(const char *model_path, int32_t n_ctx, int32_t n_threads, int32_t n_gpu_layers,
-                      int32_t n_seq_max, int32_t n_outputs_max, uint32_t flags, char *err, int32_t err_cap);
+IME_LLM_API ime_llm *ime_llm_load(const char *model_path, int32_t n_ctx, int32_t n_threads, int32_t n_gpu_layers,
+                                  int32_t n_seq_max, int32_t n_outputs_max, uint32_t flags, char *err, int32_t err_cap);
 
 // ime_llm_load 对并行序列数与 logits 行数的收敛规则（不需要模型，可单独调用）：
 //   *n_seq_max     不超过 llama.cpp 的并行序列数上限，也不超过 n_ctx
 //   *n_outputs_max 不小于收敛后的 *n_seq_max，也不超过 n_ctx
 // 于是总有 *n_seq_max <= *n_outputs_max <= n_ctx；输出缓冲为 *n_outputs_max * n_vocab * 4 字节。
 // 三个值都必须为正；参数不合法返回 0（不修改输出），成功返回 1。
-int32_t ime_llm_resolve_limits(int32_t n_ctx, int32_t *n_seq_max, int32_t *n_outputs_max);
-void ime_llm_free(ime_llm *h);
+IME_LLM_API int32_t ime_llm_resolve_limits(int32_t n_ctx, int32_t *n_seq_max, int32_t *n_outputs_max);
+IME_LLM_API void ime_llm_free(ime_llm *h);
 
 // 释放推理上下文（KV 缓存、计算缓冲、logits 输出缓冲、批缓冲），保留已加载的模型（mmap 权重与词表）。
 // 之后 KV 缓存视为空：kv_clear / kv_seq_rm / kv_seq_cp 是无操作，logprobs 返回错误，
 // 下一次 ime_llm_decode 会按 ime_llm_load 时的参数自动重建上下文（也可先调用 ime_llm_restore_context 提前重建）。
 // 已经释放时什么也不做。
-void ime_llm_release_context(ime_llm *h);
+IME_LLM_API void ime_llm_release_context(ime_llm *h);
 // 按 ime_llm_load 时的参数重建上下文。上下文已存在时直接返回 0；失败返回非 0 并把错误说明写入 err（可为 NULL）。
-int32_t ime_llm_restore_context(ime_llm *h, char *err, int32_t err_cap);
+IME_LLM_API int32_t ime_llm_restore_context(ime_llm *h, char *err, int32_t err_cap);
 // 上下文当前是否已释放（1 = 已释放，0 = 存在）
-int32_t ime_llm_context_released(const ime_llm *h);
+IME_LLM_API int32_t ime_llm_context_released(const ime_llm *h);
 
 // 实际生效的参数
-int32_t ime_llm_n_vocab(const ime_llm *h);
-int32_t ime_llm_n_ctx(const ime_llm *h);
-int32_t ime_llm_n_batch(const ime_llm *h);
-int32_t ime_llm_n_seq_max(const ime_llm *h);
-int32_t ime_llm_n_outputs_max(const ime_llm *h);
-int32_t ime_llm_n_threads(const ime_llm *h);
+IME_LLM_API int32_t ime_llm_n_vocab(const ime_llm *h);
+IME_LLM_API int32_t ime_llm_n_ctx(const ime_llm *h);
+IME_LLM_API int32_t ime_llm_n_batch(const ime_llm *h);
+IME_LLM_API int32_t ime_llm_n_seq_max(const ime_llm *h);
+IME_LLM_API int32_t ime_llm_n_outputs_max(const ime_llm *h);
+IME_LLM_API int32_t ime_llm_n_threads(const ime_llm *h);
 
 // 设置中止回调（NULL 取消）。回调会在 decode 的计算过程中被反复调用，必须足够轻且不得抛出异常/恐慌。
-void ime_llm_set_abort_callback(ime_llm *h, ime_llm_abort_fn cb, void *user);
+IME_LLM_API void ime_llm_set_abort_callback(ime_llm *h, ime_llm_abort_fn cb, void *user);
 
 // 分词（add_special = false, parse_special = false）。
 // 返回 token 数；若 cap 不足返回所需数量的相反数（此时 out 内容未定义）；INT32_MIN 表示失败。
-int32_t ime_llm_tokenize(const ime_llm *h, const char *text, int32_t text_len, int32_t *out, int32_t cap);
+IME_LLM_API int32_t ime_llm_tokenize(const ime_llm *h, const char *text, int32_t text_len, int32_t *out, int32_t cap);
 
 // KV 缓存操作，语义同 llama_memory_clear / llama_memory_seq_rm / llama_memory_seq_cp
 // （p0 < 0 表示从 0 开始，p1 < 0 表示到末尾）。seq_rm 返回 1 成功、0 失败。
-void ime_llm_kv_clear(ime_llm *h);
-int32_t ime_llm_kv_seq_rm(ime_llm *h, int32_t seq, int32_t p0, int32_t p1);
-void ime_llm_kv_seq_cp(ime_llm *h, int32_t src, int32_t dst, int32_t p0, int32_t p1);
+IME_LLM_API void ime_llm_kv_clear(ime_llm *h);
+IME_LLM_API int32_t ime_llm_kv_seq_rm(ime_llm *h, int32_t seq, int32_t p0, int32_t p1);
+IME_LLM_API void ime_llm_kv_seq_cp(ime_llm *h, int32_t src, int32_t dst, int32_t p0, int32_t p1);
 
 // 解码一批 token：第 i 个 token 为 tokens[i]，位置 pos[i]，属于序列 seq[i]，want[i] != 0 表示需要它的 logits。
 // 返回值见 IME_LLM_DECODE_*。
-int32_t ime_llm_decode(ime_llm *h, const int32_t *tokens, const int32_t *pos, const int32_t *seq,
-                       const uint8_t *want, int32_t n);
+IME_LLM_API int32_t ime_llm_decode(ime_llm *h, const int32_t *tokens, const int32_t *pos, const int32_t *seq,
+                                   const uint8_t *want, int32_t n);
 
 // 读取最近一次 decode 中第 batch_index 个 token（必须 want != 0）之后的下一 token 对数概率：
 // 对整个词表做精确 log-softmax，out[k] = log P(targets[k])。成功返回 0。
-int32_t ime_llm_logprobs(ime_llm *h, int32_t batch_index, const int32_t *targets, int32_t n_targets, double *out);
+IME_LLM_API int32_t ime_llm_logprobs(ime_llm *h, int32_t batch_index, const int32_t *targets, int32_t n_targets, double *out);
 
 // 当前进程的 phys_footprint（字节）；非 Apple 平台返回 0。
-uint64_t ime_llm_phys_footprint(void);
+IME_LLM_API uint64_t ime_llm_phys_footprint(void);
 
 #ifdef __cplusplus
 }

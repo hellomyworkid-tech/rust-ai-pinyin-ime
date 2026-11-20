@@ -14,6 +14,8 @@ default = []
 # 把进程内 llama.cpp 打分器编进来（需要 scripts/build_llama.sh 先产出静态库）。
 # 不启用时接口不变，ime_engine_load_llm 返回「不支持」
 llama = ["ime-llm/llama"]
+# 运行时按需 dlopen 加载本地模型动态库（供 iOS 键盘扩展消除冷启动 dyld 与 C++ 静态构造开销）
+llama-dlopen = ["ime-llm/llama-dlopen"]
 
 [dependencies]
 ime-lexicon = { path = "../ime-lexicon" }

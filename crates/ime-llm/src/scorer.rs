@@ -60,14 +60,14 @@ pub struct LlmScorer {
 }
 
 impl LlmScorer {
-    /// 当前构建是否包含进程内 LLM 支持（即是否启用了 `llama` 特性）
+    /// 当前构建是否包含进程内 LLM 支持（即是否启用了 `llama` 或 `llama-dlopen` 特性）
     pub fn is_supported() -> bool {
-        cfg!(feature = "llama")
+        cfg!(any(feature = "llama", feature = "llama-dlopen"))
     }
 
-    /// 加载 GGUF 模型。未启用 `llama` 特性的构建始终返回 [`LlmError::Unsupported`]。
+    /// 加载 GGUF 模型。未启用 `llama` / `llama-dlopen` 特性的构建始终返回 [`LlmError::Unsupported`]。
     pub fn load(model_path: impl AsRef<Path>, options: LlmOptions) -> Result<Self, LlmError> {
-        #[cfg(feature = "llama")]
+        #[cfg(any(feature = "llama", feature = "llama-dlopen"))]
         {
             let backend = crate::llama::LlamaBackend::load(model_path.as_ref(), &options)?;
             let model_id = model_path
@@ -77,7 +77,7 @@ impl LlmScorer {
                 .unwrap_or_default();
             Ok(Self::with_backend(Box::new(backend)).with_model_id(model_id))
         }
-        #[cfg(not(feature = "llama"))]
+        #[cfg(not(any(feature = "llama", feature = "llama-dlopen")))]
         {
             let _ = (model_path.as_ref(), options);
             Err(LlmError::Unsupported)
@@ -224,7 +224,7 @@ mod tests {
         assert!(o.max_outputs >= o.max_parallel);
     }
 
-    #[cfg(not(feature = "llama"))]
+    #[cfg(not(any(feature = "llama", feature = "llama-dlopen")))]
     #[test]
     fn load_reports_missing_llm_support() {
         assert!(!LlmScorer::is_supported());
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(crate::phys_footprint_bytes(), None);
     }
 
-    #[cfg(feature = "llama")]
+    #[cfg(any(feature = "llama", feature = "llama-dlopen"))]
     #[test]
     fn load_reports_missing_model_file() {
         assert!(LlmScorer::is_supported());
