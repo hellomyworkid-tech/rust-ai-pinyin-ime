@@ -102,6 +102,7 @@ final class KeyboardViewController: UIInputViewController {
         for observer in lifecycleObservers {
             NotificationCenter.default.removeObserver(observer)
         }
+        EngineFactory.disposeAsync(input.takeEngineForAsyncDispose())
     }
 
     // MARK: - 生命周期

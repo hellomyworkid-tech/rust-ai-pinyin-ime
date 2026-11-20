@@ -197,4 +197,6 @@ protocol IMEEngine: AnyObject {
 extension IMEEngine {
     func compositionSnapshot() -> String? { nil }
     func restoreComposition(_ snapshot: String) -> IMEResult { .passThrough }
+    /// 将引擎移交后台线程异步销毁前，在主线程提前摘除回调与引用
+    func prepareForAsyncDispose() {}
 }

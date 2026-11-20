@@ -232,10 +232,26 @@ final class RustEngine: IMEEngine {
         ime_engine_configure(handle, json) == 0
     }
 
+    func prepareForAsyncDispose() {
+        onAsyncUpdate = nil
+        onChoiceCancel = nil
+        onChoiceRequest = nil
+        ime_engine_set_ai_notify(handle, nil, nil)
+        ime_engine_set_chooser(handle, nil, nil)
+    }
+
     // MARK: - 诊断
 
-    /// 键盘进程当前的内存占用（字节），也就是系统判定是否超限的那个数
+    /// 键盘进程当前的内存占用（字节），也就是系统判定键盘扩展是否超限的那个数
     static var memoryFootprint: UInt64 { ime_phys_footprint() }
+
+    /// 查询 Rust 层进程级缓存（`SHARED_LLM`）当前是否已常驻指定模型（传 `nil` 查询是否常驻任意本地模型）
+    static func isLocalModelCached(at url: URL? = nil) -> Bool {
+        guard let url else {
+            return ime_is_local_model_cached(nil)
+        }
+        return url.path.withCString { ime_is_local_model_cached($0) }
+    }
 
     /// 清空 Rust 层进程级本地模型缓存并向系统归还空闲堆页（收到内存警告或键盘退入后台时调用）
     static func releaseMemoryCaches() {

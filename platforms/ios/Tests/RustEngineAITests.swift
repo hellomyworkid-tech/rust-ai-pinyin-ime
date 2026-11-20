@@ -316,4 +316,43 @@ final class RustEngineAITests: XCTestCase {
         try? await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(engine.refreshAfterAI().visibleCandidates.first?.text, "实验", "卸载之后只剩规则重排")
     }
+
+    func testLocalModelRemainsCachedAcrossEngineDeinitUntilReleased() throws {
+        let url = try modelURL()
+        engine = nil
+        RustEngine.releaseMemoryCaches()
+        XCTAssertFalse(RustEngine.isLocalModelCached())
+        XCTAssertFalse(RustEngine.isLocalModelCached(at: url))
+
+        do {
+            let first = try RustEngineTests.makeEngine()
+            try first.loadLocalModel(at: url)
+            XCTAssertTrue(RustEngine.isLocalModelCached())
+            XCTAssertTrue(RustEngine.isLocalModelCached(at: url))
+            RustEngine.trimLocalModelContext()
+            first.prepareForAsyncDispose()
+        }
+
+        XCTAssertTrue(RustEngine.isLocalModelCached(at: url),
+                      "控制器与 RustEngine 销毁后 SHARED_LLM 应保留模型本体供下次呼出复用")
+
+        do {
+            let second = try RustEngineTests.makeEngine()
+            let started = CFAbsoluteTimeGetCurrent()
+            try second.loadLocalModel(at: url)
+            let reuseSeconds = CFAbsoluteTimeGetCurrent() - started
+            XCTAssertTrue(second.isLocalModelLoaded)
+            XCTAssertLessThan(reuseSeconds, 0.05, "命中进程级 SHARED_LLM 复用应在毫秒级完成")
+
+            // 仍有活跃引擎挂载模型时，releaseMemoryCaches 只归还分配器空闲页，保留 SHARED_LLM
+            RustEngine.releaseMemoryCaches()
+            XCTAssertTrue(RustEngine.isLocalModelCached(at: url))
+            second.prepareForAsyncDispose()
+        }
+
+        // 无活跃持有者时执行 releaseMemoryCaches 会彻底清空 SHARED_LLM
+        RustEngine.releaseMemoryCaches()
+        XCTAssertFalse(RustEngine.isLocalModelCached())
+        XCTAssertFalse(RustEngine.isLocalModelCached(at: url))
+    }
 }

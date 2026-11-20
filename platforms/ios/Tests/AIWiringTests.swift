@@ -739,28 +739,65 @@ final class AIWiringTests: XCTestCase {
 
     func testResidentModelReusesAfterPeerControllerDeallocated() async throws {
         let queue = DispatchQueue(label: "test.local-model.dealloc-peer")
-        let coordinator = LocalModelCoordinator(queue: queue)
-        let url = try makeModelFile()
+        let urlA = try makeModelFile()
+        let urlB = try makeModelFile()
+        var cachedURL: URL?
+        var trimCount = 0
+        let coordinator = LocalModelCoordinator(
+            queue: queue,
+            trimContext: { trimCount += 1 },
+            releaseCaches: { cachedURL = nil },
+            isModelCached: { query in
+                guard let current = cachedURL else { return false }
+                guard let query else { return true }
+                return current.standardizedFileURL == query.standardizedFileURL
+            }
+        )
         // 模拟旧控制器加载模型后被销毁，但进程级 SHARED_LLM 仍驻留导致剩余内存仅 75MB（低于门槛）
-        var sharedCached = false
         let lowAfterResident: () -> UInt64 = {
-            sharedCached ? 75 * 1024 * 1024 : 165 * 1024 * 1024
+            cachedURL != nil ? 75 * 1024 * 1024 : 165 * 1024 * 1024
         }
 
         do {
+            let id1 = ObjectIdentifier(NSObject())
+            coordinator.controllerWillAppear(id1)
             let loader1 = LocalModelLoader(coordinator: coordinator, availableMemory: lowAfterResident)
             let engine1 = RecordingEngine()
-            loader1.load(url, into: engine1)
+            loader1.load(urlA, into: engine1)
             await waitForState(loader1, .loaded)
-            sharedCached = true
+            cachedURL = urlA
+            // iOS 连续发两次 viewWillDisappear + 随后 deinit，只应执行一次上下文裁剪
+            coordinator.controllerDidDisappear(id1)
+            coordinator.controllerDidDisappear(id1)
+            await drain(queue)
+            XCTAssertEqual(trimCount, 1, "同一控制器重复回调 disappear 只应裁剪一次推理上下文")
         }
-        // loader1 与 engine1 均已销毁，新控制器（如切到 WeChat）不应误判 skippedLowMemory，也不应延迟等待冷加载
+
+        // 1. 同进程下次呼出同一模型：Rust SHARED_LLM 确实常驻，毫秒级复用且不误报内存不足
         let loader2 = LocalModelLoader(coordinator: coordinator, availableMemory: lowAfterResident)
         let engine2 = RecordingEngine()
-        XCTAssertTrue(loader2.hasResidentModel(at: url, engine: engine2))
-        loader2.load(url, into: engine2)
+        XCTAssertTrue(loader2.hasResidentModel(at: urlA, engine: engine2))
+        XCTAssertFalse(loader2.hasResidentModel(at: urlB, engine: engine2), "别的模型未常驻，不能误标为 reuse=true")
+        loader2.load(urlA, into: engine2)
         await waitForState(loader2, .loaded)
         XCTAssertTrue(engine2.isLocalModelLoaded)
+
+        // 2. 旧控制器销毁后，用户在 App 中改为换用模型 B：先清空 SHARED_LLM 释放内存，再测内存并加载模型 B
+        let loader3 = LocalModelLoader(coordinator: coordinator, availableMemory: lowAfterResident)
+        let engine3 = RecordingEngine()
+        engine2.unloadLocalModel() // 模拟控制器 2 也已销毁、只剩 SHARED_LLM
+        loader3.load(urlB, into: engine3)
+        await waitForState(loader3, .loaded)
+        XCTAssertNil(cachedURL, "切换其他模型时应先清空旧的进程缓存")
+        XCTAssertTrue(engine3.isLocalModelLoaded)
+
+        // 3. 关闭本地模型（切到 .off / .apple）时，即便当前控制器尚未加载模型，也会一并清空残留的 SHARED_LLM
+        cachedURL = urlB
+        let loader4 = LocalModelLoader(coordinator: coordinator, availableMemory: lowAfterResident)
+        let engine4 = RecordingEngine()
+        loader4.unload(into: engine4)
+        await drain(queue)
+        XCTAssertNil(cachedURL, "关闭本地模型后不应残留进程级缓存")
     }
 
     func testPendingCompositionStoreDefersURLResolutionAndChecksExactMatchWithoutHostContext() {

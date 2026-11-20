@@ -197,6 +197,11 @@ void ime_release_memory_caches(void);
 // 应在后台线程调用。进程里没有加载本地模型时只归还空闲堆页。
 void ime_trim_local_model_context(void);
 
+// 查询进程级本地模型共享缓存（SHARED_LLM）：
+// - model_path 为 NULL：只要进程缓存里当前驻留着任意本地模型就返回 true；
+// - model_path 非 NULL：进程缓存里驻留着该路径对应的同一份模型文件（规范路径、大小、修改时间一致）时返回 true。
+bool ime_is_local_model_cached(const char *model_path);
+
 void ime_string_free(char *string);
 
 #ifdef __cplusplus

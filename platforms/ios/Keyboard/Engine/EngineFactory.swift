@@ -57,6 +57,17 @@ enum EngineFactory {
     /// 键盘生命周期与耗时的滚动诊断记录（上限 64KB × 2，不含任何用户输入内容），可直接经 devicectl 从键盘容器拉回
     static var traceLogURL: URL? { appSupportDirectory?.appendingPathComponent("trace.log") }
 
+    private static let disposeQueue = DispatchQueue(label: "com.zengji.aipinyin.engine-dispose", qos: .utility)
+
+    /// 控制器销毁或切换词库时，在主线程先摘除回调，再把引擎对象的最终析构（含个人词库写盘同步等待）移交后台队列
+    static func disposeAsync(_ engine: IMEEngine?) {
+        guard let engine else { return }
+        engine.prepareForAsyncDispose()
+        disposeQueue.async {
+            withExtendedLifetime(engine) {}
+        }
+    }
+
     static func makeEngine(source: LexiconSource?) -> IMEEngine {
         let start = KeyboardTrace.now
         let engine = createEngine(source: source)

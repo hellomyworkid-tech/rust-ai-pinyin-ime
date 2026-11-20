@@ -16,7 +16,8 @@ final class LocalModelCoordinator {
         let coordinator = LocalModelCoordinator(
             queue: DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .utility),
             trimContext: { RustEngine.trimLocalModelContext() },
-            releaseCaches: { RustEngine.releaseMemoryCaches() }
+            releaseCaches: { RustEngine.releaseMemoryCaches() },
+            isModelCached: { RustEngine.isLocalModelCached(at: $0) }
         )
         coordinator.installMemoryPressureMonitor()
         return coordinator
@@ -25,10 +26,9 @@ final class LocalModelCoordinator {
     let queue: DispatchQueue
     private let trimContext: () -> Void
     private let releaseCaches: () -> Void
+    private let isModelCached: (URL?) -> Bool
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var visibleControllers: Set<ObjectIdentifier> = []
-    /// Rust 层 `SHARED_LLM` 当前已常驻的模型文件路径（即便创建它的旧控制器已销毁，新控制器仍可零耗时复用）
-    private var residentModelURL: URL?
 
     private final class Entry {
         weak var loader: LocalModelLoader?
@@ -44,10 +44,12 @@ final class LocalModelCoordinator {
 
     init(queue: DispatchQueue = DispatchQueue(label: "com.zengji.aipinyin.local-model", qos: .utility),
          trimContext: @escaping () -> Void = {},
-         releaseCaches: @escaping () -> Void = {}) {
+         releaseCaches: @escaping () -> Void = {},
+         isModelCached: @escaping (URL?) -> Bool = { _ in false }) {
         self.queue = queue
         self.trimContext = trimContext
         self.releaseCaches = releaseCaches
+        self.isModelCached = isModelCached
     }
 
     deinit {
@@ -70,12 +72,11 @@ final class LocalModelCoordinator {
 
     /// 某个键盘控制器消失或宿主切后台。进程内已无可见键盘时，立刻（不用定时器：扩展进程收起后很快就被挂起，
     /// 延迟任务会拖到下次呼出时才执行）在模型队列上只释放推理上下文（KV 缓存与计算缓冲），保留模型本体：
-    /// - 挂起期间的常驻内存降到只剩模型本体（Mac 实测 Qwen2.5 65→54 MiB，Qwen3 90→54 MiB）；
-    /// - 加载器状态保持 `.loaded`，下次打分时上下文在引擎后台线程上自动重建（Mac 实测 2–3 ms），不重新解析 GGUF。
-    /// 真正卸载整个模型只在系统内存警告 / 内存压力时发生（见 `evictAllForMemoryWarning`）
+    /// - 挂起期间常驻内存只剩模型本体（真机实测 Qwen2.5 模型本体仅占约 10 MiB）；
+    /// - 即使约 1 秒后系统销毁了该控制器，Rust 层 `SHARED_LLM` 仍保留模型本体，下次呼出新控制器几毫秒内即可直接复用；
+    /// - 真正卸载整个模型只在系统内存警告 / 内存压力、关闭本地模型或更换模型时发生。
     func controllerDidDisappear(_ id: ObjectIdentifier) {
-        visibleControllers.remove(id)
-        guard visibleControllers.isEmpty else { return }
+        guard visibleControllers.remove(id) != nil, visibleControllers.isEmpty else { return }
         let trim = trimContext
         queue.async {
             let start = KeyboardTrace.now
@@ -86,7 +87,6 @@ final class LocalModelCoordinator {
 
     /// 内核发出内存压力信号时，无条件卸掉进程内全部本地模型并清空共享缓存
     func evictAllForMemoryWarning() {
-        residentModelURL = nil
         let engines = evictPeersForMemoryWarning(excluding: nil, keepingEngine: nil)
         KeyboardTrace.event("memory.pressure", "unloading=\(engines.count)")
         let release = releaseCaches
@@ -99,10 +99,10 @@ final class LocalModelCoordinator {
     }
 
     func hasResidentModel(url: URL) -> Bool {
-        let targetURL = url.standardizedFileURL
-        if residentModelURL == targetURL {
+        if isModelCached(url) {
             return true
         }
+        let targetURL = url.standardizedFileURL
         return entries.contains { entry in
             guard let loader = entry.loader,
                   loader.state == .loading || loader.state == .loaded,
@@ -111,18 +111,8 @@ final class LocalModelCoordinator {
         }
     }
 
-    fileprivate func noteModelLoaded(_ url: URL) {
-        residentModelURL = url.standardizedFileURL
-    }
-
-    fileprivate func clearResidentModel(matching url: URL? = nil) {
-        guard let url else {
-            residentModelURL = nil
-            return
-        }
-        if residentModelURL == url.standardizedFileURL {
-            residentModelURL = nil
-        }
+    func hasAnyCachedModel() -> Bool {
+        isModelCached(nil)
     }
 
     func register(loader: LocalModelLoader, engine: IMEEngine) {
@@ -137,23 +127,23 @@ final class LocalModelCoordinator {
     struct Claim {
         var peerEngines: [IMEEngine] = []
         var sameModelResident = false
-        var hadDifferentResidentModel = false
+        var hadDifferentCachedModel = false
     }
 
-    /// 为当前控制器接管本地模型：返回同进程其他控制器持有的引擎，以及其中是否已经驻留着同一个模型文件
+    /// 为当前控制器接管本地模型：直接以 Rust 层 `SHARED_LLM` 与同进程活跃引擎的真实状态为准，不维护易失真的镜像字段
     func claimForLoad(by requester: LocalModelLoader, engine: IMEEngine, url: URL) -> Claim {
         register(loader: requester, engine: engine)
         var peerEngines: [IMEEngine] = []
         let targetURL = url.standardizedFileURL
-        var sameModelResident = (residentModelURL == targetURL)
-        let hadDifferentResidentModel = (residentModelURL != nil && residentModelURL != targetURL)
-        if hadDifferentResidentModel {
-            residentModelURL = nil
-        }
+        let cachedExact = isModelCached(url)
+        var sameModelResident = cachedExact
+        let hadDifferentCachedModel = !cachedExact && isModelCached(nil)
         for entry in entries where entry.loader !== requester {
             let otherLoader = entry.loader
             let otherActive = otherLoader?.state == .loading || otherLoader?.state == .loaded
-            if otherActive, otherLoader?.loadedURL?.standardizedFileURL == targetURL {
+            if otherActive,
+               otherLoader?.loadedURL?.standardizedFileURL == targetURL,
+               entry.engine?.isLocalModelLoaded == true {
                 sameModelResident = true
             }
             if otherActive {
@@ -169,13 +159,12 @@ final class LocalModelCoordinator {
         return Claim(
             peerEngines: peerEngines,
             sameModelResident: sameModelResident,
-            hadDifferentResidentModel: hadDifferentResidentModel
+            hadDifferentCachedModel: hadDifferentCachedModel
         )
     }
 
     /// 关闭本地模型时，把同进程其他控制器上的本地模型一并卸掉
     func evictPeers(excluding requester: LocalModelLoader?, keepingEngine: IMEEngine? = nil) -> [IMEEngine] {
-        residentModelURL = nil
         entries.removeAll { $0.loader == nil && $0.engine == nil }
         var peerEngines: [IMEEngine] = []
         for entry in entries where entry.loader !== requester {
@@ -196,7 +185,6 @@ final class LocalModelCoordinator {
 
     /// 收到系统内存警告时，把同进程其他控制器上的本地模型一并卸掉，并把原持有者标成 .unloadedForMemory
     func evictPeersForMemoryWarning(excluding requester: LocalModelLoader?, keepingEngine: IMEEngine? = nil) -> [IMEEngine] {
-        residentModelURL = nil
         entries.removeAll { $0.loader == nil && $0.engine == nil }
         var peerEngines: [IMEEngine] = []
         for entry in entries where entry.loader !== requester {
@@ -216,7 +204,6 @@ final class LocalModelCoordinator {
     }
 
     fileprivate func releaseProcessCaches() {
-        residentModelURL = nil
         releaseCaches()
     }
 }
@@ -343,7 +330,7 @@ final class LocalModelLoader {
         if state != .loading,
            !engine.isLocalModelLoaded,
            !claim.sameModelResident,
-           !claim.hadDifferentResidentModel,
+           !claim.hadDifferentCachedModel,
            claim.peerEngines.isEmpty,
            availableMemory() < requiredBytes {
             KeyboardTrace.event("model.skippedLowMemory", "model=\(url.lastPathComponent) required=\(requiredBytes >> 20)")
@@ -357,7 +344,7 @@ final class LocalModelLoader {
         let availableMemory = self.availableMemory
         let peerEngines = claim.peerEngines
         let sameModelResident = claim.sameModelResident
-        let hadDifferentResidentModel = claim.hadDifferentResidentModel
+        let hadDifferentCachedModel = claim.hadDifferentCachedModel
         let coordinator = self.coordinator
         let modelName = url.lastPathComponent
         KeyboardTrace.event("model.loadQueued", "model=\(modelName) reuse=\(sameModelResident)")
@@ -381,7 +368,7 @@ final class LocalModelLoader {
                     // 换模型或首次加载：先卸掉旧的（含同进程其他控制器的旧模型及残留进程缓存）再量内存
                     for peer in peerEngines where peer.isLocalModelLoaded { peer.unloadLocalModel() }
                     if engine.isLocalModelLoaded { engine.unloadLocalModel() }
-                    if hadDifferentResidentModel {
+                    if hadDifferentCachedModel {
                         coordinator?.releaseProcessCaches()
                     }
                     if availableMemory() < requiredBytes {
@@ -397,11 +384,6 @@ final class LocalModelLoader {
             }
             KeyboardTrace.event("model.loadFinished", "model=\(modelName) outcome=\(outcome) \(KeyboardTrace.ms(since: start))ms")
             DispatchQueue.main.async {
-                if outcome == .loaded {
-                    coordinator?.noteModelLoaded(url)
-                } else {
-                    coordinator?.clearResidentModel(matching: url)
-                }
                 guard let self, self.generation == current else { return }
                 switch outcome {
                 case .loaded:
@@ -430,13 +412,14 @@ final class LocalModelLoader {
         if active { state = .idle }
     }
 
-    /// 设置里关掉了本地模型（或换成了别的 AI 模式）
+    /// 设置里关掉了本地模型（或换成了别的 AI 模式）：连同已销毁控制器留在 SHARED_LLM 里的缓存一并清空
     func unload(into engine: IMEEngine) {
         coordinator?.register(loader: self, engine: engine)
         let peerEngines = coordinator?.evictPeers(excluding: self, keepingEngine: engine) ?? []
         let active = state == .loading || state == .loaded
-        guard active || engine.isLocalModelLoaded || !peerEngines.isEmpty else { return }
-        enqueueUnload(engine, extraEngines: peerEngines)
+        let hasSharedCache = coordinator?.hasAnyCachedModel() ?? false
+        guard active || engine.isLocalModelLoaded || !peerEngines.isEmpty || hasSharedCache else { return }
+        enqueueUnload(engine, extraEngines: peerEngines, releaseCaches: hasSharedCache)
         if active { state = .idle }
     }
 

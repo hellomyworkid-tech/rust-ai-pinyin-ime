@@ -681,19 +681,23 @@ impl ImeEngine {
             }
         });
 
+        // 没装模型时不去动调度器：否则当前输入正在等的宿主选词结果到达时就不再通知了
+        let installed = lock_ignoring_poison(&self.llm).is_some();
         if let Some(ref reused) = reusable {
             if let Some(current) = lock_ignoring_poison(&self.llm).as_ref() {
                 if Arc::ptr_eq(current, reused) {
                     return Ok(());
                 }
             }
-        } else {
-            // 要加载的是另一个模型（或无效路径）：先清掉进程缓存，确保旧模型在加载新模型之前彻底释放，绝不同时驻留两份
+        } else if file_key.is_some()
+            || (installed && ACTIVE_LLM_ENGINES.load(Ordering::Acquire) <= 1)
+        {
+            // 要加载的是另一个真实存在的模型文件，或本引擎原本装着模型且是进程内最后一个持有者（含换装无效路径失败时）：
+            // 先清掉进程缓存，确保旧模型在加载新模型之前彻底释放，绝不同时驻留两份；
+            // 若本引擎原本未装模型且目标路径本身不存在，则不动其他控制器留在 SHARED_LLM 里的缓存
             *lock_ignoring_poison(&SHARED_LLM) = None;
         }
 
-        // 没装模型时不去动调度器：否则当前输入正在等的宿主选词结果到达时就不再通知了
-        let installed = lock_ignoring_poison(&self.llm).is_some();
         if let Some(old) = installed.then(|| self.detach_llm()).flatten() {
             // 在途的打分自己还持有一个引用。等到这里是最后一个引用再释放，
             // 下面开始加载时旧模型就已经不占内存了
@@ -761,7 +765,9 @@ impl ImeEngine {
     /// 第一次卸载后约 17 MiB，反复加载 / 卸载几轮后稳定在约 41–46 MiB。留下的是分配器没有还给系统的内存，
     /// 下次加载会复用，不会无限增长。权重本身是只读 mmap，从来不计入 phys_footprint
     pub fn unload_llm(&self) {
-        let detached = self.detach_llm();
+        let Some(detached) = self.detach_llm() else {
+            return;
+        };
         let last_active = ACTIVE_LLM_ENGINES.load(Ordering::Acquire) == 0;
         let dropped_shared = if last_active {
             lock_ignoring_poison(&SHARED_LLM).take()
@@ -771,17 +777,11 @@ impl ImeEngine {
         if last_active {
             // 若后台打分线程此刻还握着一份 Arc 正在跑最后一块前缀（最多 ≤16 token），先取消并短暂等待其放手，
             // 保证 llama_free 在 release_allocator_pressure 之前真正执行完毕
-            if let Some(scorer) = detached
-                .as_ref()
-                .or_else(|| dropped_shared.as_ref().map(|c| &c.scorer))
-            {
-                scorer.cancel();
-                let owned_refs =
-                    usize::from(detached.is_some()) + usize::from(dropped_shared.is_some());
-                let deadline = Instant::now() + Duration::from_millis(200);
-                while Arc::strong_count(scorer) > owned_refs && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(2));
-                }
+            detached.cancel();
+            let owned_refs = 1 + usize::from(dropped_shared.is_some());
+            let deadline = Instant::now() + Duration::from_millis(200);
+            while Arc::strong_count(&detached) > owned_refs && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
             }
         }
         drop(detached);
@@ -858,11 +858,40 @@ impl ImeEngine {
 impl Drop for ImeEngine {
     fn drop(&mut self) {
         if self.llm_loaded.load(Ordering::Acquire) || lock_ignoring_poison(&self.llm).is_some() {
-            // 先把 session.ai 里的 scorer、self.llm 与 SHARED_LLM 全部释放，再触发 malloc_zone_pressure_relief，
-            // 防止 70-93 MiB 模型在控制器销毁后仍常驻进程触发 iOS Jetsam
-            self.unload_llm();
+            // 控制器销毁时只从本引擎摘下引用并取消在途打分，保留进程级 SHARED_LLM（收起时已裁剪上下文，真机实测模型本体仅占约 10 MiB）：
+            // iOS 每次收起键盘约 1 秒后就会销毁控制器，保留 SHARED_LLM 能让同进程下一次呼出在几毫秒内直接复用模型，
+            // 避免每次呼出都耗时 340–560 ms 重新加载 GGUF。真正清空 SHARED_LLM 仅在显式卸载（切换 AI 模式 / 关闭本地模型）、
+            // 更换其他模型文件或收到系统内存压力调用 `release_memory_caches` 时发生。
+            if let Some(scorer) = self.detach_llm() {
+                scorer.cancel();
+            }
         }
     }
+}
+
+/// 查询进程级 `SHARED_LLM` 是否当前驻留着指定（或任意）本地模型
+pub fn is_local_model_cached(model_path: Option<&Path>) -> bool {
+    let snapshot = {
+        let guard = lock_ignoring_poison(&SHARED_LLM);
+        let Some(cached) = guard.as_ref() else {
+            return false;
+        };
+        if model_path.is_none() {
+            return true;
+        }
+        (cached.path.clone(), cached.len, cached.modified)
+    };
+    let Some(target) = model_path else {
+        return true;
+    };
+    let Ok(meta) = std::fs::metadata(target) else {
+        return false;
+    };
+    if meta.len() != snapshot.1 || meta.modified().ok() != snapshot.2 {
+        return false;
+    }
+    let canon = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    canon == snapshot.0
 }
 
 /// 主动向系统归还 libsystem_malloc 的空闲脏页（iOS 键盘扩展防 Jetsam 关键步骤）
@@ -1475,6 +1504,21 @@ pub extern "C" fn ime_release_memory_caches() {
 #[no_mangle]
 pub extern "C" fn ime_trim_local_model_context() {
     let _ = catch_unwind(AssertUnwindSafe(trim_local_model_context));
+}
+
+/// # Safety
+/// `model_path` 必须是 NULL 或以 NUL 结尾的 UTF-8 路径
+#[no_mangle]
+pub unsafe extern "C" fn ime_is_local_model_cached(model_path: *const c_char) -> bool {
+    let path = if model_path.is_null() {
+        None
+    } else {
+        let Some(s) = (unsafe { borrow_str(model_path) }) else {
+            return false;
+        };
+        Some(Path::new(s))
+    };
+    catch_unwind(AssertUnwindSafe(|| is_local_model_cached(path))).unwrap_or(false)
 }
 
 /// # Safety

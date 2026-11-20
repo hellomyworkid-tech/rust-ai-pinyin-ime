@@ -1451,6 +1451,68 @@ fn trimming_the_model_context_keeps_the_model_usable() {
     ime_trim_local_model_context();
 }
 
+/// 真模型：模拟 iOS 收起键盘约 1 秒后销毁 `KeyboardViewController` / `ImeEngine`：
+/// - 销毁引擎不会清空进程级 `SHARED_LLM`（`ime_is_local_model_cached` 仍为 true）；
+/// - 同一进程下次呼出新建引擎加载同一模型时毫秒级直接复用；
+/// - 内存压力（`ime_release_memory_caches`）或显式 `unload_llm` 后立即清空缓存（`ime_is_local_model_cached` 变回 false）。
+#[test]
+fn dropping_the_engine_keeps_the_model_cached_until_released() {
+    let Some(model) = std::env::var_os("IME_LLM_TEST_MODEL") else {
+        eprintln!("跳过：没有设置 IME_LLM_TEST_MODEL");
+        return;
+    };
+    if !ImeEngine::llm_supported() {
+        eprintln!("跳过：这个构建没有启用 llama 特性");
+        return;
+    }
+    let _turn = real_model_test_turn();
+    let model_path = std::path::Path::new(&model);
+    let c_model = CString::new(model_path.to_str().unwrap()).unwrap();
+
+    // 先确保干净起点
+    ime_release_memory_caches();
+    unsafe {
+        assert!(!ime_is_local_model_cached(std::ptr::null()));
+        assert!(!ime_is_local_model_cached(c_model.as_ptr()));
+    }
+
+    {
+        let first = engine();
+        first.load_llm(model_path, 0).expect("initial load");
+        unsafe {
+            assert!(ime_is_local_model_cached(std::ptr::null()));
+            assert!(ime_is_local_model_cached(c_model.as_ptr()));
+        }
+        ime_trim_local_model_context();
+        // first 在作用域末尾被 drop（模拟控制器收起 1 秒后被系统销毁）
+    }
+
+    unsafe {
+        assert!(
+            ime_is_local_model_cached(c_model.as_ptr()),
+            "控制器与引擎销毁后 SHARED_LLM 应保留模型本体供下次呼出复用"
+        );
+    }
+
+    // 新建第二个引擎：直接命中 SHARED_LLM 毫秒级复用，且打分正常
+    let second = engine();
+    let reuse_start = std::time::Instant::now();
+    second.load_llm(model_path, 0).expect("reuse cached model");
+    let reuse_elapsed = reuse_start.elapsed();
+    assert!(
+        reuse_elapsed < Duration::from_millis(50),
+        "复用 SHARED_LLM 不应重新解析 GGUF，实际耗时 {reuse_elapsed:?}"
+    );
+    drop(second);
+
+    // 无活跃引擎时收到内存压力（ime_release_memory_caches）：彻底释放 SHARED_LLM
+    ime_release_memory_caches();
+    unsafe {
+        assert!(!ime_is_local_model_cached(std::ptr::null()));
+        assert!(!ime_is_local_model_cached(c_model.as_ptr()));
+    }
+}
+
 unsafe extern "C" fn c_chooser(user: *mut std::ffi::c_void, id: u64, request_json: *const c_char) {
     let sink = &*(user as *const Mutex<Vec<(u64, Option<String>)>>);
     let json = (!request_json.is_null()).then(|| CStr::from_ptr(request_json).to_str().unwrap().to_string());

@@ -111,12 +111,22 @@ final class InputController {
 
     private func dropEngine() {
         resetComposition()
-        // 通知外面时旧引擎还活着：AI 那边要先把本地模型从它身上卸掉
-        withExtendedLifetime(engine) {
-            engine = nil
-            engineLexicon = nil
-            onEngineDropped?()
-        }
+        guard let old = engine else { return }
+        engine = nil
+        engineLexicon = nil
+        onEngineDropped?()
+        EngineFactory.disposeAsync(old)
+    }
+
+    /// 供控制器 `deinit` 取出底层引擎交由后台队列析构，避免主线程等待个人词库落盘或工作线程退出
+    func takeEngineForAsyncDispose() -> IMEEngine? {
+        guard let old = engine else { return nil }
+        onChange = nil
+        onEngineCreated = nil
+        onEngineDropped = nil
+        engine = nil
+        engineLexicon = nil
+        return old
     }
 
     // MARK: - 输入框变化
