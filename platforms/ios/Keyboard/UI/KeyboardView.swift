@@ -31,6 +31,7 @@ final class KeyboardView: UIView {
     }
 
     private(set) var config = Config()
+    private(set) var isConfigured = false
     private var rows: [[KeySpec]] = []
     private var specs: [KeySpec] = []
     private var keyViews: [KeyView] = []
@@ -45,7 +46,6 @@ final class KeyboardView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
-        apply(config, force: true)
     }
 
     required init?(coder: NSCoder) {
@@ -53,9 +53,11 @@ final class KeyboardView: UIView {
     }
 
     func apply(_ newConfig: Config, force: Bool = false) {
-        guard force || newConfig != config else { return }
-        let rowsChanged = force || newConfig.page != config.page || newConfig.showsGlobe != config.showsGlobe
+        let forceBuild = force || !isConfigured
+        guard forceBuild || newConfig != config else { return }
+        let rowsChanged = forceBuild || newConfig.page != config.page || newConfig.showsGlobe != config.showsGlobe
             || (newConfig.page != .letters && newConfig.chineseMode != config.chineseMode)
+        isConfigured = true
         config = newConfig
         if rowsChanged {
             cancelAllTouches()
@@ -142,7 +144,7 @@ final class KeyboardView: UIView {
             face.symbolName = "globe"
             face.fontSize = icon
         case .space:
-            if UIImage(systemName: "space") != nil {
+            if KeyboardSymbolCache.hasSpaceSymbol {
                 face.symbolName = "space"
                 face.fontSize = icon
             } else {

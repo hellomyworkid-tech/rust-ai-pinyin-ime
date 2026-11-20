@@ -923,10 +923,10 @@ fn spawn_page_warmup(lexicon: CompiledLexicon) {
                     let _ = pthread_set_qos_class_self_np(0x11, 0);
                 }
             }
-            // 让出冷启动首帧提交窗口
-            std::thread::sleep(Duration::from_millis(120));
+            // 让出冷启动首帧与键盘滑入动画前半程窗口
+            std::thread::sleep(Duration::from_millis(240));
             const PAGE: usize = 4096;
-            const CHUNK_PAGES: usize = 1024; // 每预热 4 MiB 短暂让步一次 I/O
+            const CHUNK_PAGES: usize = 512; // 每预热 2 MiB 短暂让步一次 I/O
             let bytes = lexicon.as_bytes();
             let mut acc = 0u8;
             let mut offset = 0usize;

@@ -68,13 +68,11 @@ final class IdleToolbarView: UIView {
     }
 
     private func applyAppearance() {
-        let iconConfig = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         if isPanelOpen {
-            settingsButton.setImage(UIImage(systemName: "chevron.left", withConfiguration: iconConfig), for: .normal)
+            settingsButton.setImage(KeyboardSymbolCache.image(named: "chevron.left", pointSize: 16), for: .normal)
             settingsButton.accessibilityLabel = "返回键盘"
 
-            let closeConfig = UIImage.SymbolConfiguration(pointSize: 17, weight: .regular)
-            dismissButton.setImage(UIImage(systemName: "xmark.circle", withConfiguration: closeConfig), for: .normal)
+            dismissButton.setImage(KeyboardSymbolCache.image(named: "xmark.circle", pointSize: 17), for: .normal)
             dismissButton.accessibilityLabel = "关闭设置"
 
             if let notice = panelNotice, !notice.isEmpty {
@@ -87,10 +85,10 @@ final class IdleToolbarView: UIView {
                 statusLabel.textColor = KeyboardTheme.keyText
             }
         } else {
-            settingsButton.setImage(UIImage(systemName: "gearshape", withConfiguration: iconConfig), for: .normal)
+            settingsButton.setImage(KeyboardSymbolCache.image(named: "gearshape", pointSize: 16), for: .normal)
             settingsButton.accessibilityLabel = "快捷设置"
 
-            dismissButton.setImage(UIImage(systemName: "keyboard.chevron.compact.down", withConfiguration: iconConfig), for: .normal)
+            dismissButton.setImage(KeyboardSymbolCache.image(named: "keyboard.chevron.compact.down", pointSize: 16), for: .normal)
             dismissButton.accessibilityLabel = "收起键盘"
 
             statusLabel.text = normalStatus

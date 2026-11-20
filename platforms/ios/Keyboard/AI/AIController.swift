@@ -45,7 +45,7 @@ final class AIController {
 
     init(chooser: AppleModelChooser, localLoader: LocalModelLoader = LocalModelLoader(),
          localModelURL: @escaping (IMESettings) -> URL? = { ModelCatalog.find($0.localModelID)?.localURL },
-         coldLocalLoadDelay: TimeInterval = 0.12) {
+         coldLocalLoadDelay: TimeInterval = 0.35) {
         self.chooser = chooser
         self.localLoader = localLoader
         self.localModelURL = localModelURL

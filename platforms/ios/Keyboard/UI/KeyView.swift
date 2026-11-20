@@ -8,10 +8,16 @@ enum KeyTypography {
         "〔", "〕", "〖", "〗", "〘", "〙", "〚", "〛", "［", "］", "｛", "｝",
     ]
 
+    private static var halfWidthFontCache: [Int: UIFont] = [:]
+
     /// 单字全角中文标点在苹方里默认占满 1em、墨迹偏左；开启半宽字距后裁掉右侧留白，在键帽与放大气泡里水平正居中
     static func font(ofSize size: CGFloat, weight: UIFont.Weight = .regular, for text: String?) -> UIFont {
         guard let text, text.count == 1, let ch = text.first, fullWidthPunctuation.contains(ch) else {
             return .systemFont(ofSize: size, weight: weight)
+        }
+        let cacheKey = Int((size * 10).rounded())
+        if let cached = halfWidthFontCache[cacheKey] {
+            return cached
         }
         let base = UIFont(name: "PingFangSC-Regular", size: size) ?? .systemFont(ofSize: size, weight: weight)
         let desc = base.fontDescriptor.addingAttributes([
@@ -20,7 +26,33 @@ enum KeyTypography {
                 UIFontDescriptor.FeatureKey.selector: kHalfWidthTextSelector,
             ]]
         ])
-        return UIFont(descriptor: desc, size: size)
+        let font = UIFont(descriptor: desc, size: size)
+        halfWidthFontCache[cacheKey] = font
+        return font
+    }
+}
+
+/// 进程内复用常用 SF Symbols 图标，避免每次呼出与重排键位时重复向系统符号表查询
+enum KeyboardSymbolCache {
+    static let hasSpaceSymbol: Bool = UIImage(systemName: "space") != nil
+
+    private struct Key: Hashable {
+        let name: String
+        let tenthsPointSize: Int
+        let weightRaw: Int
+    }
+
+    private static var cache: [Key: UIImage] = [:]
+
+    static func image(named name: String, pointSize: CGFloat, weight: UIImage.SymbolWeight = .regular) -> UIImage? {
+        let key = Key(name: name, tenthsPointSize: Int((pointSize * 10).rounded()), weightRaw: weight.rawValue)
+        if let cached = cache[key] {
+            return cached
+        }
+        let config = UIImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+        guard let image = UIImage(systemName: name, withConfiguration: config) else { return nil }
+        cache[key] = image
+        return image
     }
 }
 
@@ -104,8 +136,7 @@ final class KeyView: UIView {
 
         label.isHidden = newFace.title == nil
         if let name = newFace.symbolName,
-           let image = UIImage(systemName: name,
-                               withConfiguration: UIImage.SymbolConfiguration(pointSize: newFace.fontSize, weight: .regular)) {
+           let image = KeyboardSymbolCache.image(named: name, pointSize: newFace.fontSize, weight: .regular) {
             icon.image = image
             icon.isHidden = false
         } else {

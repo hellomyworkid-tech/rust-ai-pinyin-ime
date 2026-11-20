@@ -46,13 +46,16 @@ enum EngineFactory {
         .appendingPathComponent("AIPinyin", isDirectory: true)
 
     /// 个人词频存在键盘自己的容器里：没有「允许完全访问」时键盘写不了 App Group，自己的容器始终可写
-    static let userDictionaryURL: URL? = appSupportDirectory?.appendingPathComponent("user_dict.json")
+    static var userDictionaryURL: URL? { appSupportDirectory?.appendingPathComponent("user_dict.json") }
 
     /// 未上屏组合的暂存快照（切应用、截图或收起键盘后回到同一输入框时恢复），同样存在键盘自己的容器里
-    static let pendingCompositionsURL: URL? = appSupportDirectory?.appendingPathComponent("pending_compositions.json")
+    static var pendingCompositionsURL: URL? { appSupportDirectory?.appendingPathComponent("pending_compositions.json") }
 
     /// 未开启「允许完全访问」时，键盘快捷面板修改的设置保存在键盘自己的容器里
-    static let keyboardSettingsURL: URL? = appSupportDirectory?.appendingPathComponent("settings_override.json")
+    static var keyboardSettingsURL: URL? { appSupportDirectory?.appendingPathComponent("settings_override.json") }
+
+    /// 键盘生命周期与耗时的滚动诊断记录（上限 64KB × 2，不含任何用户输入内容），可直接经 devicectl 从键盘容器拉回
+    static var traceLogURL: URL? { appSupportDirectory?.appendingPathComponent("trace.log") }
 
     static func makeEngine(source: LexiconSource?) -> IMEEngine {
         let start = KeyboardTrace.now

@@ -27,15 +27,17 @@ final class PendingCompositionStore {
     static let defaultMaxEntries = 8
     private static let contextTailLimit = 16
 
-    private let fileURL: URL?
+    private let fileURLProvider: () -> URL?
+    private lazy var resolvedFileURL: URL? = fileURLProvider()
+    private var fileURL: URL? { resolvedFileURL }
     private let ttl: TimeInterval
     private let maxEntries: Int
     private var entries: [String: Entry] = [:]
     private var loadedFromDisk = false
 
-    init(fileURL: URL? = nil, ttl: TimeInterval = PendingCompositionStore.defaultTTL,
+    init(fileURL: @autoclosure @escaping () -> URL? = nil, ttl: TimeInterval = PendingCompositionStore.defaultTTL,
          maxEntries: Int = PendingCompositionStore.defaultMaxEntries) {
-        self.fileURL = fileURL
+        self.fileURLProvider = fileURL
         self.ttl = ttl
         self.maxEntries = max(1, maxEntries)
     }
@@ -49,6 +51,16 @@ final class PendingCompositionStore {
         if !entries.isEmpty { return true }
         guard let fileURL else { return false }
         return FileManager.default.fileExists(atPath: fileURL.path)
+    }
+
+    /// 当前 `documentID` 是否在暂存表里有未过期的精确匹配记录（只读磁盘小文件，绝不触发宿主 `documentContextBeforeInput` XPC）
+    func hasExactEntry(for documentID: UUID, now: Date = Date()) -> Bool {
+        guard mayHaveEntries else { return false }
+        reloadFromDiskIfAvailable()
+        if let entry = entries[documentID.uuidString] {
+            return now.timeIntervalSince(entry.savedAt) <= ttl
+        }
+        return false
     }
 
     /// 保存某个输入框当前的未完成组合快照

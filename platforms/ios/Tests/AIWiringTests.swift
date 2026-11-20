@@ -736,4 +736,74 @@ final class AIWiringTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(model.minimumAvailableMiB, model.residentMiB + 25)
         }
     }
+
+    func testResidentModelReusesAfterPeerControllerDeallocated() async throws {
+        let queue = DispatchQueue(label: "test.local-model.dealloc-peer")
+        let coordinator = LocalModelCoordinator(queue: queue)
+        let url = try makeModelFile()
+        // 模拟旧控制器加载模型后被销毁，但进程级 SHARED_LLM 仍驻留导致剩余内存仅 75MB（低于门槛）
+        var sharedCached = false
+        let lowAfterResident: () -> UInt64 = {
+            sharedCached ? 75 * 1024 * 1024 : 165 * 1024 * 1024
+        }
+
+        do {
+            let loader1 = LocalModelLoader(coordinator: coordinator, availableMemory: lowAfterResident)
+            let engine1 = RecordingEngine()
+            loader1.load(url, into: engine1)
+            await waitForState(loader1, .loaded)
+            sharedCached = true
+        }
+        // loader1 与 engine1 均已销毁，新控制器（如切到 WeChat）不应误判 skippedLowMemory，也不应延迟等待冷加载
+        let loader2 = LocalModelLoader(coordinator: coordinator, availableMemory: lowAfterResident)
+        let engine2 = RecordingEngine()
+        XCTAssertTrue(loader2.hasResidentModel(at: url, engine: engine2))
+        loader2.load(url, into: engine2)
+        await waitForState(loader2, .loaded)
+        XCTAssertTrue(engine2.isLocalModelLoaded)
+    }
+
+    func testPendingCompositionStoreDefersURLResolutionAndChecksExactMatchWithoutHostContext() {
+        var urlEvaluated = 0
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lazy-pending-\(UUID().uuidString).json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+
+        func resolveURL() -> URL? {
+            urlEvaluated += 1
+            return url
+        }
+
+        let store = PendingCompositionStore(fileURL: resolveURL())
+        XCTAssertEqual(urlEvaluated, 0, "控制器 init 阶段不应提前解析容器目录 URL")
+
+        let docA = UUID()
+        let docB = UUID()
+        store.save("{\"buf\":\"shunfeng\"}", for: docA)
+        XCTAssertEqual(urlEvaluated, 1)
+        XCTAssertTrue(store.hasExactEntry(for: docA))
+        XCTAssertFalse(store.hasExactEntry(for: docB))
+    }
+
+    func testKeyboardTraceRotatesBoundedLogFile() throws {
+        XCTAssertGreaterThanOrEqual(KeyboardTrace.sinceProcessSpawnMs, 0)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("trace-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let logURL = dir.appendingPathComponent("trace.log")
+        let prevURL = dir.appendingPathComponent("trace.prev.log")
+
+        let chunk = String(repeating: "a", count: 140) + "\n"
+        KeyboardTrace.appendRecord(chunk, maxBytes: 300, to: logURL)
+        KeyboardTrace.appendRecord(chunk, maxBytes: 300, to: logURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prevURL.path))
+
+        // 第 3 条（282 + 30 > 300 上限）：旧内容轮转到 trace.prev.log，新文件只保留最新一条
+        let latest = String(repeating: "b", count: 29) + "\n"
+        KeyboardTrace.appendRecord(latest, maxBytes: 300, to: logURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prevURL.path))
+        let current = try String(contentsOf: logURL, encoding: .utf8)
+        let previous = try String(contentsOf: prevURL, encoding: .utf8)
+        XCTAssertEqual(current, latest)
+        XCTAssertEqual(previous.count, chunk.count * 2)
+    }
 }

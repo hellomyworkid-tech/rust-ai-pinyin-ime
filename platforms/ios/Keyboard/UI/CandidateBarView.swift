@@ -61,9 +61,10 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
     }
 
     func setExpanded(_ expanded: Bool) {
-        let config = UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
-        expandButton.setImage(UIImage(systemName: expanded ? "chevron.up" : "chevron.down", withConfiguration: config),
-                              for: .normal)
+        expandButton.setImage(
+            KeyboardSymbolCache.image(named: expanded ? "chevron.up" : "chevron.down", pointSize: 15, weight: .semibold),
+            for: .normal
+        )
         expandButton.accessibilityLabel = expanded ? "收起候选" : "展开候选"
         scrollView.isHidden = expanded
         summaryLabel.isHidden = !expanded

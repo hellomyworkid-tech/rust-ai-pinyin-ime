@@ -10,7 +10,27 @@ import os
 final class KeyboardViewController: UIInputViewController {
     private let input = InputController(makeEngine: { EngineFactory.makeEngine(source: $0) },
                                         currentLexicon: { EngineFactory.lexiconSource() })
-    private let ai = AIController()
+    /// AI 控制器与暂存快照均按需懒创建：控制器 `init` / `loadView` / 冷启动 `viewWillAppear` 阶段不触碰
+    /// `LocalModelCoordinator.shared`、`AppleChoiceModel`、`AppGroup`（`containermanagerd` XPC）或磁盘路径
+    private var aiStorage: AIController?
+    private var ai: AIController {
+        if let existing = aiStorage { return existing }
+        let created = AIController()
+        created.onStatusChange = { [weak self] status in
+            guard let self else { return }
+            let loadedNow = created.localLoader.state == .loaded
+            let localJustLoaded = loadedNow && !self.localModelWasLoaded
+            self.localModelWasLoaded = loadedNow
+            self.aiStatus = status
+            if localJustLoaded, self.input.isComposing {
+                self.input.requestAIRefresh()
+            }
+            self.render()
+        }
+        aiStorage = created
+        return created
+    }
+
     private let pendingCompositions = PendingCompositionStore(fileURL: EngineFactory.pendingCompositionsURL)
     private var lifecycleObservers: [NSObjectProtocol] = []
     /// 宿主曾失活或收起过：下一次重连即使用新 documentIdentifier 也允许回退恢复原输入框的组合
@@ -24,11 +44,20 @@ final class KeyboardViewController: UIInputViewController {
     private var shift = ShiftState()
     private var traits = FieldTraits()
     private var settings = IMESettings()
+    private var hasLoadedSettings = false
     private var documentID: UUID?
     private var aiStatus = ""
     private var panelNotice: String?
     /// 键盘当前是否处在显示周期内（viewDidAppear 到 viewWillDisappear 之间）
     private var isVisible = false
+    private var didRegisterWithCoordinator = false
+    /// `viewWillAppear` 到 `viewDidAppear` 异步收尾完成期间置为 true，避免同步到达的 `NSExtensionHostDidBecomeActive` 重复加载设置与引擎
+    private var appearSetupPending = false
+    /// 键盘在可见状态下经历过宿主失活（下拉控制中心 / 切后台但未走 viewWillDisappear）：
+    /// 只有这种真正从失活切回的场景才需要由 `hostDidBecomeActive` 补做设置与模型恢复，正常呼出末尾迟到的通知不重复执行
+    private var resignedWhileVisible = false
+    /// 本轮输入是否进入过组合态：只在组合结束瞬间按需清理暂存快照，空闲态每次 `render()` 不再做磁盘 `stat`
+    private var hadActiveComposition = false
     /// 本地模型上一次状态回调时是否已加载：只在「刚加载好」那一下请求按 AI 重排
     private var localModelWasLoaded = false
     /// 快捷设置面板打开的时刻。刚打开的一小段时间内忽略面板上的点按：
@@ -55,9 +84,21 @@ final class KeyboardViewController: UIInputViewController {
     /// 本次 viewWillAppear 的时刻（诊断记录里算呼出各阶段的耗时）
     private var appearStartedAt: TimeInterval = 0
 
+    private enum RestorePolicy {
+        /// 冷启动首帧前：零磁盘 I/O、零宿主 XPC，留到 viewDidAppear 首帧之后恢复
+        case deferAll
+        /// 热呼出 viewWillAppear 首帧前：同一 documentID 精确命中时立即恢复（零宿主 XPC）；
+        /// 需要跨进程读 documentContextBeforeInput 的回退匹配留到紧随其后的 viewDidAppear 恢复
+        case exactOnlyDeferFallback
+        /// 键盘已在屏幕上切换输入框（textDidChange / hostDidBecomeActive）：立即完整匹配恢复
+        case immediate
+    }
+
     deinit {
         KeyboardTrace.event("controller.deinit")
-        LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self))
+        if didRegisterWithCoordinator {
+            LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self))
+        }
         for observer in lifecycleObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -66,18 +107,25 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: - 生命周期
 
     override func loadView() {
-        KeyboardTrace.controllerCreated()
+        let start = KeyboardTrace.now
+        KeyboardTrace.controllerCreated(phase: "loadView")
         let root = KeyboardRootView()
         rootView = root
         view = root
+        KeyboardTrace.event("controller.loadViewDone", "\(KeyboardTrace.ms(since: start))ms")
     }
 
     override func viewDidLoad() {
+        let start = KeyboardTrace.now
         super.viewDidLoad()
         feedback = KeyFeedback(view: rootView)
         rootView.keyboard.delegate = self
-        rootView.bar.delegate = self
-        rootView.strip.delegate = self
+        rootView.onCreateBar = { [weak self] bar in
+            bar.delegate = self
+        }
+        rootView.onCreateStrip = { [weak self] strip in
+            strip.delegate = self
+        }
         rootView.onCreateGrid = { [weak self] grid in
             grid.delegate = self
         }
@@ -91,6 +139,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         rootView.toolbar.onToggleSettings = { [weak self] in
             guard let self else { return }
+            self.ensureSettingsLoaded()
             self.feedback.keyDown()
             self.setSettingsExpanded(!self.rootView.isSettingsExpanded)
             self.render()
@@ -100,41 +149,36 @@ final class KeyboardViewController: UIInputViewController {
         input.output = ProxyTextOutput(controller: self)
         input.onChange = { [weak self] in self?.render() }
         input.onEngineCreated = { [weak self] engine in self?.ai.attach(engine) }
-        input.onEngineDropped = { [weak self] in self?.ai.detachEngine() }
-        ai.onStatusChange = { [weak self] status in
-            guard let self else { return }
-            let loadedNow = self.ai.localLoader.state == .loaded
-            let localJustLoaded = loadedNow && !self.localModelWasLoaded
-            self.localModelWasLoaded = loadedNow
-            self.aiStatus = status
-            if localJustLoaded, self.input.isComposing {
-                self.input.requestAIRefresh()
-            }
-            self.render()
-        }
+        input.onEngineDropped = { [weak self] in self?.aiStorage?.detachEngine() }
         let center = NotificationCenter.default
         lifecycleObservers = [
             center.addObserver(forName: .NSExtensionHostWillResignActive, object: nil, queue: .main) { [weak self] note in
                 guard let self, self.matchesExtensionContext(note) else { return }
                 KeyboardTrace.event("host.willResignActive", "visible=\(self.isVisible)")
+                if self.isVisible {
+                    self.resignedWhileVisible = true
+                }
                 self.hostInterrupted = true
                 self.saveCurrentComposition()
                 if self.rootView.isSettingsExpanded {
                     self.setSettingsExpanded(false)
                     self.render()
                 }
-                LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self))
+                if self.didRegisterWithCoordinator {
+                    LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self))
+                }
             },
             center.addObserver(forName: .NSExtensionHostDidBecomeActive, object: nil, queue: .main) { [weak self] note in
                 guard let self, self.matchesExtensionContext(note) else { return }
-                KeyboardTrace.event("host.didBecomeActive", "visible=\(self.isVisible)")
+                KeyboardTrace.event("host.didBecomeActive",
+                                    "visible=\(self.isVisible) resigned=\(self.resignedWhileVisible) pending=\(self.appearSetupPending)")
                 self.hostDidBecomeActive()
             }
         ]
 
-        // 键盘高度由根视图里的内容约束决定（见 KeyboardRootView.updateHeight）
+        // 键盘高度由根视图里的内容约束决定；真正的首次键位构建推迟到 viewWillAppear 拿到宿主 traits 与地球键需求后一次完成
         rootView.updateHeight(landscape: false, width: view.bounds.width)
-        render()
+        KeyboardTrace.event("controller.viewDidLoadDone", "\(KeyboardTrace.ms(since: start))ms")
     }
 
     /// 同一键盘扩展进程会同时驻留多个宿主应用的控制器，只响应属于自己宿主会话（extensionContext）的通知
@@ -145,21 +189,34 @@ final class KeyboardViewController: UIInputViewController {
         return true
     }
 
+    private func reloadSettings() {
+        settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
+        hasLoadedSettings = true
+        input.apply(settings)
+        feedback.configure(settings: settings, hasFullAccess: hasFullAccess)
+    }
+
+    private func ensureSettingsLoaded() {
+        if !hasLoadedSettings {
+            reloadSettings()
+        }
+    }
+
     private func hostDidBecomeActive() {
         guard isViewLoaded else { return }
         if currentDocumentID != nil, currentDocumentID != documentID {
-            syncField(restorePending: isVisible)
+            syncField(policy: appearSetupPending ? .deferAll : (isVisible ? .immediate : .deferAll))
         } else {
             // 下拉控制中心等回到同一个输入框：这次中断已经结束，之后从 A 直接点到 B 时仍要排除 A
             hostInterrupted = false
         }
-        // 切应用再切回时，若键盘原本开着，iOS 有时只发 DidBecomeActive 而不重走 viewWillAppear / viewDidAppear：
-        // 重新同步设置并让 AI 控制器接回（或重试加载）本地模型，无需手动切走输入法再切回
-        guard isVisible else { return }
+        // 只有「键盘原本可见、经历过 willResignActive 且未重走 viewWillAppear」时才在这里补做设置与模型恢复；
+        // 正常呼出滑入动画尾声迟到的 DidBecomeActive 不重复读盘或重置冷加载倒计时
+        guard isVisible, !appearSetupPending, resignedWhileVisible else { return }
+        resignedWhileVisible = false
+        didRegisterWithCoordinator = true
         LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
-        settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
-        input.apply(settings)
-        feedback.configure(settings: settings, hasFullAccess: hasFullAccess)
+        reloadSettings()
         if !input.isComposing {
             input.keyboardWillAppear()
         }
@@ -178,55 +235,67 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         appearStartedAt = KeyboardTrace.now
-        KeyboardTrace.event("appear.will", "engine=\(input.engine != nil ? "warm" : "cold")")
-        LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
-        // settings.json 只有几百字节，读一次很快；未开完全访问但快捷面板改过开关时合并读取本地覆盖配置
-        settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
+        appearSetupPending = true
+        resignedWhileVisible = false
+        let isWarm = input.engine != nil
+        KeyboardTrace.event("appear.will",
+                            "engine=\(isWarm ? "warm" : "cold") sinceSpawn=\(KeyboardTrace.sinceProcessSpawnMs)ms")
+        let landscape = traitCollection.verticalSizeClass == .compact
+        rootView.landscape = landscape
+        rootView.updateHeight(landscape: landscape, width: view.bounds.width)
         setSettingsExpanded(false)
-        input.apply(settings)
-        feedback.configure(settings: settings, hasFullAccess: hasFullAccess)
-        if input.engine != nil {
-            // 热呼出（日常 97%+ 场景，引擎已驻留）：
-            // `keyboardWillAppear` 无在途写盘时只是单次微秒级 `stat`，`PendingCompositionStore.take` 精确命中时也不走宿主 XPC，
-            // 直接在首帧恢复未完成拼音，既无候选栏延迟跳变，也杜绝滑入动画期间快速敲字漏同步词库的竞态
+        if isWarm {
+            // 热呼出（引擎已驻留，AppGroup 路径已缓存）：同步刷新设置与个人词库变更；
+            // 暂存组合只在精确命中同一 documentID 时当场恢复（零宿主 XPC），跨输入框回退匹配留到首帧之后
+            didRegisterWithCoordinator = true
+            LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
+            reloadSettings()
             input.keyboardWillAppear()
-            syncField(restorePending: true)
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.input.engine != nil else { return }
-                self.ensureEngineAndAI(deferColdLocalLoad: true)
-            }
+            syncField(policy: .exactOnlyDeferFallback)
         } else {
             // 冷呼出（进程刚拉起，input.engine == nil）：
-            // viewWillAppear 阶段零引擎创建、零宿主 XPC，保证 remoteKeyboardWindow 瞬间完成弹出与握手，
-            // 引擎构建与未提交拼音恢复统一放到 viewDidAppear 首帧显示完成之后
-            syncField(restorePending: false)
+            // IMESettings 的全部字段都不影响空闲首帧像素，因此首帧前零 containermanagerd AppGroup XPC、
+            // 零磁盘 stat / read、零引擎创建、零宿主 documentContextBeforeInput XPC，且只做单次键位构建
+            syncField(policy: .deferAll)
         }
-        KeyboardTrace.event("appear.willDone", "\(KeyboardTrace.ms(since: appearStartedAt))ms")
+        KeyboardTrace.event("appear.willDone",
+                            "\(KeyboardTrace.ms(since: appearStartedAt))ms sinceSpawn=\(KeyboardTrace.sinceProcessSpawnMs)ms")
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         isVisible = true
-        KeyboardTrace.event("appear.did", "+\(KeyboardTrace.ms(since: appearStartedAt))ms")
+        didRegisterWithCoordinator = true
+        KeyboardTrace.event("appear.did",
+                            "+\(KeyboardTrace.ms(since: appearStartedAt))ms sinceSpawn=\(KeyboardTrace.sinceProcessSpawnMs)ms")
         LocalModelCoordinator.shared.controllerWillAppear(ObjectIdentifier(self))
 
         if currentDocumentID != nil, currentDocumentID != documentID {
-            syncField(restorePending: input.engine != nil)
+            syncField(policy: input.engine != nil ? .exactOnlyDeferFallback : .deferAll)
         }
         // 屏幕底边的系统手势会推迟最下一行键的 touchesBegan
         view.window?.gestureRecognizers?.forEach { $0.delaysTouchesBegan = false }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isVisible else { return }
+            self.appearSetupPending = false
+            let settingsStart = KeyboardTrace.now
+            self.ensureSettingsLoaded()
+            let settingsMs = KeyboardTrace.ms(since: settingsStart)
             if !self.input.isComposing {
                 self.input.keyboardWillAppear()
             }
             self.restoreDeferredPendingCompositionIfNeeded()
+            let engineStart = KeyboardTrace.now
             self.ensureEngineAndAI(deferColdLocalLoad: true)
+            let engineMs = KeyboardTrace.ms(since: engineStart)
             if self.pendingCompositions.mayHaveEntries {
                 self.pendingCompositions.purgeExpired()
             }
-            KeyboardTrace.event("appear.ready",
-                                "+\(KeyboardTrace.ms(since: self.appearStartedAt))ms ai=\(self.settings.aiMode.rawValue) model=\(self.ai.localLoader.state)")
+            let loaderState = self.aiStorage?.localLoader.state ?? .idle
+            KeyboardTrace.event(
+                "appear.ready",
+                "+\(KeyboardTrace.ms(since: self.appearStartedAt))ms settings=\(settingsMs)ms engine=\(engineMs)ms ai=\(self.settings.aiMode.rawValue) model=\(loaderState)"
+            )
         }
     }
 
@@ -234,13 +303,18 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillDisappear(animated)
         KeyboardTrace.event("disappear.will", "shownFor=\(KeyboardTrace.ms(since: appearStartedAt))ms")
         isVisible = false
+        appearSetupPending = false
+        resignedWhileVisible = false
         hostInterrupted = true
         saveCurrentComposition()
         pendingDeferredRestore = nil
         documentID = nil
+        hadActiveComposition = false
         input.resetComposition()
-        ai.keyboardWillHide()
-        LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self))
+        aiStorage?.keyboardWillHide()
+        if didRegisterWithCoordinator {
+            LocalModelCoordinator.shared.controllerDidDisappear(ObjectIdentifier(self))
+        }
         page = traits.startPage
         isSymbolPanelLocked = false
         setGridExpanded(false)
@@ -251,7 +325,8 @@ final class KeyboardViewController: UIInputViewController {
         let landscape = traitCollection.verticalSizeClass == .compact
         rootView.landscape = landscape
         rootView.updateHeight(landscape: landscape, width: view.bounds.width)
-        if rootView.keyboard.config.showsGlobe != needsInputModeSwitchKey
+        if !rootView.keyboard.isConfigured
+            || rootView.keyboard.config.showsGlobe != needsInputModeSwitchKey
             || rootView.keyboard.config.landscape != landscape {
             render()
         }
@@ -260,7 +335,11 @@ final class KeyboardViewController: UIInputViewController {
 
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
-        ai.didReceiveMemoryWarning()
+        if let ai = aiStorage {
+            ai.didReceiveMemoryWarning()
+        } else {
+            LocalModelCoordinator.shared.evictAllForMemoryWarning()
+        }
         if isViewLoaded {
             rootView.releaseHiddenPanels()
         }
@@ -278,8 +357,9 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         if newID != documentID || currentTraits() != traits {
-            // 换了输入框（或同一输入框在消失后重新获得焦点）
-            syncField(restorePending: isVisible)
+            // 换了输入框（或同一输入框在消失后重新获得焦点）：首帧前或异步收尾未完时不抢做磁盘/XPC
+            let policy: RestorePolicy = (!isVisible || appearSetupPending) ? .deferAll : .immediate
+            syncField(policy: policy)
         } else {
             hostInterrupted = false
             input.hostTextDidChange()
@@ -329,7 +409,7 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private func syncField(restorePending: Bool = true) {
+    private func syncField(policy: RestorePolicy = .immediate) {
         pendingDeferredRestore = nil
         let previousDocID = documentID
         let wasInterrupted = hostInterrupted
@@ -356,20 +436,40 @@ final class KeyboardViewController: UIInputViewController {
         setGridExpanded(false)
         setSettingsExpanded(false)
         let snapshot: String?
-        if let newID, !newTraits.startsInEnglish, pendingCompositions.mayHaveEntries {
+        if let newID, !newTraits.startsInEnglish {
             // 同一屏幕直接从输入框 A 点到另一个同类型输入框 B 时（previousDocID 非空且未经过收起 / 失活），
             // 排除刚存下的 A，不把 A 的未完成拼音带到 B；等稍后点回 A 时再恢复
             let excluded = (!wasInterrupted && previousDocID != newID) ? previousDocID : nil
-            if restorePending {
-                snapshot = pendingCompositions.take(
-                    for: newID,
-                    traits: newTraits,
-                    contextBefore: textDocumentProxy.documentContextBeforeInput,
-                    excludingFallbackID: excluded
-                )
-            } else {
+            switch policy {
+            case .deferAll:
+                // 冷启动首帧前：不访问磁盘（零 stat）、不访问宿主 XPC，留到 viewDidAppear 首帧之后按需检查恢复
                 pendingDeferredRestore = (docID: newID, excluded: excluded)
                 snapshot = nil
+            case .exactOnlyDeferFallback:
+                if pendingCompositions.hasExactEntry(for: newID) {
+                    snapshot = pendingCompositions.take(
+                        for: newID,
+                        traits: newTraits,
+                        contextBefore: textDocumentProxy.documentContextBeforeInput,
+                        excludingFallbackID: excluded
+                    )
+                } else if pendingCompositions.mayHaveEntries {
+                    pendingDeferredRestore = (docID: newID, excluded: excluded)
+                    snapshot = nil
+                } else {
+                    snapshot = nil
+                }
+            case .immediate:
+                if pendingCompositions.mayHaveEntries {
+                    snapshot = pendingCompositions.take(
+                        for: newID,
+                        traits: newTraits,
+                        contextBefore: textDocumentProxy.documentContextBeforeInput,
+                        excludingFallbackID: excluded
+                    )
+                } else {
+                    snapshot = nil
+                }
             }
         } else {
             snapshot = nil
@@ -398,6 +498,7 @@ final class KeyboardViewController: UIInputViewController {
 
         rootView.isComposing = composing
         if composing {
+            hadActiveComposition = true
             if rootView.isSettingsExpanded {
                 setSettingsExpanded(false)
             }
@@ -408,8 +509,11 @@ final class KeyboardViewController: UIInputViewController {
                 rootView.grid.show(pager.candidates, hasMore: pager.hasMore, landscape: landscape)
             }
         } else {
-            if pendingDeferredRestore == nil, pendingCompositions.mayHaveEntries, let docID = documentID {
-                pendingCompositions.remove(for: docID)
+            if hadActiveComposition {
+                hadActiveComposition = false
+                if pendingDeferredRestore == nil, pendingCompositions.mayHaveEntries, let docID = documentID {
+                    pendingCompositions.remove(for: docID)
+                }
             }
             setGridExpanded(false)
         }
@@ -527,10 +631,11 @@ final class KeyboardViewController: UIInputViewController {
 
 extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardView(_ keyboardView: KeyboardView, didTrigger action: KeyAction) {
+        ensureSettingsLoaded()
         switch action {
         case .letter(let c):
             restoreDeferredPendingCompositionIfNeeded()
-            if isVisible { ai.restoreLocalModelIfYielded() }
+            if isVisible { aiStorage?.restoreLocalModelIfYielded() }
             let letter = shift.isUppercase ? Character(c.uppercased()) : c
             shift.didTypeLetter()
             input.typeLetter(letter)
@@ -559,6 +664,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     func keyboardViewDidTouchDownKey(_ keyboardView: KeyboardView) {
+        ensureSettingsLoaded()
         feedback.keyDown()
     }
 
@@ -724,6 +830,7 @@ extension KeyboardViewController: SymbolPanelDelegate {
     }
 
     func symbolPanelDidTouchDown(_ panel: SymbolPanelView) {
+        ensureSettingsLoaded()
         feedback.keyDown()
     }
 }

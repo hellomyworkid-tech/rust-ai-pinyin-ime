@@ -6,21 +6,44 @@ import UIKit
 /// 从上到下：音节栏 + 候选栏（输入中）或工具条（空闲），下面是按键区；展开候选时网格盖住按键区。
 /// 子视图全部手动排布，首帧快；只有决定键盘高度的那个隐形视图用 Auto Layout（见 updateHeight）。
 final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
-    let strip = CompositionStripView()
-    let bar = CandidateBarView()
     let toolbar = IdleToolbarView()
     let keyboard = KeyboardView()
     let preview = KeyPreviewView()
 
-    /// 展开候选网格、符号面板、快捷设置面板均按需懒加载：
-    /// 冷启动唤起键盘（99% 处于主字母页）时不创建任何 UICollectionView 或 SwiftUI UIHostingController，首帧毫秒级上屏。
+    /// 音节栏、候选栏、展开候选网格、符号面板、快捷设置面板均按需懒加载：
+    /// 冷启动唤起键盘时固定处于空闲态（只显示工具栏 + 字母按键区），首帧不创建任何 UIScrollView / UICollectionView / SwiftUI 视图树。
+    private(set) var stripIfLoaded: CompositionStripView?
+    private(set) var barIfLoaded: CandidateBarView?
     private(set) var gridIfLoaded: CandidateGridView?
     private(set) var symbolPanelIfLoaded: SymbolPanelView?
     private(set) var settingsPanelIfLoaded: QuickSettingsPanelView?
 
+    var onCreateStrip: ((CompositionStripView) -> Void)?
+    var onCreateBar: ((CandidateBarView) -> Void)?
     var onCreateGrid: ((CandidateGridView) -> Void)?
     var onCreateSymbolPanel: ((SymbolPanelView) -> Void)?
     var onCreateSettingsPanel: ((QuickSettingsPanelView) -> Void)?
+
+    var strip: CompositionStripView {
+        if let existing = stripIfLoaded { return existing }
+        let created = CompositionStripView()
+        stripIfLoaded = created
+        insertSubview(created, belowSubview: preview)
+        onCreateStrip?(created)
+        setNeedsLayout()
+        return created
+    }
+
+    var bar: CandidateBarView {
+        if let existing = barIfLoaded { return existing }
+        let created = CandidateBarView()
+        barIfLoaded = created
+        created.setExpanded(isGridExpanded)
+        insertSubview(created, belowSubview: preview)
+        onCreateBar?(created)
+        setNeedsLayout()
+        return created
+    }
 
     var grid: CandidateGridView {
         if let existing = gridIfLoaded { return existing }
@@ -67,7 +90,7 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
     var isGridExpanded = false {
         didSet {
             guard isGridExpanded != oldValue else { return }
-            bar.setExpanded(isGridExpanded)
+            barIfLoaded?.setExpanded(isGridExpanded)
             updateVisibility()
         }
     }
@@ -114,7 +137,7 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
             equalToConstant: Self.preferredHeight(landscape: false, width: frame.width))
         super.init(frame: frame)
         backgroundColor = KeyboardTheme.background
-        for view in [toolbar, strip, bar, keyboard, preview] as [UIView] {
+        for view in [toolbar, keyboard, preview] as [UIView] {
             addSubview(view)
         }
         keyboard.preview = preview
@@ -163,16 +186,16 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
         let width = bounds.width
 
         toolbar.frame = CGRect(x: 0, y: 0, width: width, height: top)
-        strip.frame = CGRect(x: 0, y: 1, width: width, height: stripHeight)
-        bar.frame = CGRect(x: 0, y: stripHeight + 1, width: width, height: top - stripHeight - 1)
+        stripIfLoaded?.frame = CGRect(x: 0, y: 1, width: width, height: stripHeight)
+        barIfLoaded?.frame = CGRect(x: 0, y: stripHeight + 1, width: width, height: top - stripHeight - 1)
         let keysFrame = CGRect(x: 0, y: top, width: width, height: max(0, bounds.height - top))
         keyboard.frame = keysFrame
         gridIfLoaded?.frame = keysFrame
         symbolPanelIfLoaded?.frame = isComposing ? keysFrame : bounds
         settingsPanelIfLoaded?.frame = keysFrame
         toolbar.horizontalInset = inset
-        strip.horizontalInset = inset
-        bar.horizontalInset = inset
+        stripIfLoaded?.horizontalInset = inset
+        barIfLoaded?.horizontalInset = inset
         gridIfLoaded?.horizontalInset = inset
         symbolPanelIfLoaded?.horizontalInset = inset
         settingsPanelIfLoaded?.horizontalInset = inset
@@ -184,8 +207,12 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
         let showSettings = !isComposing && isSettingsExpanded
         let showSymbols = isSymbolPanelVisible && !showSettings && !showGrid
         toolbar.isHidden = isComposing || showSymbols
-        strip.isHidden = !isComposing
-        bar.isHidden = !isComposing
+        if isComposing {
+            _ = strip
+            _ = bar
+        }
+        stripIfLoaded?.isHidden = !isComposing
+        barIfLoaded?.isHidden = !isComposing
         if showGrid { _ = grid }
         if showSymbols { _ = symbolPanel }
         if showSettings { _ = settingsPanel }
