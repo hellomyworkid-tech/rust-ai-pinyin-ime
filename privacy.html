@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>隐私政策 Privacy Policy — AI 拼音</title>
+  <meta name="description" content="AI 拼音（AI Pinyin）iOS 输入法隐私政策：零数据收集、键盘扩展绝不联网、端侧 AI 100% 本地运行。" />
+  <link rel="icon" type="image/png" href="icon.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="index.html">
+        <img src="icon.png" alt="AI 拼音图标" />
+        <span>AI 拼音</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html">首页</a>
+        <a href="support.html">技术支持</a>
+        <a class="active" href="privacy.html">隐私政策</a>
+        <a href="https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="lang-switch">
+      <a href="#zh">简体中文</a>
+      <a href="#en">English</a>
+    </div>
+
+    <article class="doc-card" id="zh">
+      <h1>AI 拼音（AI Pinyin）隐私政策</h1>
+      <div class="doc-meta">最后更新日期：2026 年 11 月 21 日 · 适用应用：AI 拼音（Bundle ID: <code>com.zengji.aipinyin</code>）</div>
+
+      <div class="callout">
+        <strong>一句话总结：</strong>您输入的每一个字都只在您的 iPhone 本地处理。本应用<strong>不收集、不存储、不上传、不共享</strong>任何用户输入或个人数据；键盘扩展本身<strong>完全不联网</strong>。
+      </div>
+
+      <h2>1. 零数据收集承诺</h2>
+      <p>「AI 拼音」是一款完全运行在设备本地的 iOS 中文拼音输入法。开发者及任何第三方均不会通过本应用收集、传输、分析或出售您的以下信息：</p>
+      <ul>
+        <li>键盘击键记录、输入文本内容、上下文内容或剪贴板数据；</li>
+        <li>您的个人词频与自造词记忆（仅保存在您设备本地的沙盒容器内）；</li>
+        <li>设备标识符、广告标识符（IDFA）、位置信息、通讯录或使用行为日志。</li>
+      </ul>
+      <p>本应用未集成任何第三方统计、广告、崩溃上报或追踪 SDK。</p>
+
+      <h2>2. 键盘扩展与「允许完全访问」说明</h2>
+      <ul>
+        <li><strong>键盘扩展绝不联网：</strong>无论您是否开启系统的「允许完全访问（Allow Full Access）」，键盘扩展进程均不发起任何网络请求。</li>
+        <li><strong>不开启完全访问也能正常打字：</strong>在不开启完全访问的情况下，您仍可使用安装包内置的 Apache-2.0 基础离线词库进行完整的中英文拼音、标点及符号输入，个人词频保存在键盘自身容器中。</li>
+        <li><strong>为什么提供「允许完全访问」选项：</strong>由于 iOS 沙盒机制限制，开启「允许完全访问」仅用于在本地解锁以下三项设备内功能：
+          <ol>
+            <li>读取您在主应用下载并存放在共享容器（App Group: <code>group.com.zengji.aipinyin</code>）中的离线完整词库、偏好设置与本地 GGUF 语言模型；</li>
+            <li>启用系统键盘按键音与触觉震动反馈（iOS 在关闭完全访问时会限制相关系统接口）；</li>
+            <li>支持在键盘快捷设置面板中点击「打开 AI 拼音」直接跳转至主应用设置页。</li>
+          </ol>
+        </li>
+      </ul>
+
+      <h2>3. 端侧 AI 选词隐私说明</h2>
+      <p>应用提供的 AI 上下文同音词消歧功能 100% 在您的设备本地运行：</p>
+      <ul>
+        <li><strong>Apple 端侧模型：</strong>调用 iOS 系统内置的设备端 <code>FoundationModels</code>，不走云端服务；</li>
+        <li><strong>本地模型：</strong>使用您主动下载至本机的开源语言模型（如 Qwen2.5 / Qwen3 GGUF），通过内置 <code>llama.cpp</code> 引擎在手机本地离线计算。</li>
+      </ul>
+
+      <h2>4. 主应用的有限网络下载用途</h2>
+      <p>只有「AI 拼音」主应用会在以下两种明确情形下发起只读 HTTPS 下载请求，且请求中<strong>绝不包含</strong>任何用户输入数据或用户身份信息：</p>
+      <ol>
+        <li>首次打开主应用或词库有更新时，从 GitHub Release 下载离线完整词库压缩包并在本地校验 SHA-256；</li>
+        <li>您在主应用「AI 选词」页面主动点击「下载」时，从模型发布方服务器（Hugging Face）下载开源 GGUF 模型文件并在本地校验 SHA-256。</li>
+      </ol>
+
+      <h2>5. 数据删除与控制权</h2>
+      <p>您的所有设置、已下载词库、本地模型与个人词库均完全存储在您的 iPhone 本地。您可以随时在主应用内删除已下载的本地模型，或通过卸载「AI 拼音」彻底清除全部本地数据。</p>
+
+      <h2>6. 联系我们</h2>
+      <p>如果您对本隐私政策有任何疑问或建议，请通过 <a href="support.html">技术支持页面</a> 或 <a href="https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime/issues" target="_blank" rel="noopener">GitHub Issues</a> 联系开发者。</p>
+    </article>
+
+    <article class="doc-card" id="en">
+      <h1>Privacy Policy — AI Pinyin</h1>
+      <div class="doc-meta">Last Updated: November 21, 2026 · App: AI Pinyin (<code>com.zengji.aipinyin</code>)</div>
+
+      <div class="callout">
+        <strong>Summary:</strong> Everything you type stays strictly on your iPhone. AI Pinyin collects, stores, transmits, and shares <strong>zero</strong> user data. The keyboard extension makes <strong>zero</strong> network connections.
+      </div>
+
+      <h2>1. Data Not Collected</h2>
+      <p>AI Pinyin is an offline, on-device Chinese Pinyin keyboard for iOS. We do not collect, log, upload, sell, or share keystrokes, typed text, surrounding text context, clipboard contents, personal vocabulary, contacts, location, or device identifiers. No analytics, advertising, or third-party tracking SDKs are included in the app.</p>
+
+      <h2>2. Keyboard Extension &amp; "Allow Full Access"</h2>
+      <ul>
+        <li><strong>Zero Network Access in Keyboard Extension:</strong> The keyboard extension never connects to the internet, even when "Allow Full Access" is enabled.</li>
+        <li><strong>Works Without Full Access:</strong> Core Chinese Pinyin, English, punctuation, and user dictionary learning work completely offline without Full Access using the bundled Apache-2.0 fallback lexicon.</li>
+        <li><strong>Why Full Access Is Requested (<code>RequestsOpenAccess = true</code>):</strong> iOS requires Full Access solely for three local, on-device features:
+          <ol>
+            <li>Reading the shared App Group container (<code>group.com.zengji.aipinyin</code>) to access the full offline lexicon, shared settings, and optional user-downloaded local GGUF models;</li>
+            <li>Playing system keyboard click sounds and haptic feedback;</li>
+            <li>Opening the host app from the keyboard's quick settings panel via <code>aipinyin://</code>.</li>
+          </ol>
+        </li>
+      </ul>
+
+      <h2>3. 100% On-Device AI Candidate Reranking</h2>
+      <p>All AI context-aware disambiguation runs locally on your device via either Apple's on-device <code>FoundationModels</code> framework or open-source local GGUF models (Qwen2.5 / Qwen3) executed offline via <code>llama.cpp</code>.</p>
+
+      <h2>4. Host App Read-Only Asset Downloads</h2>
+      <p>Only the host app makes read-only HTTPS requests, exclusively to download static open-source files verified by SHA-256 on device: (1) the full offline lexicon archive from GitHub Releases on initial setup, and (2) optional local GGUF language models from Hugging Face only when initiated by the user. No typed text or personal information is ever sent.</p>
+
+      <h2>5. Contact</h2>
+      <p>If you have any questions about this Privacy Policy, please visit our <a href="support.html">Support Page</a> or open an issue on <a href="https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime/issues" target="_blank" rel="noopener">GitHub</a>.</p>
+    </article>
+
+    <footer class="footer">
+      <p><a href="index.html">返回首页</a> · <a href="support.html">技术支持 Support</a></p>
+    </footer>
+  </main>
+</body>
+</html>

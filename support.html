@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>技术支持 Support — AI 拼音</title>
+  <meta name="description" content="AI 拼音（AI Pinyin）启用步骤、AI 选词配置、iPhone Duo 分离键盘说明与问题反馈。" />
+  <link rel="icon" type="image/png" href="icon.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="index.html">
+        <img src="icon.png" alt="AI 拼音图标" />
+        <span>AI 拼音</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html">首页</a>
+        <a class="active" href="support.html">技术支持</a>
+        <a href="privacy.html">隐私政策</a>
+        <a href="https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <article class="doc-card">
+      <h1>技术支持与常见问题 · Support</h1>
+      <div class="doc-meta">AI 拼音（AI Pinyin）iOS 端侧智能拼音输入法</div>
+
+      <h2>1. 如何启用「AI 拼音」键盘</h2>
+      <ol>
+        <li>打开 iPhone <strong>设置 → 通用 → 键盘 → 键盘 → 添加新键盘</strong>，选择 <strong>AI 拼音</strong>。</li>
+        <li>（可选推荐）点击列表中的 <strong>AI 拼音</strong>，打开 <strong>允许完全访问</strong>，以便键盘读取主应用下载的完整词库与本地 AI 模型，并支持按键音与触感反馈。</li>
+        <li>在任意输入框（或主应用首页底部的「试一试」框）长按左下角地球图标切换至「AI 拼音」即可使用。</li>
+      </ol>
+
+      <h2>2. 如何配置 AI 上下文选词</h2>
+      <ul>
+        <li><strong>Apple 端侧模型（默认）：</strong>无需额外下载，在支持 Apple Intelligence 的设备上自动启用系统端侧模型，零额外键盘内存占用。</li>
+        <li><strong>本地模型（推荐通义千问 2.5 · 0.5B）：</strong>在主应用「AI 选词」页下载后即可离线使用；在键盘顶部工具栏点击左上角齿轮图标，也可在任意应用中就地切换 AI 模式。</li>
+      </ul>
+
+      <h2>3. iPhone Duo 折叠屏两侧分离键盘</h2>
+      <p>在 iPhone Duo 展开内屏状态下，键盘默认自动采用左右两侧分离式布局并配备左右双空格键，避开屏幕折痕方便双手拇指打字；合盖使用外屏时自动恢复标准单块键盘。展开内屏时，点击顶部工具栏右侧的分体图标即可一键在「分离」与「合并」间切换，也可在「输入设置 → 折叠屏与大屏」中配置。</p>
+
+      <h2>4. 反馈问题与联系开发者 · Contact &amp; Feedback</h2>
+      <p>遇到任何使用问题、词库建议或设备适配需求，欢迎通过 GitHub Issues 提交反馈（附带机型与系统版本更便于快速定位）：</p>
+      <p><a class="btn btn-primary" href="https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime/issues" target="_blank" rel="noopener">前往 GitHub 提交反馈 / Report an Issue</a></p>
+
+      <h2>Quick Support (English)</h2>
+      <p>To enable AI Pinyin, open <strong>Settings → General → Keyboard → Keyboards → Add New Keyboard → AI 拼音</strong>. Basic Chinese Pinyin typing works offline without Full Access. Enabling <strong>Allow Full Access</strong> unlocks the full downloaded lexicon, local GGUF models, key click sound, haptics, and quick-settings deep links, while the keyboard extension remains 100% offline. For support or bug reports, please open an issue on <a href="https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime/issues" target="_blank" rel="noopener">GitHub Issues</a>.</p>
+    </article>
+
+    <footer class="footer">
+      <p><a href="index.html">返回首页</a> · <a href="privacy.html">隐私政策 Privacy Policy</a></p>
+    </footer>
+  </main>
+</body>
+</html>

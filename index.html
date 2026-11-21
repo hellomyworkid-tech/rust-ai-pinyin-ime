@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI 拼音 — 本地端侧大模型 iOS 拼音输入法</title>
+  <meta name="description" content="AI 拼音是一款完全在设备本地运行的 iOS 拼音输入法，结合 Rust 引擎与端侧大模型上下文选词，键盘绝不联网，零数据收集。" />
+  <link rel="icon" type="image/png" href="icon.png" />
+  <link rel="apple-touch-icon" href="icon.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="index.html">
+        <img src="icon.png" alt="AI 拼音图标" />
+        <span>AI 拼音</span>
+      </a>
+      <nav class="nav-links">
+        <a class="active" href="index.html">首页</a>
+        <a href="support.html">技术支持</a>
+        <a href="privacy.html">隐私政策</a>
+        <a href="https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <img class="hero-icon" src="icon.png" alt="AI 拼音" />
+      <h1>AI 拼音</h1>
+      <p>完全在 iPhone 本地运行的端侧 AI 拼音输入法。融合 Rust 高速拼音引擎与端侧大模型语境消歧，不上传你输入的任何一个字。</p>
+      <div class="badge-row">
+        <span class="badge">100% 端侧本地推理</span>
+        <span class="badge">键盘零网络权限</span>
+        <span class="badge">支持 Apple 智能 &amp; 本地 Qwen</span>
+        <span class="badge">适配 iPhone Duo 分离键盘</span>
+      </div>
+      <div class="actions">
+        <a class="btn btn-primary" href="support.html">使用指南与技术支持</a>
+        <a class="btn btn-secondary" href="privacy.html">查看隐私政策</a>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>端侧 AI 上下文选词</h2>
+        <p>支持 Apple 系统端侧 FoundationModels 或本地开源 Qwen（GGUF）模型，根据光标前语境精准区分同音词（如「这是我的誓言」与「科学实验」），全部离线推理。</p>
+      </article>
+      <article class="card">
+        <h2>零数据收集、绝对隐私</h2>
+        <p>键盘扩展不包含任何联网代码，无第三方统计与广告 SDK。无论是否开启「允许完全访问」，你的按键、输入文本与个人词库都仅保留在你的设备本地。</p>
+      </article>
+      <article class="card">
+        <h2>高速 Rust 核心与智能纠错</h2>
+        <p>内置 55 万词级离线完整词库与 Apache-2.0 基础词库，支持常用模糊音、韵母打反纠错、点选音节就地改写、上划数字标点与候选表情联想。</p>
+      </article>
+      <article class="card">
+        <h2>原生适配 iPhone Duo</h2>
+        <p>合盖外屏保持单手顺手的全键盘布局；展开内屏自动切换为左右两侧分离式双空格键盘，避开中轴折痕，顶部工具栏支持一键分离/合并切换。</p>
+      </article>
+    </section>
+
+    <footer class="footer">
+      <p>AI 拼音（AI Pinyin） · <a href="privacy.html">隐私政策 Privacy Policy</a> · <a href="support.html">技术支持 Support</a> · <a href="https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime" target="_blank" rel="noopener">开源仓库</a></p>
+    </footer>
+  </main>
+</body>
+</html>
