@@ -44,6 +44,22 @@ struct InputSettingsView: View {
             }
 
             Section {
+                Toggle(isOn: settings.binding(\.splitUnfoldedKeyboard)) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("展开屏幕使用分离键盘")
+                        Text("iPhone Duo 展开内屏时按键自动分列两侧，配双空格方便双手拇指打字")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityIdentifier("toggle-splitUnfoldedKeyboard")
+            } header: {
+                Text("折叠屏与大屏")
+            } footer: {
+                Text("合盖使用外屏时保持常规单块键盘；展开内屏后也可直接在键盘顶部工具栏一键切换分离或合并。")
+            }
+
+            Section {
                 Toggle("按键音", isOn: settings.binding(\.keyClickSound))
                     .accessibilityIdentifier("toggle-keyClickSound")
                 Toggle("触感反馈", isOn: settings.binding(\.haptics))

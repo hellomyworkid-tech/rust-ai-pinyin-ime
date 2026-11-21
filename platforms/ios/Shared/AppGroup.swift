@@ -22,5 +22,9 @@ enum AppGroup {
     static var debugSimulateFullAccessURL: URL? {
         sharedDirectory?.appendingPathComponent(".debug-simulate-full-access")
     }
+    /// 仅调试构建：模拟器 UI 测试模拟 iPhone Duo 展开内屏姿态
+    static var debugSimulateUnfoldedURL: URL? {
+        sharedDirectory?.appendingPathComponent(".debug-simulate-unfolded")
+    }
     #endif
 }

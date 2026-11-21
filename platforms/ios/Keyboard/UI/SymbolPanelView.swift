@@ -286,7 +286,7 @@ final class SymbolPanelView: UIView, UICollectionViewDataSource, UICollectionVie
             slots = []
             return
         }
-        let cols = state.landscape ? Self.landscapeColumns : Self.portraitColumns
+        let cols = (state.landscape || available >= 600) ? Self.landscapeColumns : Self.portraitColumns
         let needed = items.map { SymbolGridCell.neededWidth(for: $0.text, landscape: state.landscape) }
         slots = SymbolGridPacking.pack(items: items, neededWidths: needed, availableWidth: available, columns: cols)
     }

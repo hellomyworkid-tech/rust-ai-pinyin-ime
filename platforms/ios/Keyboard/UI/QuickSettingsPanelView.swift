@@ -1,6 +1,7 @@
 import UIKit
 
 enum QuickSettingsToggle: CaseIterable {
+    case splitKeyboard
     case emoji
     case typoCorrection
     case keyClickSound
@@ -23,6 +24,7 @@ final class QuickSettingsPanelView: UIView {
         var localModelSubtitle = "未下载"
         var hasDownloadedLocalModel = false
         var landscape = false
+        var isUnfolded = false
     }
 
     weak var delegate: QuickSettingsPanelDelegate?
@@ -35,6 +37,7 @@ final class QuickSettingsPanelView: UIView {
     private let localCard = ModeCardButton()
     private let offCard = ModeCardButton()
 
+    private let splitTile = ToggleTileButton()
     private let emojiTile = ToggleTileButton()
     private let typoTile = ToggleTileButton()
     private let soundTile = ToggleTileButton()
@@ -69,6 +72,7 @@ final class QuickSettingsPanelView: UIView {
         }
 
         let togglePairs: [(ToggleTileButton, QuickSettingsToggle)] = [
+            (splitTile, .splitKeyboard),
             (emojiTile, .emoji),
             (typoTile, .typoCorrection),
             (soundTile, .keyClickSound),
@@ -154,7 +158,7 @@ final class QuickSettingsPanelView: UIView {
     }
 
     func apply(_ newState: State) {
-        let layoutChanged = newState.landscape != state.landscape
+        let layoutChanged = newState.landscape != state.landscape || newState.isUnfolded != state.isUnfolded
         state = newState
         let s = newState.settings
         let compact = newState.landscape
@@ -180,6 +184,18 @@ final class QuickSettingsPanelView: UIView {
             selected: s.aiMode == .off,
             compact: compact
         )
+
+        splitTile.isHidden = !newState.isUnfolded
+        if newState.isUnfolded {
+            splitTile.configure(
+                icon: s.splitUnfoldedKeyboard ? "rectangle.split.2x1.fill" : "rectangle.split.2x1",
+                title: "分离键盘",
+                subtitle: s.splitUnfoldedKeyboard ? "已开启" : "已关闭",
+                isOn: s.splitUnfoldedKeyboard,
+                dimmed: false,
+                compact: compact
+            )
+        }
 
         emojiTile.configure(
             icon: "face.smiling",
@@ -332,10 +348,13 @@ final class QuickSettingsPanelView: UIView {
         }
         localModelLinkHost?.viewController.view.frame = localCard.frame
 
-        // 第二行：4 个常用开关磁贴
-        let tiles = [emojiTile, typoTile, soundTile, hapticsTile]
+        // 第二行：常用开关磁贴（展开内屏时额外展示「分离键盘」）
+        let tiles = state.isUnfolded
+            ? [splitTile, emojiTile, typoTile, soundTile, hapticsTile]
+            : [emojiTile, typoTile, soundTile, hapticsTile]
         let tileY = topPad + aiHeight + rowGap
-        let tileWidth = max(0, floor((contentWidth - 3 * colGap) / 4))
+        let tileCount = CGFloat(tiles.count)
+        let tileWidth = max(0, floor((contentWidth - (tileCount - 1) * colGap) / tileCount))
         for (idx, tile) in tiles.enumerated() {
             let x = padX + CGFloat(idx) * (tileWidth + colGap)
             let w = idx == tiles.count - 1 ? max(0, padX + contentWidth - x) : tileWidth

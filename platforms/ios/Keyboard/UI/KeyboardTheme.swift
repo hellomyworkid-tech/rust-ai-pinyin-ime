@@ -37,4 +37,6 @@ enum KeyboardTheme {
     static let panelCardPressed = dynamic(light: rgb(198, 202, 212), dark: rgb(96, 98, 106))
     static let panelAccentFill = dynamic(light: rgb(0, 122, 255, 0.13), dark: rgb(10, 132, 255, 0.24))
     static let panelAccentBorder = dynamic(light: rgb(0, 122, 255, 0.55), dark: rgb(100, 170, 255, 0.65))
+    /// 折叠屏展开态左右分离键盘的半区托盘底色
+    static let splitBankPlate = dynamic(light: rgb(210, 213, 222, 0.78), dark: rgb(46, 46, 50, 0.88))
 }

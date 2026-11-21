@@ -20,6 +20,7 @@ final class KeyboardView: UIView {
         var returnProminent = false
         var showsGlobe = false
         var landscape = false
+        var split = false
     }
 
     weak var delegate: KeyboardViewDelegate?
@@ -29,13 +30,23 @@ final class KeyboardView: UIView {
     var horizontalInset: CGFloat = 0 {
         didSet { if horizontalInset != oldValue { setNeedsLayout() } }
     }
+    /// 折叠屏展开态支持左右不对称安全区（如单侧屏下镜头或侧栏）
+    var leftSafeInset: CGFloat = 0 {
+        didSet { if leftSafeInset != oldValue { setNeedsLayout() } }
+    }
+    var rightSafeInset: CGFloat = 0 {
+        didSet { if rightSafeInset != oldValue { setNeedsLayout() } }
+    }
 
     private(set) var config = Config()
     private(set) var isConfigured = false
     private var rows: [[KeySpec]] = []
+    private var splitRows: [SplitRowSpec] = []
     private var specs: [KeySpec] = []
     private var keyViews: [KeyView] = []
     private var keyFrames: [KeyboardGeometry.KeyFrame] = []
+    private let leftBankPlate = UIView()
+    private let rightBankPlate = UIView()
 
     private var touchTracker = KeyboardTouchTracker()
     private var repeatTimer: Timer?
@@ -46,6 +57,14 @@ final class KeyboardView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
+        for plate in [leftBankPlate, rightBankPlate] {
+            plate.isUserInteractionEnabled = false
+            plate.isHidden = true
+            plate.backgroundColor = KeyboardTheme.splitBankPlate
+            plate.layer.cornerRadius = 13
+            plate.layer.cornerCurve = .continuous
+            addSubview(plate)
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -55,15 +74,26 @@ final class KeyboardView: UIView {
     func apply(_ newConfig: Config, force: Bool = false) {
         let forceBuild = force || !isConfigured
         guard forceBuild || newConfig != config else { return }
-        let rowsChanged = forceBuild || newConfig.page != config.page || newConfig.showsGlobe != config.showsGlobe
+        let rowsChanged = forceBuild
+            || newConfig.page != config.page
+            || newConfig.showsGlobe != config.showsGlobe
+            || newConfig.split != config.split
             || (newConfig.page != .letters && newConfig.chineseMode != config.chineseMode)
         isConfigured = true
         config = newConfig
         if rowsChanged {
             cancelAllTouches()
-            rows = KeyboardLayout.rows(for: newConfig.page, chineseMode: newConfig.chineseMode,
-                                       showsGlobe: newConfig.showsGlobe)
-            specs = rows.flatMap { $0 }
+            if newConfig.split {
+                rows = []
+                splitRows = KeyboardLayout.splitRows(for: newConfig.page, chineseMode: newConfig.chineseMode,
+                                                     showsGlobe: newConfig.showsGlobe)
+                specs = splitRows.flatMap { $0.left + $0.right }
+            } else {
+                splitRows = []
+                rows = KeyboardLayout.rows(for: newConfig.page, chineseMode: newConfig.chineseMode,
+                                           showsGlobe: newConfig.showsGlobe)
+                specs = rows.flatMap { $0 }
+            }
             while keyViews.count < specs.count {
                 let view = KeyView()
                 addSubview(view)
@@ -72,22 +102,45 @@ final class KeyboardView: UIView {
             for (i, view) in keyViews.enumerated() { view.isHidden = i >= specs.count }
             setNeedsLayout()
         }
+        var spaceOrdinal = 0
         for (i, spec) in specs.enumerated() {
             keyViews[i].configure(face(for: spec),
                                   accessibilityLabel: accessibilityTitle(for: spec),
                                   accessibilityHint: accessibilityHint(for: spec))
+            if newConfig.split, spec.action == .space {
+                keyViews[i].accessibilityIdentifier = spaceOrdinal == 0 ? "spaceLeft" : "spaceRight"
+                spaceOrdinal += 1
+            } else {
+                keyViews[i].accessibilityIdentifier = nil
+            }
         }
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        var metrics: KeyboardGeometry.Metrics = config.landscape ? .landscape : .portrait
-        metrics.sideInset += horizontalInset
-        // 行距随系统给的高度走：键高约占行高的八成
-        if !rows.isEmpty {
-            metrics.rowGap = max(4, (bounds.height / CGFloat(rows.count) * 0.2).rounded())
+        if config.split {
+            let rowCount = max(1, splitRows.count)
+            var metrics = KeyboardGeometry.SplitMetrics()
+            metrics.leftSafeInset = max(horizontalInset, leftSafeInset)
+            metrics.rightSafeInset = max(horizontalInset, rightSafeInset)
+            metrics.rowGap = max(4, (bounds.height / CGFloat(rowCount) * 0.19).rounded())
+            let result = KeyboardGeometry.layoutSplit(rows: splitRows, in: bounds, metrics: metrics)
+            leftBankPlate.isHidden = false
+            rightBankPlate.isHidden = false
+            leftBankPlate.frame = result.leftBankFrame
+            rightBankPlate.frame = result.rightBankFrame
+            keyFrames = result.frames
+        } else {
+            leftBankPlate.isHidden = true
+            rightBankPlate.isHidden = true
+            var metrics: KeyboardGeometry.Metrics = config.landscape ? .landscape : .portrait
+            metrics.sideInset += horizontalInset
+            // 行距随系统给的高度走：键高约占行高的八成
+            if !rows.isEmpty {
+                metrics.rowGap = max(4, (bounds.height / CGFloat(rows.count) * 0.2).rounded())
+            }
+            keyFrames = KeyboardGeometry.layout(rows: rows, in: bounds, metrics: metrics)
         }
-        keyFrames = KeyboardGeometry.layout(rows: rows, in: bounds, metrics: metrics)
         touchTracker.specs = specs
         touchTracker.frames = keyFrames
         for (i, frame) in keyFrames.enumerated() where i < keyViews.count {

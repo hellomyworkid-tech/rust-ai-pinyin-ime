@@ -114,22 +114,27 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
         didSet { if landscape != oldValue { setNeedsLayout() } }
     }
 
+    var unfolded = false {
+        didSet { if unfolded != oldValue { setNeedsLayout() } }
+    }
+
     // MARK: - 尺寸
 
     /// 顶部（空闲时的工具栏，打字时的拼音条 + 候选栏）高度固定，按键区拿剩下的全部高度
     static func topHeight(landscape: Bool) -> CGFloat { landscape ? 40 : 50 }
     static func stripHeight(landscape: Bool) -> CGFloat { landscape ? 15 : 18 }
 
-    /// 一行键的高度（含上下行距），和系统键盘一样：竖屏 54，宽 414 以上的大屏手机（Plus、Max）56，横屏 40。
-    /// 2026-11-12 在 iPhone 18 Pro 模拟器（iOS 27）上量过系统拼音键盘：竖屏行高 54、键高 42，横屏行高 40、键高 32
-    static func rowPitch(landscape: Bool, width: CGFloat) -> CGFloat {
+    /// 一行键的高度（含上下行距），和系统键盘一样：竖屏 54，宽 414 以上的大屏手机（Plus、Max）56，横屏 40；
+    /// iPhone Duo 展开内屏（951×669 / 669×951）取 52（键高 42pt，总高 258pt，兼顾双手敲击高度与内屏视野）。
+    static func rowPitch(landscape: Bool, unfolded: Bool = false, width: CGFloat) -> CGFloat {
         if landscape { return 40 }
+        if unfolded { return 52 }
         return width >= 414 ? 56 : 54
     }
 
-    /// 键盘总高度：顶部加四行键。竖屏 266（大屏 274），比系统键盘高 8pt 左右，多出来的是拼音条
-    static func preferredHeight(landscape: Bool, width: CGFloat) -> CGFloat {
-        topHeight(landscape: landscape) + 4 * rowPitch(landscape: landscape, width: width)
+    /// 键盘总高度：顶部加四行键。竖屏 266（大屏 274，展开内屏 258），比系统键盘高 8pt 左右，多出来的是拼音条
+    static func preferredHeight(landscape: Bool, unfolded: Bool = false, width: CGFloat) -> CGFloat {
+        topHeight(landscape: landscape) + 4 * rowPitch(landscape: landscape, unfolded: unfolded, width: width)
     }
 
     override init(frame: CGRect) {
@@ -165,9 +170,9 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
         ])
     }
 
-    /// 按横竖屏和键盘宽度更新想要的高度（控制器在 viewWillLayoutSubviews 里调用）
-    func updateHeight(landscape: Bool, width: CGFloat) {
-        let height = Self.preferredHeight(landscape: landscape, width: width)
+    /// 按横竖屏、折叠展开态和键盘宽度更新想要的高度（控制器在 viewWillLayoutSubviews 里调用）
+    func updateHeight(landscape: Bool, unfolded: Bool = false, width: CGFloat) {
+        let height = Self.preferredHeight(landscape: landscape, unfolded: unfolded, width: width)
         if heightConstraint.constant != height { heightConstraint.constant = height }
     }
 
@@ -180,7 +185,7 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let inset = landscape ? max(safeAreaInsets.left, safeAreaInsets.right) : 0
+        let barInset = (landscape || unfolded) ? max(safeAreaInsets.left, safeAreaInsets.right) : 0
         let top = Self.topHeight(landscape: landscape)
         let stripHeight = Self.stripHeight(landscape: landscape)
         let width = bounds.width
@@ -193,13 +198,21 @@ final class KeyboardRootView: UIView, UIInputViewAudioFeedback {
         gridIfLoaded?.frame = keysFrame
         symbolPanelIfLoaded?.frame = isComposing ? keysFrame : bounds
         settingsPanelIfLoaded?.frame = keysFrame
-        toolbar.horizontalInset = inset
-        stripIfLoaded?.horizontalInset = inset
-        barIfLoaded?.horizontalInset = inset
-        gridIfLoaded?.horizontalInset = inset
-        symbolPanelIfLoaded?.horizontalInset = inset
-        settingsPanelIfLoaded?.horizontalInset = inset
-        keyboard.horizontalInset = inset
+        toolbar.horizontalInset = barInset
+        stripIfLoaded?.horizontalInset = barInset
+        barIfLoaded?.horizontalInset = barInset
+        gridIfLoaded?.horizontalInset = barInset
+        symbolPanelIfLoaded?.horizontalInset = barInset
+        settingsPanelIfLoaded?.horizontalInset = barInset
+        if unfolded && !landscape {
+            keyboard.horizontalInset = 0
+            keyboard.leftSafeInset = safeAreaInsets.left
+            keyboard.rightSafeInset = safeAreaInsets.right
+        } else {
+            keyboard.horizontalInset = barInset
+            keyboard.leftSafeInset = safeAreaInsets.left
+            keyboard.rightSafeInset = safeAreaInsets.right
+        }
     }
 
     private func updateVisibility() {

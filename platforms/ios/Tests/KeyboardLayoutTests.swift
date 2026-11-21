@@ -193,4 +193,154 @@ final class KeyboardLayoutTests: XCTestCase {
         XCTAssertTrue(tracker.end(id: 9).triggered.isEmpty)
         XCTAssertEqual(tracker.end(id: 10).triggered, [.letter("w")])
     }
+
+    func testPostureDetectsIPhoneDuoFoldedVsUnfolded() {
+        // 直板机竖屏（iPhone 18 Pro 402pt / Pro Max 440pt）
+        XCTAssertFalse(KeyboardPosture.isUnfolded(horizontalIsRegular: false, verticalIsCompact: false, width: 402))
+        XCTAssertFalse(KeyboardPosture.isUnfolded(horizontalIsRegular: false, verticalIsCompact: false, width: 440))
+
+        // iPhone Duo 合盖外屏竖屏（1398×2034 @3x = 466×678pt，compact × regular）→ 常规单块键盘
+        XCTAssertFalse(KeyboardPosture.isUnfolded(horizontalIsRegular: false, verticalIsCompact: false, width: 466))
+
+        // iPhone Duo 合盖外屏横屏与直板机横屏（verticalSizeClass == .compact）→ 紧凑横屏模式
+        XCTAssertFalse(KeyboardPosture.isUnfolded(horizontalIsRegular: false, verticalIsCompact: true, width: 678))
+        XCTAssertFalse(KeyboardPosture.isUnfolded(horizontalIsRegular: true, verticalIsCompact: true, width: 956))
+
+        // iPhone Duo 展开内屏：默认书本态 951×669pt 与旋转态 669×951pt（regular × regular）→ 展开态
+        XCTAssertTrue(KeyboardPosture.isUnfolded(horizontalIsRegular: true, verticalIsCompact: false, width: 951))
+        XCTAssertTrue(KeyboardPosture.isUnfolded(horizontalIsRegular: true, verticalIsCompact: false, width: 669))
+        // 即使冷启动布局前 width 暂为 0，只要系统上报 regular × regular 也能在首帧准确识别
+        XCTAssertTrue(KeyboardPosture.isUnfolded(horizontalIsRegular: true, verticalIsCompact: false, width: 0))
+    }
+
+    func testSplitLetterNumberAndSymbolRows() {
+        let split = KeyboardLayout.splitRows(for: .letters, chineseMode: true, showsGlobe: true)
+        XCTAssertEqual(split.count, 4)
+        XCTAssertEqual(letters(split[0].left), "qwert")
+        XCTAssertEqual(letters(split[0].right), "yuiop")
+        XCTAssertEqual(letters(split[1].left), "asdfg")
+        XCTAssertEqual(letters(split[1].right), "hjkl")
+        XCTAssertEqual(split[2].left.first?.action, .shift)
+        XCTAssertEqual(letters(split[2].left), "zxcv")
+        XCTAssertEqual(letters(split[2].right), "bnm")
+        XCTAssertEqual(split[2].right.last?.action, .backspace)
+
+        // 底排左右各有一个空格键，方便左右拇指任意一侧直接上屏
+        XCTAssertTrue(split[3].left.contains { $0.action == .space })
+        XCTAssertTrue(split[3].right.contains { $0.action == .space })
+        XCTAssertTrue(split[3].left.contains { $0.action == .globe })
+        XCTAssertTrue(split[3].right.contains { $0.action == .toggleLanguage })
+        XCTAssertEqual(split[3].right.last?.action, .returnKey)
+
+        // 26 个字母键及其上划副符号与整排模式逐一完全一致
+        let mergedLetters = KeyboardLayout.rows(for: .letters, chineseMode: true, showsGlobe: true)
+            .flatMap { $0 }
+            .filter { if case .letter = $0.action { return true }; return false }
+        let splitLetters = split
+            .flatMap { $0.left + $0.right }
+            .filter { if case .letter = $0.action { return true }; return false }
+        XCTAssertEqual(splitLetters.map(\.action), mergedLetters.map(\.action))
+        XCTAssertEqual(splitLetters.map(\.swipeUpAction), mergedLetters.map(\.swipeUpAction))
+
+        for page in [KeyboardPage.letters, .numbers, .symbols] {
+            let withoutGlobe = KeyboardLayout.splitRows(for: page, chineseMode: true, showsGlobe: false)
+                .flatMap { $0.left + $0.right }
+            let withGlobe = KeyboardLayout.splitRows(for: page, chineseMode: true, showsGlobe: true)
+                .flatMap { $0.left + $0.right }
+            XCTAssertFalse(withoutGlobe.contains { $0.action == .globe })
+            XCTAssertEqual(withGlobe.filter { $0.action == .globe }.count, 1)
+            XCTAssertEqual(withGlobe.filter { $0.action == .space }.count, 2, "\(page) 分离态应提供左右双空格")
+            XCTAssertEqual(withGlobe.filter { $0.action == .backspace }.count, 1)
+            XCTAssertEqual(withGlobe.filter { $0.action == .returnKey }.count, 1)
+        }
+    }
+
+    func testSplitGeometryOnIPhoneDuoUnfoldedPostures() {
+        // 覆盖 iPhone Duo 书本展开态 (951pt)、旋转展开态 (669pt) 及不对称安全区场景
+        let cases: [(CGFloat, CGFloat, CGFloat, CGFloat, CGFloat)] = [
+            (951, 208, 0, 0, 200),
+            (669, 208, 0, 0, 72),
+            (951, 208, 24, 0, 180),
+        ]
+        for (width, height, leftSafe, rightSafe, expectedMinValley) in cases {
+            var metrics = KeyboardGeometry.SplitMetrics()
+            metrics.leftSafeInset = leftSafe
+            metrics.rightSafeInset = rightSafe
+            let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+
+            for page in [KeyboardPage.letters, .numbers, .symbols] {
+                for globe in [false, true] {
+                    let rows = KeyboardLayout.splitRows(for: page, chineseMode: true, showsGlobe: globe)
+                    let result = KeyboardGeometry.layoutSplit(rows: rows, in: bounds, metrics: metrics)
+                    let valley = result.rightBankFrame.minX - result.leftBankFrame.maxX
+                    XCTAssertGreaterThanOrEqual(valley, expectedMinValley, "中缝宽度不足：\(valley)")
+                    XCTAssertEqual(result.frames.count, rows.reduce(0) { $0 + $1.left.count + $1.right.count })
+
+                    for (r, splitRow) in rows.enumerated() {
+                        let inRow = result.frames.filter { $0.row == r }
+                        let leftFrames = Array(inRow.prefix(splitRow.left.count))
+                        let rightFrames = Array(inRow.suffix(splitRow.right.count))
+
+                        for f in leftFrames {
+                            XCTAssertGreaterThanOrEqual(f.frame.minX, result.leftBankFrame.minX - 0.5)
+                            XCTAssertLessThanOrEqual(f.frame.maxX, result.leftBankFrame.maxX + 0.5)
+                            XCTAssertGreaterThan(f.frame.width, 32)
+                            XCTAssertTrue(f.touchFrame.contains(f.frame))
+                        }
+                        for f in rightFrames {
+                            XCTAssertGreaterThanOrEqual(f.frame.minX, result.rightBankFrame.minX - 0.5)
+                            XCTAssertLessThanOrEqual(f.frame.maxX, result.rightBankFrame.maxX + 0.5)
+                            XCTAssertGreaterThan(f.frame.width, 32)
+                            XCTAssertTrue(f.touchFrame.contains(f.frame))
+                        }
+                        for (a, b) in zip(leftFrames, leftFrames.dropFirst()) {
+                            XCTAssertLessThanOrEqual(a.frame.maxX, b.frame.minX + 0.01)
+                            XCTAssertEqual(a.touchFrame.maxX, b.touchFrame.minX, accuracy: 0.01)
+                        }
+                        for (a, b) in zip(rightFrames, rightFrames.dropFirst()) {
+                            XCTAssertLessThanOrEqual(a.frame.maxX, b.frame.minX + 0.01)
+                            XCTAssertEqual(a.touchFrame.maxX, b.touchFrame.minX, accuracy: 0.01)
+                        }
+                        if let lastLeft = leftFrames.last, let firstRight = rightFrames.first {
+                            XCTAssertLessThanOrEqual(lastLeft.touchFrame.maxX, firstRight.touchFrame.minX + 0.01,
+                                                     "左右半区触摸框在中缝处不应交叉重叠")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testSplitTouchTrackerIgnoresCenterValleyAndSupportsDualSpacebars() {
+        let bounds = CGRect(x: 0, y: 0, width: 951, height: 208)
+        let rows = KeyboardLayout.splitRows(for: .letters, chineseMode: true, showsGlobe: false)
+        let result = KeyboardGeometry.layoutSplit(rows: rows, in: bounds, metrics: .init())
+        let specs = rows.flatMap { $0.left + $0.right }
+        var tracker = KeyboardTouchTracker(specs: specs, frames: result.frames)
+
+        // 1. 手指落在 951pt 展开屏正中央折痕空白区（约 x=475.5）不应误触发两侧的 t 或 y
+        let centerPoint = CGPoint(x: bounds.midX, y: bounds.midY)
+        let centerDown = tracker.begin(id: "valley", at: centerPoint)
+        XCTAssertFalse(centerDown.didTouchDown)
+        XCTAssertTrue(centerDown.triggered.isEmpty)
+
+        // 2. 左空格与右空格均可独立触发 .space
+        let spaceIndices = specs.indices.filter { specs[$0].action == .space }
+        XCTAssertEqual(spaceIndices.count, 2)
+        for (k, idx) in spaceIndices.enumerated() {
+            let f = result.frames[idx].frame
+            _ = tracker.begin(id: "space-\(k)", at: CGPoint(x: f.midX, y: f.midY))
+            XCTAssertEqual(tracker.end(id: "space-\(k)").triggered, [.space])
+        }
+
+        // 3. 左半区内部从 r 横滑到 t 可正常换键，但继续往中央空白区外拖不会跨区跳到右半区的 y
+        let rIdx = specs.firstIndex { $0.action == .letter("r") }!
+        let tIdx = specs.firstIndex { $0.action == .letter("t") }!
+        let rCenter = CGPoint(x: result.frames[rIdx].frame.midX, y: result.frames[rIdx].frame.midY)
+        let tCenter = CGPoint(x: result.frames[tIdx].frame.midX, y: result.frames[tIdx].frame.midY)
+        _ = tracker.begin(id: "slide", at: rCenter)
+        XCTAssertEqual(tracker.move(id: "slide", to: tCenter).preview?.action, .letter("t"))
+        _ = tracker.move(id: "slide", to: CGPoint(x: bounds.midX, y: tCenter.y))
+        XCTAssertEqual(tracker.end(id: "slide").triggered, [.letter("t")])
+    }
 }

@@ -23,8 +23,16 @@ final class SettingsStoreTests: XCTestCase {
         settings.fuzzy.typoCorrection = false
         settings.keyClickSound = false
         settings.haptics = false
+        settings.splitUnfoldedKeyboard = false
         try settings.save(to: fileURL)   // 目录不存在，要自己建
         XCTAssertEqual(IMESettings.load(from: fileURL), settings)
+    }
+
+    func testSplitUnfoldedKeyboardDefaultsToTrueAndResetsIndependentlyWhenMissing() throws {
+        XCTAssertTrue(IMESettings().splitUnfoldedKeyboard, "折叠屏展开态默认启用两侧分离键盘")
+        let loaded = try loadAfterEditing { $0["splitUnfoldedKeyboard"] = nil }
+        XCTAssertTrue(loaded.splitUnfoldedKeyboard)
+        XCTAssertEqual(loaded.aiMode, .local)
     }
 
     func testMissingOrBrokenFileGivesDefaults() throws {

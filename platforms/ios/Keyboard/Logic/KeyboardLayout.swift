@@ -59,6 +59,12 @@ struct KeySpec: Equatable {
     }
 }
 
+/// 分离键盘的一行：左半区靠左拇指、右半区靠右拇指，中间留空避开折痕
+struct SplitRowSpec: Equatable {
+    let left: [KeySpec]
+    let right: [KeySpec]
+}
+
 /// 各页面的键位。只有数据，没有界面，方便测试
 enum KeyboardLayout {
     static func rows(for page: KeyboardPage, chineseMode: Bool, showsGlobe: Bool) -> [[KeySpec]] {
@@ -66,6 +72,15 @@ enum KeyboardLayout {
         case .letters: return letterRows(showsGlobe: showsGlobe)
         case .numbers: return numberRows(chineseMode: chineseMode, showsGlobe: showsGlobe)
         case .symbols: return symbolRows(chineseMode: chineseMode, showsGlobe: showsGlobe)
+        }
+    }
+
+    /// 折叠屏展开态（如 iPhone Duo）的两侧分离式键位：按 T|Y、G|H、V|B 拆开，底排左右各配一个空格键
+    static func splitRows(for page: KeyboardPage, chineseMode: Bool, showsGlobe: Bool) -> [SplitRowSpec] {
+        switch page {
+        case .letters: return splitLetterRows(showsGlobe: showsGlobe)
+        case .numbers: return splitNumberRows(chineseMode: chineseMode, showsGlobe: showsGlobe)
+        case .symbols: return splitSymbolRows(chineseMode: chineseMode, showsGlobe: showsGlobe)
         }
     }
 
@@ -128,11 +143,96 @@ enum KeyboardLayout {
         return [row1, row2, row3, bottom]
     }
 
+    private static func splitLetterRows(showsGlobe: Bool) -> [SplitRowSpec] {
+        let row1Left: [KeySpec] = [
+            KeySpec(.letter("q"), swipeUp: .symbol("1")),
+            KeySpec(.letter("w"), swipeUp: .symbol("2")),
+            KeySpec(.letter("e"), swipeUp: .symbol("3")),
+            KeySpec(.letter("r"), swipeUp: .symbol("4")),
+            KeySpec(.letter("t"), swipeUp: .symbol("5")),
+        ]
+        let row1Right: [KeySpec] = [
+            KeySpec(.letter("y"), swipeUp: .symbol("6")),
+            KeySpec(.letter("u"), swipeUp: .symbol("7")),
+            KeySpec(.letter("i"), swipeUp: .symbol("8")),
+            KeySpec(.letter("o"), swipeUp: .symbol("9")),
+            KeySpec(.letter("p"), swipeUp: .symbol("0")),
+        ]
+
+        // 第二行左侧 5 键略缩至 0.95u 居中，保留标准 QWERTY 相对首行的错位感；右侧 4 键 1.0u 自然居中
+        let row2Left: [KeySpec] = [
+            KeySpec(.letter("a"), swipeUp: .symbol("`"), .unit(0.95)),
+            KeySpec(.letter("s"), swipeUp: .symbol("/"), .unit(0.95)),
+            KeySpec(.letter("d"), swipeUp: .symbol(":"), .unit(0.95)),
+            KeySpec(.letter("f"), swipeUp: .symbol(";"), .unit(0.95)),
+            KeySpec(.letter("g"), swipeUp: .symbol("("), .unit(0.95)),
+        ]
+        let row2Right: [KeySpec] = [
+            KeySpec(.letter("h"), swipeUp: .symbol(")")),
+            KeySpec(.letter("j"), swipeUp: .symbol("~")),
+            KeySpec(.letter("k"), swipeUp: .symbol("“")),
+            KeySpec(.letter("l"), swipeUp: .symbol("”")),
+        ]
+
+        let row3Left: [KeySpec] = [
+            KeySpec(.shift, .flexible),
+            KeySpec(.letter("z"), swipeUp: .symbol("@")),
+            KeySpec(.letter("x"), swipeUp: .literal(".")),
+            KeySpec(.letter("c"), swipeUp: .symbol("#")),
+            KeySpec(.letter("v"), swipeUp: .symbol("\\")),
+        ]
+        let row3Right: [KeySpec] = [
+            KeySpec(.letter("b"), swipeUp: .symbol("?")),
+            KeySpec(.letter("n"), swipeUp: .symbol("!")),
+            KeySpec(.letter("m"), swipeUp: .symbol("...")),
+            KeySpec(.backspace, .flexible),
+        ]
+
+        let bottomLeft: [KeySpec]
+        if showsGlobe {
+            bottomLeft = [
+                KeySpec(.page(.numbers), .unit(1.12)),
+                KeySpec(.globe, .unit(0.98)),
+                KeySpec(.symbol(","), swipeUp: .symbol("."), .unit(0.95)),
+                KeySpec(.space, .flexible),
+            ]
+        } else {
+            bottomLeft = [
+                KeySpec(.page(.numbers), .unit(1.35)),
+                KeySpec(.symbol(","), swipeUp: .symbol("."), .unit(1)),
+                KeySpec(.space, .flexible),
+            ]
+        }
+        let bottomRight: [KeySpec] = [
+            KeySpec(.space, .flexible),
+            KeySpec(.toggleLanguage, .unit(1.08)),
+            KeySpec(.returnKey, .unit(1.62)),
+        ]
+
+        return [
+            SplitRowSpec(left: row1Left, right: row1Right),
+            SplitRowSpec(left: row2Left, right: row2Right),
+            SplitRowSpec(left: row3Left, right: row3Right),
+            SplitRowSpec(left: bottomLeft, right: bottomRight),
+        ]
+    }
+
     private static func pageBottomRow(showsGlobe: Bool) -> [KeySpec] {
         var row = [KeySpec(.page(.letters), .unit(1.6))]
         if showsGlobe { row.append(KeySpec(.globe, .unit(1.25))) }
         row += [KeySpec(.space, .flexible), KeySpec(.returnKey, .unit(2))]
         return row
+    }
+
+    private static func splitPageBottomRow(showsGlobe: Bool) -> SplitRowSpec {
+        var left: [KeySpec] = [KeySpec(.page(.letters), .unit(showsGlobe ? 1.3 : 1.5))]
+        if showsGlobe { left.append(KeySpec(.globe, .unit(1.05))) }
+        left.append(KeySpec(.space, .flexible))
+        let right: [KeySpec] = [
+            KeySpec(.space, .flexible),
+            KeySpec(.returnKey, .unit(1.85)),
+        ]
+        return SplitRowSpec(left: left, right: right)
     }
 
     private static func numberRows(chineseMode: Bool, showsGlobe: Bool) -> [[KeySpec]] {
@@ -146,6 +246,19 @@ enum KeyboardLayout {
         ]
     }
 
+    private static func splitNumberRows(chineseMode: Bool, showsGlobe: Bool) -> [SplitRowSpec] {
+        let third = chineseMode ? [".", ",", "\\", "?", "!"] : [".", ",", "?", "!", "'"]
+        return [
+            SplitRowSpec(left: symbols(["1", "2", "3", "4", "5"]), right: symbols(["6", "7", "8", "9", "0"])),
+            SplitRowSpec(left: symbols(["-", "/", ":", ";", "("]), right: symbols([")", "$", "&", "@", "\""])),
+            SplitRowSpec(
+                left: [KeySpec(.page(.symbols), .flexible)] + symbols(Array(third.prefix(3)), width: .unit(1.12)),
+                right: symbols(Array(third.suffix(2)), width: .unit(1.22)) + [KeySpec(.backspace, .flexible)]
+            ),
+            splitPageBottomRow(showsGlobe: showsGlobe),
+        ]
+    }
+
     private static func symbolRows(chineseMode: Bool, showsGlobe: Bool) -> [[KeySpec]] {
         [
             symbols(["[", "]", "{", "}", "#", "%", "^", "*", "+", "="]),
@@ -153,6 +266,18 @@ enum KeyboardLayout {
             [KeySpec(.page(.numbers), .flexible)] + symbols([".", ",", "?", "!", "'"], width: .unit(1.4))
                 + [KeySpec(.backspace, .flexible)],
             pageBottomRow(showsGlobe: showsGlobe),
+        ]
+    }
+
+    private static func splitSymbolRows(chineseMode: Bool, showsGlobe: Bool) -> [SplitRowSpec] {
+        [
+            SplitRowSpec(left: symbols(["[", "]", "{", "}", "#"]), right: symbols(["%", "^", "*", "+", "="])),
+            SplitRowSpec(left: symbols(["_", "\\", "|", "~", "<"]), right: symbols([">", "€", "£", "¥", "•"])),
+            SplitRowSpec(
+                left: [KeySpec(.page(.numbers), .flexible)] + symbols([".", ",", "?"], width: .unit(1.12)),
+                right: symbols(["!", "'"], width: .unit(1.22)) + [KeySpec(.backspace, .flexible)]
+            ),
+            splitPageBottomRow(showsGlobe: showsGlobe),
         ]
     }
 }

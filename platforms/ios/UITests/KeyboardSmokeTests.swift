@@ -544,4 +544,50 @@ final class KeyboardSmokeTests: XCTestCase {
         type("ok")
         XCTAssertTrue(app.buttons["👌"].firstMatch.waitForExistence(timeout: 3), "重新开启候选表情后应立即恢复")
     }
+
+    /// iPhone Duo 展开内屏适配：自动启用左右两侧分离式键盘 + 左右双空格上屏 + 顶部工具栏一键合并/分离切换
+    func testIPhoneDuoUnfoldedSplitKeyboardAndMergeToggle() {
+        app.terminate()
+        app.launchEnvironment["HOST_TEST_SIMULATE_UNFOLDED"] = "1"
+        app.launch()
+        XCUIDevice.shared.orientation = .landscapeLeft
+        focusAndWaitForKeyboard()
+
+        let leftSpace = app.keys["spaceLeft"].firstMatch
+        let rightSpace = app.keys["spaceRight"].firstMatch
+        let mergeButton = app.buttons["合并键盘"].firstMatch
+        XCTAssertTrue(leftSpace.waitForExistence(timeout: 3), "展开分离态应显示左半区空格键")
+        XCTAssertTrue(rightSpace.exists, "展开分离态应显示右半区空格键")
+        XCTAssertTrue(mergeButton.exists, "展开态工具栏右侧应提供一键合并按钮")
+
+        let splitGap = key("y").frame.minX - key("t").frame.maxX
+        XCTAssertGreaterThan(splitGap, 80, "t 与 y 之间应留出宽阔中缝供双手拇指输入，实际间距：\(splitGap)")
+        screenshot("duo-unfolded-split-idle")
+
+        // 左右手交替输入 shunfengbiaokuai，用左拇指空格键直接上屏
+        type("shunfengbiaokuai")
+        XCTAssertTrue(app.buttons["顺丰标快"].firstMatch.waitForExistence(timeout: 3))
+        screenshot("duo-unfolded-split-composing")
+        leftSpace.tap()
+        waitForText("顺丰标快")
+
+        // 再输入 nihao，用右拇指空格键直接上屏
+        type("nihao")
+        XCTAssertTrue(app.buttons["你好"].firstMatch.waitForExistence(timeout: 3))
+        rightSpace.tap()
+        waitForText("顺丰标快你好")
+
+        // 点工具栏一键合并：恢复整排单空格，再点一键切回两侧分离
+        mergeButton.tap()
+        let splitButton = app.buttons["分离键盘"].firstMatch
+        XCTAssertTrue(splitButton.waitForExistence(timeout: 2))
+        XCTAssertFalse(app.keys["spaceRight"].exists, "合并后应回到单空格整排布局")
+        let mergedGap = key("y").frame.minX - key("t").frame.maxX
+        XCTAssertLessThan(mergedGap, 20, "合并后 t 与 y 应紧邻，实际间距：\(mergedGap)")
+        screenshot("duo-unfolded-merged")
+
+        splitButton.tap()
+        XCTAssertTrue(app.buttons["合并键盘"].firstMatch.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.keys["spaceLeft"].exists && app.keys["spaceRight"].exists, "再次点按应立即恢复两侧分离双空格")
+    }
 }

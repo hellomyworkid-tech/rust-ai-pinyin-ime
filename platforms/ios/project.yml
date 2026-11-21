@@ -34,8 +34,8 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
-        # 宿主界面暂时允许横屏，键盘的横屏布局要靠它来测（正式 App 可改回只竖屏）
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        # 支持竖屏、横屏及折叠屏（iPhone Duo 展开内屏 Regular×Regular）四向自适应旋转
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         CFBundleURLTypes:
           - CFBundleURLName: com.zengji.aipinyin
             CFBundleURLSchemes: [aipinyin]

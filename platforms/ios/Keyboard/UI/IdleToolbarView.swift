@@ -6,12 +6,16 @@ import UIKit
 final class IdleToolbarView: UIView {
     private let settingsButton = SafeHitButton(type: .system)
     private let statusLabel = UILabel()
+    private let splitButton = SafeHitButton(type: .system)
     private let dismissButton = UIButton(type: .system)
 
     var onToggleSettings: (() -> Void)?
+    var onToggleSplit: (() -> Void)?
     var onDismiss: (() -> Void)?
 
     private var isPanelOpen = false
+    private var showsSplitToggle = false
+    private var isSplitActive = false
     private var normalStatus = ""
     private var panelNotice: String?
 
@@ -31,6 +35,9 @@ final class IdleToolbarView: UIView {
         statusLabel.adjustsFontSizeToFitWidth = true
         statusLabel.minimumScaleFactor = 0.8
         addSubview(statusLabel)
+
+        splitButton.addAction(UIAction { [weak self] _ in self?.onToggleSplit?() }, for: .touchUpInside)
+        addSubview(splitButton)
 
         dismissButton.tintColor = KeyboardTheme.keyText
         dismissButton.addAction(UIAction { [weak self] _ in
@@ -57,6 +64,13 @@ final class IdleToolbarView: UIView {
         }
     }
 
+    func setSplitControl(visible: Bool, isSplit: Bool) {
+        guard visible != showsSplitToggle || isSplit != isSplitActive else { return }
+        showsSplitToggle = visible
+        isSplitActive = isSplit
+        applyAppearance()
+    }
+
     func setPanelOpen(_ open: Bool, notice: String? = nil) {
         guard open != isPanelOpen || notice != panelNotice else {
             if !open { statusLabel.text = normalStatus }
@@ -71,6 +85,8 @@ final class IdleToolbarView: UIView {
         if isPanelOpen {
             settingsButton.setImage(KeyboardSymbolCache.image(named: "chevron.left", pointSize: 16), for: .normal)
             settingsButton.accessibilityLabel = "返回键盘"
+
+            splitButton.isHidden = true
 
             dismissButton.setImage(KeyboardSymbolCache.image(named: "xmark.circle", pointSize: 17), for: .normal)
             dismissButton.accessibilityLabel = "关闭设置"
@@ -88,6 +104,15 @@ final class IdleToolbarView: UIView {
             settingsButton.setImage(KeyboardSymbolCache.image(named: "gearshape", pointSize: 16), for: .normal)
             settingsButton.accessibilityLabel = "快捷设置"
 
+            splitButton.isHidden = !showsSplitToggle
+            if showsSplitToggle {
+                let symbol = isSplitActive ? "rectangle.split.2x1.fill" : "rectangle.split.2x1"
+                splitButton.setImage(KeyboardSymbolCache.image(named: symbol, pointSize: 15.5), for: .normal)
+                splitButton.tintColor = isSplitActive ? KeyboardTheme.pinnedText : KeyboardTheme.keyText
+                splitButton.accessibilityLabel = isSplitActive ? "合并键盘" : "分离键盘"
+                splitButton.accessibilityValue = isSplitActive ? "当前为两侧分离" : "当前为整排合并"
+            }
+
             dismissButton.setImage(KeyboardSymbolCache.image(named: "keyboard.chevron.compact.down", pointSize: 16), for: .normal)
             dismissButton.accessibilityLabel = "收起键盘"
 
@@ -101,9 +126,12 @@ final class IdleToolbarView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let rightWidth: CGFloat = 48
+        let splitWidth: CGFloat = 42
         let leftWidth: CGFloat = 42
-        // 视觉上与文字、右侧收起按钮严格同高垂直居中；未展开面板时底部留出 6pt 防误触死区，避免敲击正下方 Q 键时误触
-        settingsButton.bottomDeadZone = isPanelOpen ? 0 : (bounds.height >= 46 ? 6 : 3)
+        let deadZone: CGFloat = isPanelOpen ? 0 : (bounds.height >= 46 ? 6 : 3)
+        // 视觉上与文字、右侧收起按钮严格同高垂直居中；未展开面板时底部留出 6pt 防误触死区，避免敲击正下方首行键时误触
+        settingsButton.bottomDeadZone = deadZone
+        splitButton.bottomDeadZone = deadZone
         settingsButton.frame = CGRect(
             x: horizontalInset + 4,
             y: 0,
@@ -116,11 +144,24 @@ final class IdleToolbarView: UIView {
             width: rightWidth,
             height: bounds.height
         )
+        let trailingLimitX: CGFloat
+        if !splitButton.isHidden {
+            splitButton.frame = CGRect(
+                x: dismissButton.frame.minX - splitWidth,
+                y: 0,
+                width: splitWidth,
+                height: bounds.height
+            )
+            trailingLimitX = splitButton.frame.minX
+        } else {
+            splitButton.frame = .zero
+            trailingLimitX = dismissButton.frame.minX
+        }
         let labelX = settingsButton.frame.maxX + 4
         statusLabel.frame = CGRect(
             x: labelX,
             y: 0,
-            width: max(0, dismissButton.frame.minX - labelX - 8),
+            width: max(0, trailingLimitX - labelX - 8),
             height: bounds.height
         )
     }

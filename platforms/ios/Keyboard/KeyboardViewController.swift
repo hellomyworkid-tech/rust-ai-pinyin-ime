@@ -80,6 +80,23 @@ final class KeyboardViewController: UIInputViewController {
         return hasFullAccess
     }
 
+    #if DEBUG && targetEnvironment(simulator)
+    private var simulatedUnfolded = false
+    #endif
+
+    private var isUnfoldedDisplay: Bool {
+        #if DEBUG && targetEnvironment(simulator)
+        if simulatedUnfolded {
+            return true
+        }
+        #endif
+        return KeyboardPosture.isUnfolded(
+            horizontalIsRegular: traitCollection.horizontalSizeClass == .regular,
+            verticalIsCompact: traitCollection.verticalSizeClass == .compact,
+            width: viewIfLoaded?.bounds.width ?? 0
+        )
+    }
+
     private var pendingDeferredRestore: (docID: UUID, excluded: UUID?)?
     /// 本次 viewWillAppear 的时刻（诊断记录里算呼出各阶段的耗时）
     private var appearStartedAt: TimeInterval = 0
@@ -145,7 +162,29 @@ final class KeyboardViewController: UIInputViewController {
             self.setSettingsExpanded(!self.rootView.isSettingsExpanded)
             self.render()
         }
+        rootView.toolbar.onToggleSplit = { [weak self] in
+            guard let self else { return }
+            self.ensureSettingsLoaded()
+            self.feedback.keyDown()
+            self.settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
+            self.settings.splitUnfoldedKeyboard.toggle()
+            self.settings.saveFromKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
+            self.render()
+        }
         rootView.toolbar.onDismiss = { [weak self] in self?.dismissKeyboard() }
+
+        registerForTraitChanges([UITraitHorizontalSizeClass.self, UITraitVerticalSizeClass.self]) { (self: Self, _) in
+            guard self.isViewLoaded else { return }
+            let landscape = self.traitCollection.verticalSizeClass == .compact
+            let unfolded = self.isUnfoldedDisplay
+            if unfolded && !self.hasLoadedSettings {
+                self.ensureSettingsLoaded()
+            }
+            self.rootView.landscape = landscape
+            self.rootView.unfolded = unfolded
+            self.rootView.updateHeight(landscape: landscape, unfolded: unfolded, width: self.view.bounds.width)
+            self.render()
+        }
 
         input.output = ProxyTextOutput(controller: self)
         input.onChange = { [weak self] in self?.render() }
@@ -178,7 +217,7 @@ final class KeyboardViewController: UIInputViewController {
         ]
 
         // 键盘高度由根视图里的内容约束决定；真正的首次键位构建推迟到 viewWillAppear 拿到宿主 traits 与地球键需求后一次完成
-        rootView.updateHeight(landscape: false, width: view.bounds.width)
+        rootView.updateHeight(landscape: false, unfolded: false, width: view.bounds.width)
         KeyboardTrace.event("controller.viewDidLoadDone", "\(KeyboardTrace.ms(since: start))ms")
     }
 
@@ -192,6 +231,13 @@ final class KeyboardViewController: UIInputViewController {
 
     private func reloadSettings() {
         settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
+        #if DEBUG && targetEnvironment(simulator)
+        if let marker = AppGroup.debugSimulateUnfoldedURL {
+            simulatedUnfolded = FileManager.default.fileExists(atPath: marker.path)
+        } else {
+            simulatedUnfolded = false
+        }
+        #endif
         hasLoadedSettings = true
         input.apply(settings)
         feedback.configure(settings: settings, hasFullAccess: hasFullAccess)
@@ -241,9 +287,20 @@ final class KeyboardViewController: UIInputViewController {
         let isWarm = input.engine != nil
         KeyboardTrace.event("appear.will",
                             "engine=\(isWarm ? "warm" : "cold") sinceSpawn=\(KeyboardTrace.sinceProcessSpawnMs)ms")
+        #if DEBUG && targetEnvironment(simulator)
+        if let marker = AppGroup.debugSimulateUnfoldedURL {
+            simulatedUnfolded = FileManager.default.fileExists(atPath: marker.path)
+        }
+        #endif
         let landscape = traitCollection.verticalSizeClass == .compact
+        let unfolded = isUnfoldedDisplay
+        if unfolded && !isWarm {
+            // 展开内屏首帧需按用户偏好决定采用两侧分离还是整排布局
+            ensureSettingsLoaded()
+        }
         rootView.landscape = landscape
-        rootView.updateHeight(landscape: landscape, width: view.bounds.width)
+        rootView.unfolded = unfolded
+        rootView.updateHeight(landscape: landscape, unfolded: unfolded, width: view.bounds.width)
         setSettingsExpanded(false)
         if isWarm {
             // 热呼出（引擎已驻留，AppGroup 路径已缓存）：同步刷新设置与个人词库变更；
@@ -254,9 +311,8 @@ final class KeyboardViewController: UIInputViewController {
             input.keyboardWillAppear()
             syncField(policy: .exactOnlyDeferFallback)
         } else {
-            // 冷呼出（进程刚拉起，input.engine == nil）：
-            // IMESettings 的全部字段都不影响空闲首帧像素，因此首帧前零 containermanagerd AppGroup XPC、
-            // 零磁盘 stat / read、零引擎创建、零宿主 documentContextBeforeInput XPC，且只做单次键位构建
+            // 直板机与合盖外屏冷呼出（input.engine == nil, unfolded == false）：
+            // 首帧前零 containermanagerd AppGroup XPC、零磁盘 stat / read、零引擎创建、零宿主 XPC，且只做单次键位构建
             syncField(policy: .deferAll)
         }
         KeyboardTrace.event("appear.willDone",
@@ -281,6 +337,10 @@ final class KeyboardViewController: UIInputViewController {
             self.appearSetupPending = false
             let settingsStart = KeyboardTrace.now
             self.ensureSettingsLoaded()
+            if self.rootView.unfolded != self.isUnfoldedDisplay {
+                self.rootView.unfolded = self.isUnfoldedDisplay
+                self.render()
+            }
             let settingsMs = KeyboardTrace.ms(since: settingsStart)
             if !self.input.isComposing {
                 self.input.keyboardWillAppear()
@@ -324,11 +384,18 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillLayoutSubviews() {
         let landscape = traitCollection.verticalSizeClass == .compact
+        let unfolded = isUnfoldedDisplay
+        if unfolded && !hasLoadedSettings {
+            ensureSettingsLoaded()
+        }
+        let split = unfolded && settings.splitUnfoldedKeyboard
         rootView.landscape = landscape
-        rootView.updateHeight(landscape: landscape, width: view.bounds.width)
+        rootView.unfolded = unfolded
+        rootView.updateHeight(landscape: landscape, unfolded: unfolded, width: view.bounds.width)
         if !rootView.keyboard.isConfigured
             || rootView.keyboard.config.showsGlobe != needsInputModeSwitchKey
-            || rootView.keyboard.config.landscape != landscape {
+            || rootView.keyboard.config.landscape != landscape
+            || rootView.keyboard.config.split != split {
             render()
         }
         super.viewWillLayoutSubviews()
@@ -486,6 +553,8 @@ final class KeyboardViewController: UIInputViewController {
         let composing = input.isComposing
         let chinese = input.isChineseMode
         let landscape = rootView.landscape
+        let unfolded = rootView.unfolded
+        let split = unfolded && settings.splitUnfoldedKeyboard
 
         var config = KeyboardView.Config()
         config.page = page
@@ -495,6 +564,7 @@ final class KeyboardViewController: UIInputViewController {
         config.returnProminent = traits.returnKeyIsProminent && !composing
         config.showsGlobe = needsInputModeSwitchKey
         config.landscape = landscape
+        config.split = split
         rootView.keyboard.apply(config)
 
         rootView.isComposing = composing
@@ -525,10 +595,11 @@ final class KeyboardViewController: UIInputViewController {
         status += Self.memoryStatus
         #endif
         rootView.toolbar.setStatus(status)
+        rootView.toolbar.setSplitControl(visible: unfolded, isSplit: split)
         let showSettings = !composing && rootView.isSettingsExpanded
         rootView.toolbar.setPanelOpen(showSettings, notice: panelNotice)
         if showSettings {
-            rootView.settingsPanel.apply(makeSettingsPanelState(landscape: landscape))
+            rootView.settingsPanel.apply(makeSettingsPanelState(landscape: landscape, isUnfolded: unfolded))
         }
         let showSymbols = page == .symbols
         rootView.isSymbolPanelVisible = showSymbols
@@ -585,7 +656,7 @@ final class KeyboardViewController: UIInputViewController {
         rootView.isSettingsExpanded = expanded
     }
 
-    private func makeSettingsPanelState(landscape: Bool) -> QuickSettingsPanelView.State {
+    private func makeSettingsPanelState(landscape: Bool, isUnfolded: Bool) -> QuickSettingsPanelView.State {
         let downloaded = ModelCatalog.all.filter(\.isDownloaded)
         let selected = ModelCatalog.find(settings.localModelID)
         let active = (selected?.isDownloaded == true) ? selected : downloaded.first
@@ -616,7 +687,8 @@ final class KeyboardViewController: UIInputViewController {
             appleAvailable: appleAvailable,
             localModelSubtitle: subtitle,
             hasDownloadedLocalModel: active != nil,
-            landscape: landscape
+            landscape: landscape,
+            isUnfolded: isUnfolded
         )
     }
 
@@ -764,6 +836,8 @@ extension KeyboardViewController: QuickSettingsPanelDelegate {
         panelNotice = nil
         settings = IMESettings.loadForKeyboard(overrideURL: EngineFactory.keyboardSettingsURL)
         switch item {
+        case .splitKeyboard:
+            settings.splitUnfoldedKeyboard.toggle()
         case .emoji:
             settings.emojiCandidates.toggle()
         case .typoCorrection:

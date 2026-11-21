@@ -21,8 +21,9 @@ final class CandidateGridView: UIView, UICollectionViewDataSource, UICollectionV
     private var cellWidths: [CGFloat] = []
     private var packedWidth: CGFloat = 0
 
-    /// 每行最多几格
+    /// 默认列数；展开内屏等宽幅画面（≥600pt）自动扩至 8 列
     static let columns: CGFloat = 6
+    static let wideColumns: CGFloat = 8
 
     var horizontalInset: CGFloat = 0 {
         didSet { if horizontalInset != oldValue { setNeedsLayout() } }
@@ -70,6 +71,10 @@ final class CandidateGridView: UIView, UICollectionViewDataSource, UICollectionV
         }
     }
 
+    private var columnCount: CGFloat {
+        collectionView.bounds.width >= 600 ? Self.wideColumns : Self.columns
+    }
+
     private func pack() {
         let available = collectionView.bounds.width
         packedWidth = available
@@ -77,9 +82,10 @@ final class CandidateGridView: UIView, UICollectionViewDataSource, UICollectionV
             cellWidths = []
             return
         }
-        let unit = available / Self.columns
+        let cols = columnCount
+        let unit = available / cols
         let needed = candidates.map { CandidateCell.width(for: $0, isFirst: true, landscape: landscape) }
-        let spans = GridPacking.spans(neededWidths: needed, unit: unit, columns: Int(Self.columns))
+        let spans = GridPacking.spans(neededWidths: needed, unit: unit, columns: Int(cols))
         // 向下取整，免得一行的总宽因为小数超出而折行
         cellWidths = spans.map { floor(CGFloat($0) * unit) }
     }
@@ -125,7 +131,7 @@ final class CandidateGridView: UIView, UICollectionViewDataSource, UICollectionV
 
     func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
                         forItemAt indexPath: IndexPath) {
-        guard hasMore, !requestedMore, indexPath.item >= candidates.count - 6 else { return }
+        guard hasMore, !requestedMore, indexPath.item >= candidates.count - Int(columnCount) else { return }
         requestedMore = true
         // 不在 willDisplay 里直接改数据源
         DispatchQueue.main.async { [weak self] in

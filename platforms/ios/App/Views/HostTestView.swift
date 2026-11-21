@@ -54,6 +54,18 @@ enum HostTestSetup {
         if let raw = environment["HOST_TEST_AI_MODE"], let mode = IMESettings.AIMode(rawValue: raw) {
             settings.aiMode = mode
         }
+        if let splitRaw = environment["HOST_TEST_SPLIT_UNFOLDED"] {
+            settings.splitUnfoldedKeyboard = splitRaw != "0" && splitRaw.lowercased() != "false"
+        }
+        if let marker = AppGroup.debugSimulateUnfoldedURL {
+            let files = FileManager.default
+            if environment["HOST_TEST_SIMULATE_UNFOLDED"] == "1" {
+                try? files.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? Data("1".utf8).write(to: marker, options: .atomic)
+            } else {
+                try? files.removeItem(at: marker)
+            }
+        }
         if let path = environment["HOST_TEST_MODEL"], !path.isEmpty,
            let model = ModelCatalog.find(environment["HOST_TEST_MODEL_ID"]),
            let destination = model.localURL {

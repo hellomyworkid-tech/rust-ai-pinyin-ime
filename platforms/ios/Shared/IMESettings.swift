@@ -53,6 +53,8 @@ struct IMESettings: Codable, Equatable {
     var haptics = true
     /// 常用词候选后面跟上对应的表情（打 mao，「猫」后面是 🐈 🐱），和系统键盘一样
     var emojiCandidates = true
+    /// 折叠屏展开内屏（如 iPhone Duo）时自动采用左右两侧分离式键盘，方便双手拇指输入
+    var splitUnfoldedKeyboard = true
 
     init() {}
 
@@ -67,6 +69,7 @@ struct IMESettings: Codable, Equatable {
         keyClickSound = c.value(.keyClickSound) ?? d.keyClickSound
         haptics = c.value(.haptics) ?? d.haptics
         emojiCandidates = c.value(.emojiCandidates) ?? d.emojiCandidates
+        splitUnfoldedKeyboard = c.value(.splitUnfoldedKeyboard) ?? d.splitUnfoldedKeyboard
     }
 
     static func load() -> IMESettings {
