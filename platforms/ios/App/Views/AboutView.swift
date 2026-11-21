@@ -18,6 +18,12 @@ struct AboutView: View {
                 Text("你打的字只在这台设备上处理。键盘不使用网络，不收集、不上传任何输入内容；就算你打开了「允许完全访问」，也一样。")
                 Text("AI 选词用的是 Apple 自带的端侧模型，或者你自己下载到手机里的本地模型，都在设备上运行。")
                 Text("这个 App 只在下载文件时联网：第一次打开时从 GitHub 下载完整词库；你主动点「下载」时，从模型发布方的服务器下载本地模型。下载时不会发送你打的任何内容。")
+                if let privacyURL = URL(string: "https://hellomyworkid-tech.github.io/rust-ai-pinyin-ime/privacy.html") {
+                    Link("查看完整隐私政策", destination: privacyURL)
+                }
+                if let supportURL = URL(string: "https://hellomyworkid-tech.github.io/rust-ai-pinyin-ime/support.html") {
+                    Link("使用指南与技术支持", destination: supportURL)
+                }
             } header: {
                 Text("隐私")
             }
