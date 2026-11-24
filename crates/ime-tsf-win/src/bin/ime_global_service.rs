@@ -22,7 +22,7 @@ use ime_tsf_win::{
     activate_tsf_profile_for_current_user, ensure_appcontainer_dir_acl,
     invalidate_tsf_active_cache, is_shell_appcontainer_host, is_tsf_com_registered, send_tsf_ipc,
     CandidateWindowViewModel, ImePersistentConfig, KeyAction, TsfIpcRequest, TsfIpcResponse,
-    TsfKeySession, VirtualKey, TSF_IPC_PORT, WM_APP_TSF_TIP_STATE,
+    TsfKeySession, VirtualKey, TSF_IPC_PORT, WM_APP_TSF_SHIFT_ARMED, WM_APP_TSF_TIP_STATE,
 };
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
@@ -52,6 +52,9 @@ static SHIFT_DOWN_AT_MS: AtomicU64 = AtomicU64::new(0);
 static SHIFT_TAP_CLEAN: AtomicBool = AtomicBool::new(false);
 static SHIFT_TAP_VALID_AT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_SHIFT_TOGGLED_AT_MS: AtomicU64 = AtomicU64::new(0);
+/// 最近一次由进程内 TSF DLL 在「可用文本上下文」（如游戏聊天框已打开）中上报 Shift 按下的时间与进程 PID
+static TSF_SHIFT_ARMED_AT_MS: AtomicU64 = AtomicU64::new(0);
+static TSF_SHIFT_ARMED_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static LL_HOOKS_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// 状态栏是否因贴靠屏幕边缘而自动收缩为紧凑悬浮小方框
 static STATUS_COLLAPSED: AtomicBool = AtomicBool::new(false);
@@ -349,14 +352,10 @@ fn note_tip_state(pid: u32, active: bool) {
     }
 }
 
-/// 计算当前是否应显示右下角状态栏
-unsafe fn status_bar_should_show() -> bool {
-    // 全屏游戏或全屏独占应用下始终隐藏状态栏，杜绝置顶弹窗打断全屏切换回桌面
-    if is_foreground_fullscreen_app() {
-        return false;
-    }
+/// 判断当前前台应用是否正在使用本输入法（不因全屏游戏隐藏状态栏而误判为已切到其他输入法）
+unsafe fn is_ime_active_for_foreground() -> bool {
     if !TSF_MODE_ACTIVE.load(Ordering::Relaxed) {
-        return true; // 全局钩子模式下输入法对所有非全屏窗口生效
+        return true; // 全局钩子模式下输入法对所有窗口生效
     }
     // 若最近一次触发 deactivate 的进程已经退出（说明是关闭软件而非切换输入法），自动恢复激活状态
     if !LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed) {
@@ -489,14 +488,21 @@ unsafe fn status_bar_should_show() -> bool {
     LAST_TIP_EVENT_ACTIVE.load(Ordering::Relaxed)
 }
 
+/// 计算当前是否应显示右下角悬浮状态栏（全屏游戏 / 独占全屏下始终隐藏，避免置顶弹窗干扰画面）
+unsafe fn status_bar_should_show() -> bool {
+    !is_foreground_fullscreen_app() && is_ime_active_for_foreground()
+}
+
 unsafe fn update_status_bar_visibility(hwnd_status: isize) {
-    let want = status_bar_should_show();
+    let ime_active = is_ime_active_for_foreground();
+    let want_status = ime_active && !is_foreground_fullscreen_app();
     let visible = IsWindowVisible(hwnd_status) != 0;
-    if want != visible {
-        ShowWindow(hwnd_status, if want { SW_SHOWNOACTIVATE } else { SW_HIDE });
+    if want_status != visible {
+        ShowWindow(hwnd_status, if want_status { SW_SHOWNOACTIVATE } else { SW_HIDE });
     }
-    if !want {
-        // 已切换到其他输入法：同时清空可能残留的预编辑状态并收起候选窗
+    if !ime_active {
+        // 已切换到其他输入法（如微软拼音 / 英文键盘）：清空可能残留的预编辑状态并收起候选窗；
+        // 若只是处于全屏游戏（ime_active 仍为 true），则仅隐藏状态栏，绝不破坏游戏聊天框中的正在拼写状态！
         let mut hwnd_cand = 0isize;
         if let Ok(mut guard) = GLOBAL_STATE.try_lock() {
             if let Some(st) = guard.as_mut() {
@@ -518,6 +524,15 @@ unsafe fn update_status_bar_visibility(hwnd_status: isize) {
     }
 }
 
+fn is_tsf_shift_armed_for_pid(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let at = TSF_SHIFT_ARMED_AT_MS.load(Ordering::Relaxed);
+    let armed_pid = TSF_SHIFT_ARMED_PID.load(Ordering::Relaxed);
+    at != 0 && armed_pid == pid && mono_ms().saturating_sub(at) <= SHIFT_TAP_MAX_MS + 150
+}
+
 fn mono_ms() -> u64 {
     static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     BASE.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
@@ -536,6 +551,9 @@ unsafe fn track_shift_tap(vk: u32, is_down: bool) {
                 SHIFT_DOWN_AT_MS.store(mono_ms(), Ordering::Relaxed);
                 SHIFT_TAP_CLEAN.store(!other_mod && !mouse_btn, Ordering::Relaxed);
                 SHIFT_TAP_VALID_AT_MS.store(0, Ordering::Relaxed);
+                // 每次物理 Shift 全新按下时清零旧的 TSF 武装标记；若本次按键确实落入已启用 IME 的上下文
+                // （如游戏内聊天框），随后的 TSF OnTestKeyDown 会立即重新发送 WM_APP_TSF_SHIFT_ARMED
+                TSF_SHIFT_ARMED_AT_MS.store(0, Ordering::Relaxed);
             }
         } else {
             let down_at = SHIFT_DOWN_AT_MS.swap(0, Ordering::Relaxed);
@@ -547,6 +565,7 @@ unsafe fn track_shift_tap(vk: u32, is_down: bool) {
         }
     } else if is_down {
         SHIFT_TAP_CLEAN.store(false, Ordering::Relaxed);
+        TSF_SHIFT_ARMED_AT_MS.store(0, Ordering::Relaxed);
     }
 }
 
@@ -2350,13 +2369,10 @@ unsafe fn sync_ui_windows() {
 
     if let Ok(mut guard) = GLOBAL_STATE.lock() {
         if let Some(st) = guard.as_mut() {
-            if fullscreen {
-                st.session.input_buffer.clear();
-                st.session.current_candidates.clear();
-                st.session.pending_ghost_text = None;
-            }
-            show_cand = !fullscreen
-                && (!st.session.input_buffer.is_empty() || st.session.pending_ghost_text.is_some());
+            // 全屏 / 无边框游戏下保持悬浮状态栏隐藏，但绝不清空正在输入中的拼音，
+            // 当玩家在游戏内打开聊天框打字时正常显示候选窗
+            show_cand = !st.session.input_buffer.is_empty()
+                || (!fullscreen && st.session.pending_ghost_text.is_some());
             if show_cand {
                 let vm = st.session.build_view_model();
                 let ghost = if st.session.input_buffer.is_empty() {
@@ -2463,20 +2479,9 @@ unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
         }
         return (TsfIpcResponse::default(), false);
     }
-    // 全屏游戏或全屏独占应用下，直接放行所有按键（含 Shift 冲刺/下蹲），绝不拦截或触发任何置顶 UI 同步
-    if matches!(req.op.as_str(), "test_key_down" | "key_down" | "key_up")
-        && is_foreground_fullscreen_app()
-    {
-        if let Ok(mut guard) = GLOBAL_STATE.lock() {
-            if let Some(st) = guard.as_mut() {
-                st.shift_tap_armed = false;
-                st.session.input_buffer.clear();
-                st.session.current_candidates.clear();
-            }
-        }
-        return (TsfIpcResponse::default(), false);
-    }
     // 除 deactivate 外，任何来自 DLL 的请求都说明本输入法正在该进程中使用
+    // （全屏游戏在正常游玩时会通过 ImmAssociateContext(NULL) 或 GUID_COMPARTMENT_KEYBOARD_DISABLED 禁用 TSF，
+    // 只有真正打开聊天输入框时 DLL 才会通过 IPC 上报按键，因此不再按全屏窗口一刀切拦截 TSF 按键）
     note_tip_state(req.pid, req.op != "deactivate");
     // 放行由 SendInput(KEYEVENTF_UNICODE) 注入的 VK_PACKET (0xE7) 事件（兼容已加载旧版 DLL 的进程）
     if req.vk == 0xE7
@@ -2487,6 +2492,7 @@ unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
 
     let caps_on = (GetKeyState(0x14) & 0x0001) != 0;
     let caller_elevated = is_process_elevated(req.pid);
+    let caller_fullscreen = is_foreground_fullscreen_app();
 
     let mut resp = TsfIpcResponse::default();
     let mut need_ui_sync = false;
@@ -2632,6 +2638,7 @@ unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
                 "key_up" => {
                     // TSF DLL 与全局键盘钩子双重保障单击 Shift 切换中英文，使用时间戳去重防止重复切换
                     if matches!(req.vk, 0x10 | 0xA0 | 0xA1) && take_valid_shift_tap() {
+                        TSF_SHIFT_ARMED_AT_MS.store(0, Ordering::Relaxed);
                         let now = mono_ms();
                         let last = LAST_SHIFT_TOGGLED_AT_MS.load(Ordering::Relaxed);
                         if now.saturating_sub(last) > 250 {
@@ -2652,13 +2659,20 @@ unsafe fn handle_tsf_ipc_request(req: TsfIpcRequest) -> (TsfIpcResponse, bool) {
                 _ => {}
             }
 
-            // 对常规权限窗口：将待上屏文本排入主线程队列，等 TCP 响应返回后再通过 SendInput(KEYEVENTF_UNICODE) 注入目标窗口；
-            // 对管理员高权限窗口（如 Taskmgr.exe）：跨进程 SendInput 会被 Windows UIPI 拦截（返回 0 导致无法落字），
-            // 因此直接通过 resp.commit_text 返回给目标进程内的 ime_tsf_win.dll，由其在高权限进程内部完成上屏！
-            if !resp.commit_text.is_empty() && !caller_elevated {
-                let txt = std::mem::take(&mut resp.commit_text);
-                st.pending_tsf_commits.push(txt);
-                need_ui_sync = true;
+            // 上屏路由策略：
+            // 1. 全屏 / 无边框游戏（如守望先锋）：保留 resp.commit_text 并置 `use_tsf_commit = true`，
+            //    由游戏进程内的 ime_tsf_win.dll 通过标准 TSF 组合会话 (`StartComposition` -> `SetText` -> `EndComposition`)
+            //    原生上屏（CUAS 转译为 WM_IME_COMPOSITION，不受反作弊屏蔽 SendInput 影响，失败时自动进程内回退）；
+            // 2. 管理员高权限窗口（如 Taskmgr.exe）：保留 resp.commit_text 交由高权限进程内 DLL 上屏以绕过 UIPI；
+            // 3. 常规桌面窗口：排入主线程队列，通过 SendInput(KEYEVENTF_UNICODE) 注入目标窗口。
+            if !resp.commit_text.is_empty() {
+                if caller_fullscreen {
+                    resp.use_tsf_commit = true;
+                } else if !caller_elevated {
+                    let txt = std::mem::take(&mut resp.commit_text);
+                    st.pending_tsf_commits.push(txt);
+                    need_ui_sync = true;
+                }
             }
         }
     }
@@ -2719,13 +2733,10 @@ unsafe extern "system" fn low_level_keyboard_proc(
     if (kb.flags & LLKHF_INJECTED) != 0 {
         return CallNextHookEx(0, n_code, w_param, l_param);
     }
-    // 全屏游戏或全屏独占应用下完全放行所有按键，绝不响应 Shift 切换或调用 SetWindowPos 抢夺全屏显示层
-    if is_foreground_fullscreen_app() {
-        return CallNextHookEx(0, n_code, w_param, l_param);
-    }
+    let fullscreen = is_foreground_fullscreen_app();
     let fg_exe = get_foreground_exe_name();
-    // 无论 TSF / 钩子模式，都在全局键盘钩子中实时跟踪并执行「单击 Shift 切换中英文」
-    // （避免 Windows TSF 对未吞掉的修饰键不派发 OnTestKeyUp 导致 Shift 无法切换）
+    // 无论是否全屏，始终在低级键盘钩子中更新物理按键的 Shift 单击判定状态机（仅操作原子量，零 UI / SetWindowPos 开销），
+    // 确保 TSF 的 OnTestKeyUp 与全屏游戏聊天框内单击 Shift 都能准确生效。
     {
         let m = w_param as u32;
         let is_down = matches!(m, 0x0100 | 0x0104); // WM_KEYDOWN / WM_SYSKEYDOWN
@@ -2733,40 +2744,65 @@ unsafe extern "system" fn low_level_keyboard_proc(
         if is_down || is_up {
             track_shift_tap(kb.vk_code, is_down);
         }
-        if is_up && matches!(kb.vk_code, 0x10 | 0xA0 | 0xA1) && take_valid_shift_tap() {
+        if is_up && matches!(kb.vk_code, 0x10 | 0xA0 | 0xA1) {
             let fg_hwnd = GetForegroundWindow();
-            let mut skip_shift = !status_bar_should_show()
-                || fg_exe.to_ascii_lowercase().contains("ime-desktop-ui")
-                || fg_exe.contains("体验台");
-            let mut commit_on_shift_up: Option<String> = None;
-            let mut did_toggle = false;
-            if let Ok(mut guard) = GLOBAL_STATE.lock() {
-                if let Some(st) = guard.as_mut() {
-                    if st.hwnd_settings != 0 && fg_hwnd == st.hwnd_settings {
-                        skip_shift = true;
-                    }
-                    if !skip_shift {
-                        let now = mono_ms();
-                        let last = LAST_SHIFT_TOGGLED_AT_MS.load(Ordering::Relaxed);
-                        if now.saturating_sub(last) > 250 {
-                            LAST_SHIFT_TOGGLED_AT_MS.store(now, Ordering::Relaxed);
-                            st.shift_tap_armed = false;
-                            let act = st.session.process_key(VirtualKey::Shift);
-                            if let KeyAction::EatAndCommit { committed_text, .. } = act {
-                                commit_on_shift_up = Some(committed_text);
+            let mut fg_pid: u32 = 0;
+            if fg_hwnd != 0 {
+                GetWindowThreadProcessId(fg_hwnd, &mut fg_pid);
+            }
+            let composing = GLOBAL_STATE
+                .try_lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|st| !st.session.input_buffer.is_empty()))
+                .unwrap_or(false);
+            // 非全屏：沿用常规激活判定；
+            // 全屏 / 无边框游戏：仅当进程内 TSF 在本次按下时收到了「可用文本上下文」（如游戏已打开聊天框）
+            // 的 Shift 通知或正在拼写中才允许切换，彻底避免游戏中按 Shift 放技能/冲刺误切中英文！
+            // 注意：先判定 allow_toggle 再调用 take_valid_shift_tap()，避免在极速点击下提前消耗 VALID 标记。
+            let allow_toggle = if fullscreen {
+                TSF_MODE_ACTIVE.load(Ordering::Relaxed)
+                    && (is_tsf_shift_armed_for_pid(fg_pid) || composing)
+            } else {
+                status_bar_should_show()
+            };
+            if allow_toggle
+                && !fg_exe.to_ascii_lowercase().contains("ime-desktop-ui")
+                && !fg_exe.contains("体验台")
+                && take_valid_shift_tap()
+            {
+                TSF_SHIFT_ARMED_AT_MS.store(0, Ordering::Relaxed);
+                let mut commit_on_shift_up: Option<String> = None;
+                let mut did_toggle = false;
+                if let Ok(mut guard) = GLOBAL_STATE.lock() {
+                    if let Some(st) = guard.as_mut() {
+                        let is_own_settings = st.hwnd_settings != 0 && fg_hwnd == st.hwnd_settings;
+                        if !is_own_settings {
+                            let now = mono_ms();
+                            let last = LAST_SHIFT_TOGGLED_AT_MS.load(Ordering::Relaxed);
+                            if now.saturating_sub(last) > 250 {
+                                LAST_SHIFT_TOGGLED_AT_MS.store(now, Ordering::Relaxed);
+                                st.shift_tap_armed = false;
+                                let act = st.session.process_key(VirtualKey::Shift);
+                                if let KeyAction::EatAndCommit { committed_text, .. } = act {
+                                    commit_on_shift_up = Some(committed_text);
+                                }
+                                did_toggle = true;
                             }
-                            did_toggle = true;
                         }
                     }
                 }
-            }
-            if let Some(txt) = commit_on_shift_up {
-                send_unicode_text(&txt);
-            }
-            if did_toggle {
-                sync_ui_windows();
+                if let Some(txt) = commit_on_shift_up {
+                    send_unicode_text(&txt);
+                }
+                if did_toggle {
+                    sync_ui_windows();
+                }
             }
         }
+    }
+    // 全屏游戏或全屏独占应用下，全局低级键盘钩子不接管常规字母键（交由 TSF 进程内接口在聊天框打开时处理）
+    if fullscreen {
+        return CallNextHookEx(0, n_code, w_param, l_param);
     }
     if !status_bar_should_show() {
         let mut hide_wins = (0isize, 0isize);
@@ -3500,6 +3536,11 @@ unsafe extern "system" fn wnd_proc_status(
                 }
             }
             update_status_bar_visibility(hwnd);
+            0
+        }
+        WM_APP_TSF_SHIFT_ARMED => {
+            TSF_SHIFT_ARMED_PID.store(l_param as u32, Ordering::Relaxed);
+            TSF_SHIFT_ARMED_AT_MS.store(mono_ms(), Ordering::Relaxed);
             0
         }
         0x0113 /* WM_TIMER */ if w_param == STATUS_AUTOHIDE_TIMER_ID => {
@@ -5703,6 +5744,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = ChangeWindowMessageFilterEx(
             hwnd_status,
             WM_APP_TSF_TIP_STATE,
+            1, /* MSGFLT_ALLOW */
+            std::ptr::null_mut(),
+        );
+        let _ = ChangeWindowMessageFilterEx(
+            hwnd_status,
+            WM_APP_TSF_SHIFT_ARMED,
             1, /* MSGFLT_ALLOW */
             std::ptr::null_mut(),
         );

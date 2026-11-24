@@ -13,7 +13,7 @@ pub use tsf_com::{
     activate_tsf_profile_for_current_user, ensure_appcontainer_dir_acl,
     invalidate_tsf_active_cache, is_our_tip_active_in_tsf, is_shell_appcontainer_host,
     is_tsf_com_registered, send_tsf_ipc, TsfIpcRequest, TsfIpcResponse, TSF_IPC_PORT,
-    WM_APP_TSF_TIP_STATE,
+    WM_APP_TSF_SHIFT_ARMED, WM_APP_TSF_TIP_STATE,
 };
 
 pub use ime_session::{
@@ -122,6 +122,103 @@ mod tests {
             ((*sink_unk_vtbl).release)(sink_ptr);
             assert_eq!(((*unk_vtbl).release)(tip as *mut c_void), 0);
             assert_eq!(DllCanUnloadNow(), tsf_com::S_OK);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_tsf_thread_mgr_and_compartments_vtable_exactness() {
+        #[link(name = "ole32")]
+        extern "system" {
+            fn CoInitializeEx(pv_reserved: *mut c_void, dw_co_init: u32) -> i32;
+            fn CoUninitialize();
+            fn CoCreateInstance(
+                rclsid: *const tsf_com::GUID,
+                p_unk_outer: *mut c_void,
+                dw_cls_context: u32,
+                riid: *const tsf_com::GUID,
+                ppv: *mut *mut c_void,
+            ) -> i32;
+        }
+        unsafe {
+            let hr_init = CoInitializeEx(std::ptr::null_mut(), 0x2);
+            let mut tm: *mut tsf_com::ITfThreadMgr = std::ptr::null_mut();
+            let hr = CoCreateInstance(
+                &tsf_com::CLSID_TF_THREAD_MGR,
+                std::ptr::null_mut(),
+                1,
+                &tsf_com::IID_ITF_THREAD_MGR,
+                &mut tm as *mut *mut _ as *mut *mut c_void,
+            );
+            assert_eq!(hr, tsf_com::S_OK, "CoCreateInstance(CLSID_TF_ThreadMgr) failed");
+            assert!(!tm.is_null());
+
+            let mut tid: u32 = 0;
+            assert_eq!(((*(*tm).lp_vtbl).activate)(tm, &mut tid), tsf_com::S_OK);
+            assert_ne!(tid, 0);
+
+            // 验证 ITfCompartmentMgr + ITfCompartment::SetValue (slot 3) & GetValue (slot 4) + VARIANT 布局
+            assert!(tsf_com::set_compartment_i32(
+                tm as *mut c_void,
+                tid,
+                &tsf_com::GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+                1
+            ));
+            assert_eq!(
+                tsf_com::get_compartment_i32(
+                    tm as *mut c_void,
+                    &tsf_com::GUID_COMPARTMENT_KEYBOARD_OPENCLOSE
+                ),
+                Some(1)
+            );
+
+            // 验证 CreateDocumentMgr (slot 5) + SetFocus (slot 8) + GetFocus (slot 7) + KEYBOARD_DISABLED / EMPTYCONTEXT
+            let mut doc_mgr: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                ((*(*tm).lp_vtbl).create_document_mgr)(tm, &mut doc_mgr),
+                tsf_com::S_OK
+            );
+            assert!(!doc_mgr.is_null());
+
+            assert!(tsf_com::set_compartment_i32(
+                doc_mgr,
+                tid,
+                &tsf_com::GUID_COMPARTMENT_KEYBOARD_DISABLED,
+                1
+            ));
+            assert_eq!(
+                tsf_com::get_compartment_i32(
+                    doc_mgr,
+                    &tsf_com::GUID_COMPARTMENT_KEYBOARD_DISABLED
+                ),
+                Some(1)
+            );
+            assert!(tsf_com::set_compartment_i32(
+                doc_mgr,
+                tid,
+                &tsf_com::GUID_COMPARTMENT_EMPTYCONTEXT,
+                1
+            ));
+            assert_eq!(
+                tsf_com::get_compartment_i32(doc_mgr, &tsf_com::GUID_COMPARTMENT_EMPTYCONTEXT),
+                Some(1)
+            );
+
+            let _ = ((*(*tm).lp_vtbl).set_focus)(tm, doc_mgr);
+            let mut focused: *mut c_void = std::ptr::null_mut();
+            assert_eq!(((*(*tm).lp_vtbl).get_focus)(tm, &mut focused), tsf_com::S_OK);
+            if !focused.is_null() {
+                let f_vtbl = *(focused as *mut *const tsf_com::IUnknownVtbl);
+                ((*f_vtbl).release)(focused);
+            }
+
+            let dm_vtbl = *(doc_mgr as *mut *const tsf_com::IUnknownVtbl);
+            ((*dm_vtbl).release)(doc_mgr);
+            let _ = ((*(*tm).lp_vtbl).deactivate)(tm);
+            ((*(*tm).lp_vtbl).base.release)(tm as *mut c_void);
+            if hr_init == 0 || hr_init == 1 {
+                CoUninitialize();
+            }
         }
     }
 }

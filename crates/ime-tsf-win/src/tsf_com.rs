@@ -24,6 +24,9 @@ pub const TSF_IPC_PORT: u16 = 18435;
 /// 进程间窗口消息：由宿主进程内的 `ime_tsf_win.dll` 直接投递给状态栏窗口 (`RustAiGlobalImeStatusPillV1`)，
 /// `w_param`: `1` = 激活 (`ActivateEx` / `OnSetFocus`), `0` = 停用 (`Deactivate`)；`l_param`: 宿主进程 `PID`
 pub const WM_APP_TSF_TIP_STATE: u32 = 0x8000 + 0x7B;
+/// 进程间窗口消息：当宿主进程内处于**可用文本输入上下文**（如游戏内已打开聊天框、未设置 `KEYBOARD_DISABLED`）
+/// 且收到 `Shift` 按下时投递给中央服务，用于区分「全屏游戏内正常操作按 Shift」与「聊天输入框内单击 Shift 切换中英」
+pub const WM_APP_TSF_SHIFT_ARMED: u32 = 0x8000 + 0x7C;
 
 /// TSF 客户端与中央守护服务之间的 IPC 请求包
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +50,10 @@ pub struct TsfIpcRequest {
 pub struct TsfIpcResponse {
     pub eaten: bool,
     pub commit_text: String,
+    /// 是否优先通过原生 TSF 组合会话 (`StartComposition` -> `SetText` -> `EndComposition`) 提交上屏文本
+    /// （全屏 / 无边框游戏场景下走原生 CUAS `WM_IME_COMPOSITION`，绕开部分游戏对 `SendInput` 的拦截）
+    #[serde(default)]
+    pub use_tsf_commit: bool,
 }
 
 #[repr(C)]
@@ -152,6 +159,76 @@ pub const IID_ITF_THREAD_FOCUS_SINK: GUID = GUID {
     data2: 0x3A20,
     data3: 0x405C,
     data4: [0xA3, 0x03, 0x96, 0xB6, 0x01, 0x0A, 0x88, 0x5F],
+};
+
+pub const CLSID_TF_THREAD_MGR: GUID = GUID {
+    data1: 0x529A_9E6B,
+    data2: 0x6587,
+    data3: 0x4F23,
+    data4: [0xAB, 0x9E, 0x9C, 0x7D, 0x68, 0x3E, 0x3C, 0x50],
+};
+
+pub const IID_ITF_THREAD_MGR: GUID = GUID {
+    data1: 0xAA80_E801,
+    data2: 0x2021,
+    data3: 0x11D2,
+    data4: [0x93, 0xE0, 0x00, 0x60, 0xB0, 0x67, 0xB8, 0x6E],
+};
+
+pub const IID_ITF_COMPARTMENT_MGR: GUID = GUID {
+    data1: 0x7DCF_57AC,
+    data2: 0x18AD,
+    data3: 0x438B,
+    data4: [0x82, 0x4D, 0x97, 0x9B, 0xFF, 0xB7, 0x4B, 0x7C],
+};
+
+pub const IID_ITF_COMPARTMENT: GUID = GUID {
+    data1: 0xBB08_F7A9,
+    data2: 0x607A,
+    data3: 0x4384,
+    data4: [0x86, 0x23, 0x05, 0x68, 0x92, 0xB6, 0x43, 0x71],
+};
+
+pub const GUID_COMPARTMENT_KEYBOARD_DISABLED: GUID = GUID {
+    data1: 0x71A5_B253,
+    data2: 0x1951,
+    data3: 0x466B,
+    data4: [0x9F, 0xBC, 0x9C, 0x88, 0x08, 0xFA, 0x84, 0xF2],
+};
+
+pub const GUID_COMPARTMENT_EMPTYCONTEXT: GUID = GUID {
+    data1: 0xD748_7DBF,
+    data2: 0x804E,
+    data3: 0x41C5,
+    data4: [0x89, 0x4D, 0xAD, 0x96, 0xFD, 0x4E, 0xEA, 0x13],
+};
+
+pub const GUID_COMPARTMENT_KEYBOARD_OPENCLOSE: GUID = GUID {
+    data1: 0x5827_3AAD,
+    data2: 0x01BB,
+    data3: 0x4164,
+    data4: [0x95, 0xC6, 0x75, 0x5B, 0xA0, 0xB5, 0x16, 0x2D],
+};
+
+pub const IID_ITF_CONTEXT_COMPOSITION: GUID = GUID {
+    data1: 0xD40C_8AAE,
+    data2: 0xAC92,
+    data3: 0x4FC7,
+    data4: [0x9A, 0x11, 0x0E, 0xE0, 0xE2, 0x3A, 0xA3, 0x9B],
+};
+
+pub const IID_ITF_COMPOSITION: GUID = GUID {
+    data1: 0x2016_8D64,
+    data2: 0x5A8F,
+    data3: 0x4A5A,
+    data4: [0xB7, 0xBD, 0xCF, 0xA2, 0x9F, 0x4D, 0x0F, 0xD9],
+};
+
+pub const IID_ITF_COMPOSITION_SINK: GUID = GUID {
+    data1: 0xA781_718C,
+    data2: 0x579A,
+    data3: 0x4B15,
+    data4: [0xA2, 0x80, 0x32, 0xB8, 0x57, 0x7A, 0xCC, 0x5E],
 };
 
 pub const CLSID_TF_INPUT_PROCESSOR_PROFILES: GUID = GUID {
@@ -355,6 +432,208 @@ pub struct ITfInsertAtSelection {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VARIANT {
+    pub vt: u16,
+    pub w_reserved1: u16,
+    pub w_reserved2: u16,
+    pub w_reserved3: u16,
+    #[cfg(target_pointer_width = "64")]
+    pub data: [u64; 2],
+    #[cfg(target_pointer_width = "32")]
+    pub data: [u32; 2],
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<VARIANT>() == 24);
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(std::mem::size_of::<VARIANT>() == 16);
+
+const VT_I4: u16 = 3;
+
+impl VARIANT {
+    pub fn empty() -> Self {
+        Self {
+            vt: 0,
+            w_reserved1: 0,
+            w_reserved2: 0,
+            w_reserved3: 0,
+            data: [0, 0],
+        }
+    }
+
+    pub fn from_i32(val: i32) -> Self {
+        let mut v = Self::empty();
+        v.vt = VT_I4;
+        #[cfg(target_pointer_width = "64")]
+        {
+            v.data[0] = (val as u32) as u64;
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            v.data[0] = val as u32;
+        }
+        v
+    }
+
+    pub fn as_i32(&self) -> Option<i32> {
+        if self.vt == VT_I4 {
+            Some((self.data[0] as u32) as i32)
+        } else {
+            None
+        }
+    }
+}
+
+#[repr(C)]
+pub struct ITfCompartmentVtbl {
+    pub base: IUnknownVtbl,
+    /// `msctf.idl`: `SetValue` 在 vtable 索引 3，`GetValue` 在索引 4
+    pub set_value: unsafe extern "system" fn(*mut ITfCompartment, u32, *const VARIANT) -> HRESULT,
+    pub get_value: unsafe extern "system" fn(*mut ITfCompartment, *mut VARIANT) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct ITfCompartment {
+    pub lp_vtbl: *const ITfCompartmentVtbl,
+}
+
+#[repr(C)]
+pub struct ITfCompartmentMgrVtbl {
+    pub base: IUnknownVtbl,
+    pub get_compartment: unsafe extern "system" fn(
+        *mut ITfCompartmentMgr,
+        *const GUID,
+        *mut *mut ITfCompartment,
+    ) -> HRESULT,
+    pub clear_compartment: unsafe extern "system" fn(*mut ITfCompartmentMgr, u32, *const GUID) -> HRESULT,
+    pub enum_compartments: *const c_void,
+}
+
+#[repr(C)]
+pub struct ITfCompartmentMgr {
+    pub lp_vtbl: *const ITfCompartmentMgrVtbl,
+}
+
+#[repr(C)]
+pub struct ITfThreadMgrVtbl {
+    pub base: IUnknownVtbl,
+    pub activate: unsafe extern "system" fn(*mut ITfThreadMgr, *mut u32) -> HRESULT,
+    pub deactivate: unsafe extern "system" fn(*mut ITfThreadMgr) -> HRESULT,
+    pub create_document_mgr: unsafe extern "system" fn(*mut ITfThreadMgr, *mut *mut c_void) -> HRESULT,
+    pub enum_document_mgrs: *const c_void,
+    pub get_focus: unsafe extern "system" fn(*mut ITfThreadMgr, *mut *mut c_void) -> HRESULT,
+    pub set_focus: unsafe extern "system" fn(*mut ITfThreadMgr, *mut c_void) -> HRESULT,
+    pub associate_focus: *const c_void,
+    pub is_thread_focus: *const c_void,
+    pub get_function_provider: *const c_void,
+    pub enum_function_providers: *const c_void,
+    pub get_global_compartment: unsafe extern "system" fn(
+        *mut ITfThreadMgr,
+        *mut *mut ITfCompartmentMgr,
+    ) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct ITfThreadMgr {
+    pub lp_vtbl: *const ITfThreadMgrVtbl,
+}
+
+#[repr(C)]
+pub struct ITfCompositionVtbl {
+    pub base: IUnknownVtbl,
+    pub get_range: unsafe extern "system" fn(*mut ITfComposition, *mut *mut ITfRange) -> HRESULT,
+    pub shift_start: *const c_void,
+    pub shift_end: *const c_void,
+    pub end_composition: unsafe extern "system" fn(*mut ITfComposition, u32) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct ITfComposition {
+    pub lp_vtbl: *const ITfCompositionVtbl,
+}
+
+#[repr(C)]
+pub struct ITfContextCompositionVtbl {
+    pub base: IUnknownVtbl,
+    pub start_composition: unsafe extern "system" fn(
+        *mut ITfContextComposition,
+        u32,
+        *mut ITfRange,
+        *mut c_void,
+        *mut *mut ITfComposition,
+    ) -> HRESULT,
+    pub enum_compositions: *const c_void,
+    pub find_composition: *const c_void,
+    pub take_ownership: *const c_void,
+}
+
+#[repr(C)]
+pub struct ITfContextComposition {
+    pub lp_vtbl: *const ITfContextCompositionVtbl,
+}
+
+#[repr(C)]
+struct ITfCompositionSinkVtbl {
+    base: IUnknownVtbl,
+    on_composition_terminated: unsafe extern "system" fn(*mut c_void, u32, *mut ITfComposition) -> HRESULT,
+}
+
+#[repr(C)]
+struct StaticCompositionSink {
+    lp_vtbl: *const ITfCompositionSinkVtbl,
+}
+
+unsafe impl Sync for StaticCompositionSink {}
+
+unsafe extern "system" fn comp_sink_qi(
+    this: *mut c_void,
+    riid: *const GUID,
+    ppv: *mut *mut c_void,
+) -> HRESULT {
+    if ppv.is_null() || riid.is_null() {
+        return E_POINTER;
+    }
+    let iid = &*riid;
+    if *iid == IID_IUNKNOWN || *iid == IID_ITF_COMPOSITION_SINK {
+        *ppv = this;
+        S_OK
+    } else {
+        *ppv = null_mut();
+        E_NOINTERFACE
+    }
+}
+
+unsafe extern "system" fn comp_sink_add_ref(_this: *mut c_void) -> u32 {
+    2
+}
+
+unsafe extern "system" fn comp_sink_release(_this: *mut c_void) -> u32 {
+    1
+}
+
+unsafe extern "system" fn comp_sink_on_terminated(
+    _this: *mut c_void,
+    _ec_write: u32,
+    _comp: *mut ITfComposition,
+) -> HRESULT {
+    S_OK
+}
+
+static COMP_SINK_VTBL: ITfCompositionSinkVtbl = ITfCompositionSinkVtbl {
+    base: IUnknownVtbl {
+        query_interface: comp_sink_qi,
+        add_ref: comp_sink_add_ref,
+        release: comp_sink_release,
+    },
+    on_composition_terminated: comp_sink_on_terminated,
+};
+
+static STATIC_COMP_SINK: StaticCompositionSink = StaticCompositionSink {
+    lp_vtbl: &COMP_SINK_VTBL,
+};
+
+#[repr(C)]
 pub struct ITfInputProcessorProfilesVtbl {
     pub base: IUnknownVtbl,
     pub register: unsafe extern "system" fn(*mut ITfInputProcessorProfiles, *const GUID) -> HRESULT,
@@ -407,8 +686,8 @@ pub struct ITfCategoryMgr {
 const TF_ES_ASYNCDONTCARE: u32 = 0x0;
 const TF_ES_SYNC: u32 = 0x1;
 const TF_ES_READ: u32 = 0x2;
-#[allow(dead_code)]
 const TF_ES_READWRITE: u32 = 0x6;
+const TF_IAS_QUERYONLY: u32 = 0x2;
 const TF_DEFAULT_SELECTION: u32 = 0xFFFF_FFFF;
 const TF_ANCHOR_END: u32 = 1;
 const TF_AE_NONE: u32 = 0;
@@ -492,6 +771,12 @@ extern "system" {
         riid: *const GUID,
         ppv: *mut *mut c_void,
     ) -> HRESULT;
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "oleaut32")]
+extern "system" {
+    fn VariantClear(pvarg: *mut VARIANT) -> HRESULT;
 }
 
 #[cfg(target_os = "windows")]
@@ -609,6 +894,7 @@ struct TsfEditSessionCom {
     context: *mut ITfContext,
     commit_text: String,
     query_caret_only: bool,
+    committed_via_tsf: AtomicBool,
 }
 
 static EDIT_SESSION_VTBL: TsfEditSessionVtbl = TsfEditSessionVtbl {
@@ -631,6 +917,7 @@ impl TsfEditSessionCom {
             context,
             commit_text,
             query_caret_only,
+            committed_via_tsf: AtomicBool::new(false),
         });
         Box::into_raw(b)
     }
@@ -711,15 +998,106 @@ unsafe extern "system" fn edit_session_do(this: *mut TsfEditSessionCom, ec: u32)
         return S_OK;
     }
 
-    // 2. 通过 `ITfInsertAtSelection::InsertTextAtSelection` 将上屏文本直接插入目标应用文档
+    // 2. 优先通过标准 TSF 组合会话 (`StartComposition` -> `SetText` -> `EndComposition`) 提交文本：
+    //    在 DirectX / IMM32 游戏（如守望先锋）的 Windows CUAS 桥接层中，这会生成标准 `WM_IME_COMPOSITION(GCS_RESULTSTR)`，
+    //    与微软自带拼音完全一致，不受反作弊屏蔽 `SendInput` 影响；若宿主不支持 `ITfContextComposition` 再回退 `InsertTextAtSelection`。
+    let utf16: Vec<u16> = obj.commit_text.encode_utf16().collect();
+    if utf16.is_empty() {
+        return S_OK;
+    }
+
     let mut insert_sel: *mut ITfInsertAtSelection = null_mut();
-    let hr = ((*(*ctx).lp_vtbl).base.query_interface)(
+    let has_insert_sel = ((*(*ctx).lp_vtbl).base.query_interface)(
         ctx as *mut c_void,
         &IID_ITF_INSERT_AT_SELECTION,
         &mut insert_sel as *mut *mut _ as *mut *mut c_void,
-    );
-    if hr == S_OK && !insert_sel.is_null() {
-        let utf16: Vec<u16> = obj.commit_text.encode_utf16().collect();
+    ) == S_OK
+        && !insert_sel.is_null();
+
+    // 获取当前选区范围（先用 TF_IAS_QUERYONLY 获取可插入范围，失败时退回 GetSelection）
+    let mut target_range: *mut ITfRange = null_mut();
+    if has_insert_sel {
+        let _ = ((*(*insert_sel).lp_vtbl).insert_text_at_selection)(
+            insert_sel,
+            ec,
+            TF_IAS_QUERYONLY,
+            null(),
+            0,
+            &mut target_range,
+        );
+    }
+    if target_range.is_null() {
+        let mut sel2 = TF_SELECTION {
+            range: null_mut(),
+            style_ase: 0,
+            style_interim_char: 0,
+        };
+        let mut fetched2 = 0u32;
+        if ((*(*ctx).lp_vtbl).get_selection)(ctx, ec, TF_DEFAULT_SELECTION, 1, &mut sel2, &mut fetched2) == S_OK
+            && !sel2.range.is_null()
+        {
+            target_range = sel2.range;
+        }
+    }
+
+    let mut committed = false;
+    if !target_range.is_null() {
+        let mut ctx_comp: *mut ITfContextComposition = null_mut();
+        if ((*(*ctx).lp_vtbl).base.query_interface)(
+            ctx as *mut c_void,
+            &IID_ITF_CONTEXT_COMPOSITION,
+            &mut ctx_comp as *mut *mut _ as *mut *mut c_void,
+        ) == S_OK
+            && !ctx_comp.is_null()
+        {
+            let mut comp: *mut ITfComposition = null_mut();
+            let sink_ptr = (&STATIC_COMP_SINK) as *const _ as *mut c_void;
+            if ((*(*ctx_comp).lp_vtbl).start_composition)(
+                ctx_comp,
+                ec,
+                target_range,
+                sink_ptr,
+                &mut comp,
+            ) == S_OK
+                && !comp.is_null()
+            {
+                let mut comp_range: *mut ITfRange = null_mut();
+                let write_range = if ((*(*comp).lp_vtbl).get_range)(comp, &mut comp_range) == S_OK
+                    && !comp_range.is_null()
+                {
+                    comp_range
+                } else {
+                    target_range
+                };
+                if ((*(*write_range).lp_vtbl).set_text)(
+                    write_range,
+                    ec,
+                    0,
+                    utf16.as_ptr(),
+                    utf16.len() as i32,
+                ) == S_OK
+                {
+                    let _ = ((*(*write_range).lp_vtbl).collapse)(write_range, ec, TF_ANCHOR_END);
+                    let new_sel = TF_SELECTION {
+                        range: write_range,
+                        style_ase: TF_AE_NONE,
+                        style_interim_char: 0,
+                    };
+                    let _ = ((*(*ctx).lp_vtbl).set_selection)(ctx, ec, 1, &new_sel);
+                    committed = true;
+                }
+                let _ = ((*(*comp).lp_vtbl).end_composition)(comp, ec);
+                if !comp_range.is_null() {
+                    ((*(*comp_range).lp_vtbl).base.release)(comp_range as *mut c_void);
+                }
+                ((*(*comp).lp_vtbl).base.release)(comp as *mut c_void);
+            }
+            ((*(*ctx_comp).lp_vtbl).base.release)(ctx_comp as *mut c_void);
+        }
+        ((*(*target_range).lp_vtbl).base.release)(target_range as *mut c_void);
+    }
+
+    if !committed && has_insert_sel {
         let mut inserted_range: *mut ITfRange = null_mut();
         let hr_ins = ((*(*insert_sel).lp_vtbl).insert_text_at_selection)(
             insert_sel,
@@ -729,18 +1107,25 @@ unsafe extern "system" fn edit_session_do(this: *mut TsfEditSessionCom, ec: u32)
             utf16.len() as i32,
             &mut inserted_range,
         );
-        if hr_ins == S_OK && !inserted_range.is_null() {
-            let _ = ((*(*inserted_range).lp_vtbl).collapse)(inserted_range, ec, TF_ANCHOR_END);
-            let new_sel = TF_SELECTION {
-                range: inserted_range,
-                style_ase: TF_AE_NONE,
-                style_interim_char: 0,
-            };
-            let _ = ((*(*ctx).lp_vtbl).set_selection)(ctx, ec, 1, &new_sel);
-            ((*(*inserted_range).lp_vtbl).base.release)(inserted_range as *mut c_void);
+        if hr_ins == S_OK {
+            committed = true;
+            if !inserted_range.is_null() {
+                let _ = ((*(*inserted_range).lp_vtbl).collapse)(inserted_range, ec, TF_ANCHOR_END);
+                let new_sel = TF_SELECTION {
+                    range: inserted_range,
+                    style_ase: TF_AE_NONE,
+                    style_interim_char: 0,
+                };
+                let _ = ((*(*ctx).lp_vtbl).set_selection)(ctx, ec, 1, &new_sel);
+                ((*(*inserted_range).lp_vtbl).base.release)(inserted_range as *mut c_void);
+            }
         }
+    }
+
+    if has_insert_sel {
         ((*(*insert_sel).lp_vtbl).base.release)(insert_sel as *mut c_void);
     }
+    obj.committed_via_tsf.store(committed, Ordering::SeqCst);
 
     S_OK
 }
@@ -928,6 +1313,147 @@ fn notify_server_tip_state_winmsg(active: bool) {
     }
 }
 
+/// 通知中央服务：当前宿主进程在「可用文本输入上下文」中收到了 Shift 按下，允许本次单击切换中英文
+fn notify_server_shift_armed() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let cls = to_wide("RustAiGlobalImeStatusPillV1");
+        let hwnd = FindWindowW(cls.as_ptr(), std::ptr::null());
+        if hwnd != 0 {
+            let _ = PostMessageW(
+                hwnd,
+                WM_APP_TSF_SHIFT_ARMED,
+                0,
+                std::process::id() as isize,
+            );
+        }
+    }
+}
+
+/// 从任意支持 `ITfCompartmentMgr` 的 COM 对象（`ITfThreadMgr` / `ITfDocumentMgr` / `ITfContext`）读取 `VT_I4` 隔间值
+pub unsafe fn get_compartment_i32(unk: *mut c_void, guid: &GUID) -> Option<i32> {
+    if unk.is_null() {
+        return None;
+    }
+    let unk_vtbl = *(unk as *mut *const IUnknownVtbl);
+    let mut comp_mgr: *mut ITfCompartmentMgr = null_mut();
+    if ((*unk_vtbl).query_interface)(
+        unk,
+        &IID_ITF_COMPARTMENT_MGR,
+        &mut comp_mgr as *mut *mut _ as *mut *mut c_void,
+    ) != S_OK
+        || comp_mgr.is_null()
+    {
+        return None;
+    }
+    let mut comp: *mut ITfCompartment = null_mut();
+    let mut out = None;
+    if ((*(*comp_mgr).lp_vtbl).get_compartment)(comp_mgr, guid, &mut comp) == S_OK && !comp.is_null() {
+        let mut var = VARIANT::empty();
+        if ((*(*comp).lp_vtbl).get_value)(comp, &mut var) == S_OK {
+            out = var.as_i32();
+            #[cfg(target_os = "windows")]
+            {
+                let _ = VariantClear(&mut var);
+            }
+        }
+        ((*(*comp).lp_vtbl).base.release)(comp as *mut c_void);
+    }
+    ((*(*comp_mgr).lp_vtbl).base.release)(comp_mgr as *mut c_void);
+    out
+}
+
+/// 向支持 `ITfCompartmentMgr` 的 COM 对象写入 `VT_I4` 隔间值（例如 `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE = 1`）
+pub unsafe fn set_compartment_i32(unk: *mut c_void, tid: u32, guid: &GUID, val: i32) -> bool {
+    if unk.is_null() {
+        return false;
+    }
+    let unk_vtbl = *(unk as *mut *const IUnknownVtbl);
+    let mut comp_mgr: *mut ITfCompartmentMgr = null_mut();
+    if ((*unk_vtbl).query_interface)(
+        unk,
+        &IID_ITF_COMPARTMENT_MGR,
+        &mut comp_mgr as *mut *mut _ as *mut *mut c_void,
+    ) != S_OK
+        || comp_mgr.is_null()
+    {
+        return false;
+    }
+    let mut comp: *mut ITfCompartment = null_mut();
+    let mut ok = false;
+    if ((*(*comp_mgr).lp_vtbl).get_compartment)(comp_mgr, guid, &mut comp) == S_OK && !comp.is_null() {
+        let var = VARIANT::from_i32(val);
+        ok = ((*(*comp).lp_vtbl).set_value)(comp, tid, &var) == S_OK;
+        ((*(*comp).lp_vtbl).base.release)(comp as *mut c_void);
+    }
+    ((*(*comp_mgr).lp_vtbl).base.release)(comp_mgr as *mut c_void);
+    ok
+}
+
+/// 按微软 TSF 规范 (`SampleIME` / `WeaselTSF::_IsKeyboardDisabled`) 检查当前上下文是否禁用了输入法：
+/// 当游戏处于正常游玩状态（未开聊天框）或焦点位于密码框/空上下文时，`GUID_COMPARTMENT_KEYBOARD_DISABLED`
+/// 或 `GUID_COMPARTMENT_EMPTYCONTEXT` 为非零，此时必须直接放行所有按键（含 Shift 技能键与 WASD）。
+unsafe fn is_keyboard_disabled(obj: &TsfTextServiceCom, pic: *mut ITfContext) -> bool {
+    if pic.is_null() {
+        return true;
+    }
+    if get_compartment_i32(pic as *mut c_void, &GUID_COMPARTMENT_KEYBOARD_DISABLED)
+        .unwrap_or(0)
+        != 0
+        || get_compartment_i32(pic as *mut c_void, &GUID_COMPARTMENT_EMPTYCONTEXT)
+            .unwrap_or(0)
+            != 0
+    {
+        return true;
+    }
+
+    // 复制并 AddRef `ITfThreadMgr` 指针后立即释放互斥锁，避免持锁期间触发 COM 重入死锁
+    let ptim = if let Ok(guard) = obj.thread_mgr.lock() {
+        let p = *guard;
+        if !p.is_null() {
+            let unk_vtbl = *(p as *mut *const IUnknownVtbl);
+            ((*unk_vtbl).add_ref)(p);
+        }
+        p
+    } else {
+        null_mut()
+    };
+    if ptim.is_null() {
+        return false;
+    }
+
+    let mut disabled = false;
+    if get_compartment_i32(ptim, &GUID_COMPARTMENT_KEYBOARD_DISABLED).unwrap_or(0) != 0 {
+        disabled = true;
+    } else {
+        let mut tm: *mut ITfThreadMgr = null_mut();
+        let unk_vtbl = *(ptim as *mut *const IUnknownVtbl);
+        if ((*unk_vtbl).query_interface)(
+            ptim,
+            &IID_ITF_THREAD_MGR,
+            &mut tm as *mut *mut _ as *mut *mut c_void,
+        ) == S_OK
+            && !tm.is_null()
+        {
+            let mut doc_mgr: *mut c_void = null_mut();
+            if ((*(*tm).lp_vtbl).get_focus)(tm, &mut doc_mgr) == S_OK && !doc_mgr.is_null() {
+                if get_compartment_i32(doc_mgr, &GUID_COMPARTMENT_KEYBOARD_DISABLED).unwrap_or(0) != 0
+                    || get_compartment_i32(doc_mgr, &GUID_COMPARTMENT_EMPTYCONTEXT).unwrap_or(0) != 0
+                {
+                    disabled = true;
+                }
+                let dm_vtbl = *(doc_mgr as *mut *const IUnknownVtbl);
+                ((*dm_vtbl).release)(doc_mgr);
+            }
+            ((*(*tm).lp_vtbl).base.release)(tm as *mut c_void);
+        }
+    }
+
+    let unk_vtbl = *(ptim as *mut *const IUnknownVtbl);
+    ((*unk_vtbl).release)(ptim);
+    disabled
+}
+
 unsafe extern "system" fn tip_activate(
     this: *mut c_void,
     ptim: *mut c_void,
@@ -1003,6 +1529,10 @@ unsafe extern "system" fn tip_activate_ex(
         }
         ((*(*tf_src).lp_vtbl).base.release)(tf_src as *mut c_void);
     }
+
+    // 3. 按 TSF 规范设置 `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE = 1`，
+    //    使 Windows CUAS (`ImmGetOpenStatus`) 与游戏聊天框明确识别本输入法处于开启可用态
+    let _ = set_compartment_i32(ptim, tid, &GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, 1);
 
     notify_server_tip_state_winmsg(true);
 
@@ -1319,28 +1849,51 @@ unsafe fn update_caret_from_context(obj: &TsfTextServiceCom, pic: *mut ITfContex
     edit_session_release(es as *mut c_void);
 }
 
-unsafe fn commit_text_to_context(obj: &TsfTextServiceCom, pic: *mut ITfContext, text: String) {
+unsafe fn commit_text_to_context(
+    obj: &TsfTextServiceCom,
+    pic: *mut ITfContext,
+    text: String,
+    use_tsf_commit: bool,
+) {
     if text.is_empty() {
         return;
     }
-    // 优先在目标进程内延迟 6ms 使用 Unicode SendInput 上屏（等待 OnKeyDown 返回 *pf_eaten=1 后再以目标进程自身权限注入，
-    // 100% 兼容 Taskmgr.exe 等管理员窗口以及 Chrome/Electron/WinUI3 XAML Island 控件）
-    let text_clone = text.clone();
+    // 全屏 / 无边框游戏场景优先尝试原生 TSF 组合会话提交 (`StartComposition` -> `SetText` -> `EndComposition`)：
+    // Windows CUAS 会自动将其转译为标准 `WM_IME_COMPOSITION(GCS_RESULTSTR)`，彻底绕开部分游戏对 `SendInput` 的过滤；
+    // 若当前上下文不支持写锁或提交失败，再无缝回退到宿主进程内 `SendInput(KEYEVENTF_UNICODE)`。
+    if use_tsf_commit && !pic.is_null() {
+        let tid = obj.client_id.load(Ordering::SeqCst);
+        let es = TsfEditSessionCom::new_boxed(pic, text.clone(), false);
+        let mut hr_session: HRESULT = S_OK;
+        let hr = ((*(*pic).lp_vtbl).request_edit_session)(
+            pic,
+            tid,
+            es as *mut c_void,
+            TF_ES_SYNC | TF_ES_READWRITE,
+            &mut hr_session,
+        );
+        let ok = hr == S_OK
+            && hr_session == S_OK
+            && (*es).committed_via_tsf.load(Ordering::SeqCst);
+        edit_session_release(es as *mut c_void);
+        if ok {
+            return;
+        }
+    }
+    // 常规桌面 / 管理员窗口回退路径：延迟 6ms 在目标进程内使用 Unicode SendInput 上屏
+    // （等待 OnKeyDown 返回 *pf_eaten=1 后再以目标进程自身权限注入，兼容 Taskmgr.exe 及 Chrome/Electron/WinUI3）
+    let text_clone = text;
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(6));
         unsafe {
             let _ = send_unicode_from_tsf(&text_clone);
         }
     });
-    if pic.is_null() {
-        return;
-    }
-    let _ = obj;
 }
 
 unsafe extern "system" fn sink_on_test_key_down(
-    _this: *mut c_void,
-    _pic: *mut ITfContext,
+    this: *mut c_void,
+    pic: *mut ITfContext,
     w_param: usize,
     _l_param: isize,
     pf_eaten: *mut i32,
@@ -1359,11 +1912,22 @@ unsafe extern "system" fn sink_on_test_key_down(
         *pf_eaten = 0;
         return S_OK;
     }
+    let obj = &*from_sink_ptr(this);
+    if is_keyboard_disabled(obj, pic) {
+        LOCAL_SHIFT_TAP_ARMED.store(false, Ordering::SeqCst);
+        *pf_eaten = 0;
+        return S_OK;
+    }
 
     let (shift, ctrl, alt) = query_key_modifiers();
-    // 单按 Shift 键在本地标记候选切换状态，不吃掉按键以便 Shift 组合键正常工作
+    // 单按 Shift 键在本地标记候选切换状态，不吃掉按键以便 Shift 组合键正常工作；
+    // 仅在首次按下（非按住连发）时通知中央服务：当前存在可用 TSF 输入上下文（如游戏内已打开聊天框）
     if matches!(vk, 0x10 | 0xA0 | 0xA1) {
-        LOCAL_SHIFT_TAP_ARMED.store(!ctrl && !alt, Ordering::SeqCst);
+        let clean_shift = !ctrl && !alt;
+        let prev_armed = LOCAL_SHIFT_TAP_ARMED.swap(clean_shift, Ordering::SeqCst);
+        if clean_shift && !prev_armed {
+            notify_server_shift_armed();
+        }
         *pf_eaten = 0;
         return S_OK;
     }
@@ -1412,6 +1976,9 @@ unsafe extern "system" fn sink_on_test_key_up(
             return S_OK;
         }
         let obj = &*from_sink_ptr(this);
+        if is_keyboard_disabled(obj, pic) {
+            return S_OK;
+        }
         let (shift, ctrl, alt) = query_key_modifiers();
         if let Some(resp) = send_tsf_ipc(&TsfIpcRequest {
             op: "key_up".to_string(),
@@ -1425,7 +1992,7 @@ unsafe extern "system" fn sink_on_test_key_up(
             pid: std::process::id(),
         }) {
             if !resp.commit_text.is_empty() {
-                commit_text_to_context(obj, pic, resp.commit_text);
+                commit_text_to_context(obj, pic, resp.commit_text, resp.use_tsf_commit);
             }
         }
     }
@@ -1452,9 +2019,14 @@ unsafe extern "system" fn sink_on_key_down(
         *pf_eaten = 0;
         return S_OK;
     }
+    let obj = &*from_sink_ptr(this);
+    if is_keyboard_disabled(obj, pic) {
+        LOCAL_SHIFT_TAP_ARMED.store(false, Ordering::SeqCst);
+        *pf_eaten = 0;
+        return S_OK;
+    }
     LOCAL_SHIFT_TAP_ARMED.store(false, Ordering::SeqCst);
 
-    let obj = &*from_sink_ptr(this);
     update_caret_from_context(obj, pic);
     let (caret_x, caret_y) = LAST_CARET_RECT.lock().map(|g| *g).unwrap_or((0, 0));
     let (shift, ctrl, alt) = query_key_modifiers();
@@ -1472,7 +2044,7 @@ unsafe extern "system" fn sink_on_key_down(
     }) {
         *pf_eaten = if resp.eaten { 1 } else { 0 };
         if !resp.commit_text.is_empty() {
-            commit_text_to_context(obj, pic, resp.commit_text);
+            commit_text_to_context(obj, pic, resp.commit_text, resp.use_tsf_commit);
         }
     } else {
         *pf_eaten = 0;
