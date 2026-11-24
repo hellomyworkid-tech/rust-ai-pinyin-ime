@@ -1435,8 +1435,9 @@ impl BilingualDecoder {
         let is_fuzzy_cand = |c: &Candidate| c.tag.starts_with("[纠错");
 
         // 正确输入优先保护（Exact-Input Protection）：
-        // 若首选是纠错项，但存在用户原样拼音对应的整词或通顺精确整句（且词频/代价差距不悬殊），则把原样精确结果放回首位。
-        // 例：`sixiang` 必须是「思想」而不是纠错后的「实现」；`chenxianzaiai` 必须是「趁现在 AI」而不是纠错后的「呈现再爱」。
+        // 若首选是纠错项，但存在用户原样拼音对应的整词或同段数通顺精确整句（且词频/代价差距不悬殊），则把原样精确结果放回首位。
+        // 例：`sixiang` 必须是「思想」而不是纠错后的「实现」；`chenxianzaiai` 必须是「趁现在 AI」而不是纠错后的「呈现再爱」；
+        // `jiangquanyunxing` 应优先原样「奖券运行」而非模糊音「健全运行」。
         if candidates.first().is_some_and(|c| is_fuzzy_cand(c)) {
             let top_cost = candidates[0].l1_cost;
             let top_segs = candidates[0].segments.len();
@@ -1448,7 +1449,10 @@ impl BilingualDecoder {
                     && !is_fuzzy_cand(c)
                     && ((c.segments.len() == 1 && c.l1_cost <= top_cost + 3.0)
                         || (clean_full
-                            && c.segments.len() <= top_segs + 1
+                            && c.segments.len() <= top_segs
+                            && c.l1_cost <= top_cost + 2.2)
+                        || (clean_full
+                            && c.segments.len() == top_segs + 1
                             && c.l1_cost <= top_cost + 0.8))
             }) {
                 let top_score = candidates[0].final_score;
@@ -2400,6 +2404,149 @@ fn find_k_syllable_cuts(
     false
 }
 
+/// 使用全局最优回溯对齐将词条规范音节序列 `syls` 映射到原始输入片段 `input[start..end]`。
+///
+/// 之所以不能做单步贪心 `starts_with`：对前后鼻音模糊音（如原输入 `jiangquan` 模糊匹配词库 `jian'quan`「健全」、
+/// `zhengshi` 匹配 `zhen'shi`「真实」），规范音节 `jian` 恰好是原始音节 `jiang` 的真前缀；
+/// 贪心 `starts_with("jian")` 会把 `g` 推给下一个音节形成非法片段 `jian | gquan`！
+/// 全局最小代价对齐会综合考虑所有音节：`["jiang", "quan"]`（总代价 1）远优于 `["jian", "gquan"]`（总代价 100）。
+fn align_syllables_global(
+    input: &str,
+    start: usize,
+    end: usize,
+    syls: &[&str],
+) -> Option<Vec<(usize, usize)>> {
+    let all_fuzzy = crate::pinyin::FuzzyPinyinConfig {
+        z_zh: true,
+        c_ch: true,
+        s_sh: true,
+        n_l: true,
+        f_h: true,
+        in_ing: true,
+        en_eng: true,
+        an_ang: true,
+        typo_correction: true,
+    };
+
+    fn piece_cost(piece_raw: &str, syl: &str, fuzzy: &crate::pinyin::FuzzyPinyinConfig) -> u32 {
+        if piece_raw.is_empty() {
+            return 200;
+        }
+        let lower = piece_raw.to_ascii_lowercase();
+        if lower == syl || crate::pinyin::canonical_syllable(&lower) == syl {
+            return 0;
+        }
+        if lower.len() >= 2 && fuzzy.expand_fuzzy(&lower).iter().any(|(s, _)| s == syl) {
+            return 1;
+        }
+        if syl.starts_with(&lower) {
+            if lower.len() > 1 && crate::pinyin::is_valid_or_alias_syllable(&lower) {
+                return 3;
+            }
+            return 4;
+        }
+        if crate::pinyin::is_valid_or_alias_syllable(&lower) {
+            return 8;
+        }
+        100
+    }
+
+    fn dfs(
+        input: &str,
+        cur: usize,
+        end: usize,
+        syls: &[&str],
+        idx: usize,
+        fuzzy: &crate::pinyin::FuzzyPinyinConfig,
+        cur_cost: u32,
+        best_cost: &mut u32,
+        path: &mut Vec<(usize, usize)>,
+        best_path: &mut Option<Vec<(usize, usize)>>,
+    ) {
+        if cur_cost >= *best_cost {
+            return;
+        }
+        let bytes = input.as_bytes();
+        let mut pos = cur;
+        while pos < end && bytes[pos] == b'\'' {
+            pos += 1;
+        }
+        if idx + 1 == syls.len() {
+            let mut tail_end = end;
+            while tail_end > pos && bytes[tail_end - 1] == b'\'' {
+                tail_end -= 1;
+            }
+            if tail_end <= pos {
+                return;
+            }
+            let c = piece_cost(&input[pos..tail_end], syls[idx], fuzzy);
+            let total = cur_cost + c;
+            if total < *best_cost {
+                *best_cost = total;
+                let mut done = path.clone();
+                done.push((pos, end));
+                *best_path = Some(done);
+            }
+            return;
+        }
+
+        let rem_syls = syls.len() - idx - 1;
+        // 为后续每个音节至少保留 1 字节；单音节最长 6 字节（如 zhuang / chuang）
+        let max_end = end.saturating_sub(rem_syls).min(pos + 6);
+        if max_end <= pos {
+            return;
+        }
+        // 收集当前步所有非含分隔符的候选切点并按局部代价升序枚举，实现极速剪枝
+        let mut cands: [(usize, u32); 6] = [(0, 0); 6];
+        let mut cand_len = 0usize;
+        for next_end in (pos + 1)..=max_end {
+            if bytes[next_end - 1] == b'\'' {
+                break;
+            }
+            let c = piece_cost(&input[pos..next_end], syls[idx], fuzzy);
+            cands[cand_len] = (next_end, c);
+            cand_len += 1;
+        }
+        cands[..cand_len].sort_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)));
+        for &(next_end, c) in &cands[..cand_len] {
+            if cur_cost + c >= *best_cost {
+                break;
+            }
+            path.push((pos, next_end));
+            dfs(
+                input,
+                next_end,
+                end,
+                syls,
+                idx + 1,
+                fuzzy,
+                cur_cost + c,
+                best_cost,
+                path,
+                best_path,
+            );
+            path.pop();
+        }
+    }
+
+    let mut best_cost = u32::MAX;
+    let mut best_path = None;
+    let mut path = Vec::with_capacity(syls.len());
+    dfs(
+        input,
+        start,
+        end,
+        syls,
+        0,
+        &all_fuzzy,
+        0,
+        &mut best_cost,
+        &mut path,
+        &mut best_path,
+    );
+    best_path
+}
+
 /// 将单条晶格图边（如多字中文词 `0..9 "wo'shi'yong" -> "我使用"`）拆解为逐个独立音节区间
 /// 这样预编辑音节栏中的每一个拼音音节都有精确对应的 `[start..end]` 字节范围与单字
 fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan> {
@@ -2433,66 +2580,16 @@ fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan
     let chars: Vec<char> = edge.text.chars().collect();
     let total_syl_len: usize = syls.iter().map(|s| s.len()).sum();
     let span_len = edge.end.saturating_sub(edge.start);
+    let has_apostrophe = input
+        .get(edge.start..edge.end)
+        .is_some_and(|s| s.contains('\''));
 
     let mut out = Vec::with_capacity(syls.len());
-    let mut cur = edge.start;
-
-    for (idx, &syl) in syls.iter().enumerate() {
-        while cur < edge.end && input.as_bytes().get(cur) == Some(&b'\'') {
-            cur += 1;
-        }
-        let next_end = if idx + 1 == syls.len() {
-            edge.end
-        } else if edge.kind == EdgeKind::AbbrevPinyin || span_len == syls.len() {
-            // 首字母简拼词条（如 `wzj` -> `wei'zi'ji`）：每个音节固定对应 1 个输入字母
-            (cur + 1).min(edge.end)
-        } else if total_syl_len == span_len {
-            (cur + syl.len()).min(edge.end)
-        } else {
-            // 若存在混拼/半拼（如 `dif` -> `di'fang`、`zme` -> `zen'me`）或模糊音/纠错导致长度不等，
-            // 为后续每个音节至少预留 1 字节，依次尝试：原音节前缀 -> 模糊音/纠错音节 -> 字典音节首字母前缀 -> 任意合法音节
-            let rem = &input[cur..edge.end];
-            let rem_syls_after = syls.len().saturating_sub(idx + 1);
-            let max_try = rem.len().saturating_sub(rem_syls_after).min(6);
-            let mut matched_len = 1.min(rem.len());
-            if syl.len() <= max_try && rem[..max_try].starts_with(syl) {
-                matched_len = syl.len();
-            } else {
-                let fuzzy = crate::pinyin::FuzzyPinyinConfig::default();
-                let mut found = false;
-                for try_len in (2..=max_try).rev() {
-                    let piece = &rem[..try_len];
-                    if fuzzy.expand_fuzzy(piece).iter().any(|(s, _)| s == syl) {
-                        matched_len = try_len;
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    for try_len in (1..=syl.len().min(max_try)).rev() {
-                        if syl.starts_with(&rem[..try_len])
-                            && (try_len == 1 || crate::pinyin::is_valid_syllable(&rem[..try_len]))
-                        {
-                            matched_len = try_len;
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-                if !found {
-                    for try_len in (1..=max_try).rev() {
-                        if crate::pinyin::is_valid_syllable(&rem[..try_len]) {
-                            matched_len = try_len;
-                            break;
-                        }
-                    }
-                }
-            }
-            (cur + matched_len).min(edge.end)
-        };
-        if next_end > cur {
+    let mut push_span = |idx: usize, s: usize, e: usize| {
+        if e > s {
+            let syl = syls.get(idx).copied().unwrap_or("");
             let actual_code = input
-                .get(cur..next_end)
+                .get(s..e)
                 .unwrap_or(syl)
                 .trim_matches('\'')
                 .to_string();
@@ -2501,8 +2598,8 @@ fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| edge.text.clone());
             out.push(SegmentSpan {
-                start: cur,
-                end: next_end,
+                start: s,
+                end: e,
                 text: ch_text,
                 code_key: if actual_code.is_empty() {
                     syl.to_string()
@@ -2510,7 +2607,38 @@ fn split_edge_into_syllables(input: &str, edge: &LatticeEdge) -> Vec<SegmentSpan
                     actual_code
                 },
             });
+        }
+    };
+
+    if edge.kind == EdgeKind::AbbrevPinyin || span_len == syls.len() {
+        // 首字母简拼词条（如 `wzj` -> `wei'zi'ji`）：每个音节固定对应 1 个输入字母
+        let mut cur = edge.start;
+        for idx in 0..syls.len() {
+            while cur < edge.end && input.as_bytes().get(cur) == Some(&b'\'') {
+                cur += 1;
+            }
+            let next_end = if idx + 1 == syls.len() {
+                edge.end
+            } else {
+                (cur + 1).min(edge.end)
+            };
+            push_span(idx, cur, next_end);
             cur = next_end;
+        }
+    } else if !edge.is_fuzzy && !has_apostrophe && total_syl_len == span_len {
+        let mut cur = edge.start;
+        for (idx, &syl) in syls.iter().enumerate() {
+            let next_end = if idx + 1 == syls.len() {
+                edge.end
+            } else {
+                (cur + syl.len()).min(edge.end)
+            };
+            push_span(idx, cur, next_end);
+            cur = next_end;
+        }
+    } else if let Some(aligned) = align_syllables_global(input, edge.start, edge.end, &syls) {
+        for (idx, (s, e)) in aligned.into_iter().enumerate() {
+            push_span(idx, s, e);
         }
     }
 

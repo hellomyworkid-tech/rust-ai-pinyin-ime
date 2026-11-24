@@ -1783,6 +1783,58 @@ mod tests {
         let pos_yxj = yxj_top5.iter().position(|&t| t == "右下角").unwrap();
         let pos_you = yxj_top5.iter().position(|&t| t == "有").unwrap_or(99);
         assert!(pos_yxj < pos_you, "多音节正词『右下角』必须排在单字『有』之前: {yxj_top5:?}");
+
+        // 5) 前后鼻音模糊音跨音节对齐回归（复现 `jiangquanyunxing` 错切为 `jian gquan yun xing` 的真实问题）：
+        //    - 整句首选必须保留精确拼写「奖券运行」而非模糊音「健全运行」，且前缀第 4 项提供「降权」；
+        //    - 即便对模糊音候选「健全运行」/「健全」（规范拼音 `jian'quan`）或 `zhengshi` 的「真是」（`zhen'shi`），
+        //      全局音节对齐也必须将 `g` 留在原音节 `jiang`/`zheng` 内，绝不能推给后一音节产生非法 `gquan`/`gshi`；
+        //    - `jiangquan` 首音节单字必须是 `jiang`（将/江…），不再因 `jian` 错切混入 `见/间`。
+        let jqyx = engine.decode("jiangquanyunxing", AppScene::General, "");
+        assert_eq!(jqyx.candidates[0].text, "奖券运行");
+        let top_syls: Vec<&str> = jqyx.candidates[0]
+            .syllable_spans
+            .iter()
+            .map(|s| s.code_key.as_str())
+            .collect();
+        assert_eq!(top_syls, vec!["jiang", "quan", "yun", "xing"]);
+        let jqyx_fuzzy = jqyx
+            .candidates
+            .iter()
+            .find(|c| c.text == "健全运行")
+            .expect("jiangquanyunxing 应保留模糊音候选『健全运行』");
+        let fuzzy_syls: Vec<&str> = jqyx_fuzzy
+            .syllable_spans
+            .iter()
+            .map(|s| s.code_key.as_str())
+            .collect();
+        assert_eq!(
+            fuzzy_syls,
+            vec!["jiang", "quan", "yun", "xing"],
+            "模糊音候选『健全运行』绝不能把 g 推给后一音节变成 jian gquan"
+        );
+        assert!(jqyx.candidates.iter().take(5).any(|c| c.text == "降权"));
+
+        let jq = engine.decode("jiangquan", AppScene::General, "");
+        let jq_fuzzy = jq.candidates.iter().find(|c| c.text == "健全").unwrap();
+        let jq_fuzzy_syls: Vec<&str> = jq_fuzzy
+            .syllable_spans
+            .iter()
+            .map(|s| s.code_key.as_str())
+            .collect();
+        assert_eq!(jq_fuzzy_syls, vec!["jiang", "quan"]);
+        let jq_top6: Vec<&str> = jq.candidates.iter().take(6).map(|c| c.text.as_str()).collect();
+        assert!(jq_top6.contains(&"将"), "jiangquan 单字应为 jiang 而非 jian: {jq_top6:?}");
+        assert!(!jq_top6.contains(&"见"), "jiangquan 不应混入 jian 单字『见』: {jq_top6:?}");
+
+        let zs = engine.decode("zhengshi", AppScene::General, "");
+        if let Some(zs_fuzzy) = zs.candidates.iter().find(|c| c.text == "真是") {
+            let zs_syls: Vec<&str> = zs_fuzzy
+                .syllable_spans
+                .iter()
+                .map(|s| s.code_key.as_str())
+                .collect();
+            assert_eq!(zs_syls, vec!["zheng", "shi"]);
+        }
     }
 
     /// 打印常用输入的前 6 个候选（回归抽查用）：`cargo test -p ime-core dump_top_candidates -- --ignored --nocapture`
