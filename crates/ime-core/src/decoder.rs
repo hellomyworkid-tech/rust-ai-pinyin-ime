@@ -424,7 +424,12 @@ impl BilingualDecoder {
                     EdgeKind::ChineseWord if !edge_splits_single_syl => 0.55,
                     EdgeKind::EnglishWord => 0.65,
                     EdgeKind::ChineseChar | EdgeKind::ChineseWord => {
-                        if edge_is_whole || is_common_sentence_particle(&edge.text) {
+                        let allow_particle_discount = is_common_sentence_particle(&edge.text)
+                            && !(edge.start == 0
+                                && edge.end < n
+                                && (is_clause_final_modal_particle(&edge.text)
+                                    || (context_tail.is_empty() && is_post_head_particle(&edge.text))));
+                        if edge_is_whole || allow_particle_discount {
                             1.75
                         } else {
                             3.25
@@ -1477,24 +1482,42 @@ impl BilingualDecoder {
         let is_fuzzy_cand = |c: &Candidate| c.tag.starts_with("[纠错");
 
         // 正确输入优先保护（Exact-Input Protection）：
-        // 若首选是纠错项，但存在用户原样拼音对应的整词或通顺精确整句（且词频/代价差距不悬殊），则把原样精确结果放回首位。
-        // 例：`sixiang` 必须是「思想」而不是纠错后的「实现」；`chenxianzaiai` 必须是「趁现在 AI」而不是纠错后的「呈现再爱」。
+        // 若首选是纠错项，但存在用户原样拼音对应的整词、由真实多字词构成的精确整句或近分精确整句，则把原样精确结果放回首位。
+        // 例：`sixiang` 必须是「思想」而不是纠错后的「实现」；`shengqisile` 必须是「生气死了」而不是纠错后的「圣骑士了」；
+        // `chenxianzaiai` 必须是「趁现在 AI」而不是纠错后的「呈现再爱」。
         if candidates.first().is_some_and(|c| is_fuzzy_cand(c)) {
             let top_cost = candidates[0].l1_cost;
             let top_segs = candidates[0].segments.len();
+            let top_has_single_char_seg = candidates[0]
+                .segments
+                .iter()
+                .any(|s| s.chars().count() == 1 && !s.is_ascii());
             let clean_full = crate::pinyin::can_segment_as_clean_full_syllables(
                 &lattice.input.to_ascii_lowercase(),
             );
             if let Some(pos) = candidates.iter().position(|c| {
-                c.consumed_len == n
-                    && !is_fuzzy_cand(c)
-                    && ((c.segments.len() == 1 && c.l1_cost <= top_cost + 3.0)
-                        || (clean_full
-                            && c.segments.len() <= top_segs + 1
-                            && c.l1_cost <= top_cost + 0.8))
+                if c.consumed_len != n || is_fuzzy_cand(c) {
+                    return false;
+                }
+                if c.segments.len() == 1 && c.l1_cost <= top_cost + 3.0 {
+                    return true;
+                }
+                if !clean_full {
+                    return false;
+                }
+                let all_multi_char_words = c.segments.len() >= 2
+                    && c.segments.len() <= top_segs
+                    && c.segments.iter().all(|s| s.chars().count() >= 2 && !s.is_ascii());
+                if top_has_single_char_seg && all_multi_char_words && c.l1_cost <= top_cost + 2.4 {
+                    return true;
+                }
+                c.segments.len() <= top_segs + 1 && c.l1_cost <= top_cost + 0.8
             }) {
                 let top_score = candidates[0].final_score;
                 let mut item = candidates.remove(pos);
+                if item.tag == "[整句备选]" {
+                    item.tag = "[整句]".to_string();
+                }
                 item.final_score = top_score + 0.05;
                 candidates.insert(0, item);
             }
@@ -1724,6 +1747,18 @@ fn is_common_sentence_particle(ch: &str) -> bool {
             | "谁" | "个" | "去" | "来" | "看" | "说" | "做" | "用" | "能" | "会" | "要"
             | "想" | "多" | "少" | "大" | "小" | "好" | "新" | "老" | "高" | "低"
     )
+}
+
+/// 仅在句末或分句尾合法的语气助词，绝不作为独立单字领起多音节句子（如 `*吗+烦死了`、`*吧+...`、`*呢+...`）
+#[inline]
+fn is_clause_final_modal_particle(ch: &str) -> bool {
+    matches!(ch, "吗" | "呢" | "吧" | "啦" | "嘛" | "呗")
+}
+
+/// 需依附前词的结构/动态助词，在无上文句首时不作为独立单字享受虚词步长折扣（如 `*了+...`、`*的+...`）
+#[inline]
+fn is_post_head_particle(ch: &str) -> bool {
+    matches!(ch, "的" | "了" | "着" | "过" | "地" | "得")
 }
 
 /// 判断前词是否为现代汉语「指代/数词/动词 + 量词」短语（如「这个」「那个」「一个」「每个」「哪个」「几个」「这些」「这种」「换个」「加个」）
@@ -2507,6 +2542,12 @@ fn grammar_transition_bonus(
             } else if !prev_word.is_empty() {
                 bonus += 0.95;
             }
+        } else if edge.start == 0
+            && edge.end < n
+            && prev_word.is_empty()
+            && is_clause_final_modal_particle(w)
+        {
+            bonus -= 1.65;
         } else if edge.end < n {
             bonus -= 0.55;
         }
@@ -2675,6 +2716,32 @@ fn grammar_transition_bonus(
             bonus += 2.25;
         } else if matches!(w, "了" | "着" | "过" | "地" | "得") {
             bonus += 1.35;
+        }
+    }
+
+    // 3a. 现代汉语高产口语程度补语构式「[双/多字精确词] + 死了」（如「麻烦死了」「生气死了」「心疼死了」「委屈死了」「搞笑死了」「磨叽死了」「吓人死了」）：
+    //     词库仅预组极少数（如「烦死了」「气死了」「无聊死了」「郁闷死了」），其余同构短语需以「双字词 + 死了」拼接，
+    //     相比「单字 + 三字预组词」或「模糊三字词 + 了（享 +1.90 助词加成）」天然少享助词加成且词库中「死了」代价偏高（12.55）；
+    //     在整串无高频精确整词且前后段均非模糊音时补齐其标尺（对「合同/纸张/发票…」等可撕实物名词则对应补偿「撕了」）。
+    if !has_common_exact_whole_word && !edge.is_fuzzy && matches!(w, "死了" | "撕了") {
+        if let Some(prev_e) = state.edges.iter().rev().find(|e| !e.text.is_empty()) {
+            if prev_e.kind == EdgeKind::ChineseWord
+                && !prev_e.is_fuzzy
+                && prev_e.text.chars().count() >= 2
+                && !prev_e.text.is_ascii()
+                && !is_chinese_numeral_word(&prev_e.text)
+                && !is_strict_unit_word(&prev_e.text)
+            {
+                let is_tearable_object = matches!(
+                    prev_e.text.as_str(),
+                    "合同" | "纸张" | "信纸" | "发票" | "报纸" | "作业" | "照片" | "标签"
+                        | "贴膜" | "包装" | "封条" | "胶带" | "试卷" | "票据" | "门票" | "车票"
+                        | "袋子"
+                );
+                if (w == "死了" && !is_tearable_object) || (w == "撕了" && is_tearable_object) {
+                    bonus += if is_end { 3.05 } else { 2.25 };
+                }
+            }
         }
     }
 

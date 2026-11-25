@@ -487,11 +487,15 @@ impl DualModeAiOrchestrator {
                     // 为另一个池算出的结果不算命中，在途的旧池任务也要让位。
                     // 指纹放在制表符之前，`invalidate_cache_for_pinyin` 按「\t拼音」后缀清理时照样匹配
                     let pool_hash = inprocess::pool_fingerprint(&pool_texts);
+                    let top_is_fuzzy = pool.first().is_some_and(|c| {
+                        c.tag.starts_with("[纠错") || c.tag.starts_with("[错音·近义")
+                    });
                     request = Some(InProcessRequest {
                         cache_key: format!("{cache_prefix}:{pool_hash:016x}:{surrounding_context}\t{pinyin_input}"),
                         pinyin_input: pinyin_input.to_string(),
                         surrounding_context: surrounding_context.to_string(),
                         priors: pool.iter().map(|c| user_memory(&c.text).prior()).collect(),
+                        top_is_fuzzy,
                         pool: pool_texts,
                     });
                 }

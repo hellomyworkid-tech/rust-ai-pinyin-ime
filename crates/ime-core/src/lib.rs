@@ -1687,6 +1687,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_colloquial_sile_degree_complement_and_sentence_initial_particles() {
+        let engine = build_test_engine();
+
+        // 1) 口语程度补语「[双字词] + 死了」不被模糊音（麻烦事了/圣骑士了/为去世了/高消失了/下认识了）或句首语气词（吗烦死了）反超
+        for (py, expected) in [
+            ("mafansile", "麻烦死了"),
+            ("shengqisile", "生气死了"),
+            ("xintengsile", "心疼死了"),
+            ("weiqusile", "委屈死了"),
+            ("gaoxiaosile", "搞笑死了"),
+            ("mojisile", "磨叽死了"),
+            ("xiarensile", "吓人死了"),
+            ("gangasile", "尴尬死了"),
+            ("kaixinsile", "开心死了"),
+            ("nanshousile", "难受死了"),
+            ("houhuisile", "后悔死了"),
+            ("taoyansile", "讨厌死了"),
+            ("zhaojisile", "着急死了"),
+            ("haipasile", "害怕死了"),
+            ("shufusile", "舒服死了"),
+            ("gaoxingsile", "高兴死了"),
+            ("xinkusile", "辛苦死了"),
+            // 反向对照：精确输入的 *shile / 公司了 / 意思了 / 可撕实物 + 撕了 / 1+3 正常主谓句不受误伤
+            ("mafanshi", "麻烦事"),
+            ("mafanshile", "麻烦事了"),
+            ("shengqishi", "圣骑士"),
+            ("hetongshile", "和同事了"),
+            ("hetongsile", "合同撕了"),
+            ("jingongsile", "进公司了"),
+            ("kaigongsile", "开公司了"),
+            ("dagongsile", "大公司了"),
+            ("youyisile", "有意思了"),
+            ("meiyisile", "没意思了"),
+            ("woleisile", "我累死了"),
+            ("taqisile", "他气死了"),
+            ("haobawolai", "好吧我来"),
+            ("baixindeqian", "百姓的钱"),
+        ] {
+            let out = engine.decode(py, AppScene::Chat, "");
+            assert_eq!(out.candidates[0].text, expected, "{py}");
+        }
+
+        // mafansile 候选前排不应被「吗烦死了」或模糊「麻烦事了」抢占
+        let mf = engine.decode("mafansile", AppScene::Chat, "");
+        assert_eq!(mf.candidates[0].text, "麻烦死了");
+        assert!(
+            !mf.candidates.iter().take(4).any(|c| c.text == "吗烦死了"),
+            "句首语气词「吗」不应组成「吗烦死了」进入前排: {:?}",
+            mf.candidates.iter().take(6).map(|c| &c.text).collect::<Vec<_>>()
+        );
+    }
+
     /// 打印常用输入的前 6 个候选（回归抽查用）：`cargo test -p ime-core dump_top_candidates -- --ignored --nocapture`
     #[test]
     #[ignore]

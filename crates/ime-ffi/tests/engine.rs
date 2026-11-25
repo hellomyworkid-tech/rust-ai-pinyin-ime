@@ -2257,3 +2257,65 @@ fn logistics_compounds_time_delivery_suffixes_and_diverse_pool_work() {
         }
     }
 }
+
+#[test]
+fn colloquial_sile_phrases_rank_first_with_and_without_local_llm() {
+    let engine = engine();
+    for (py, want) in [
+        ("mafansile", "麻烦死了"),
+        ("shengqisile", "生气死了"),
+        ("xintengsile", "心疼死了"),
+        ("weiqusile", "委屈死了"),
+        ("gaoxiaosile", "搞笑死了"),
+        ("mojisile", "磨叽死了"),
+        ("xiarensile", "吓人死了"),
+        ("gangasile", "尴尬死了"),
+        ("hetongsile", "合同撕了"),
+        ("jingongsile", "进公司了"),
+        ("youyisile", "有意思了"),
+        ("mafanshile", "麻烦事了"),
+    ] {
+        let out = type_letters(&engine, py);
+        assert_eq!(top_text(&out), want, "{py}");
+        engine.reset();
+    }
+
+    // 启用真实端侧大模型（Qwen2.5-0.5B）后，无上文与常见聊天上文下均稳定输出「麻烦死了」「生气死了」等
+    if let Some(model) = std::env::var_os("IME_LLM_TEST_MODEL") {
+        if ImeEngine::llm_supported() {
+            let _turn = real_model_test_turn();
+            let (tx, rx) = mpsc::channel();
+            let tx = Mutex::new(tx);
+            engine.set_notify(Some(Arc::new(move || {
+                let _ = tx.lock().unwrap().send(());
+            })));
+            engine.load_llm(std::path::Path::new(&model), 0).expect("load model");
+            for (ctx, py, want) in [
+                (None, "mafansile", "麻烦死了"),
+                (Some("这件事"), "mafansile", "麻烦死了"),
+                (Some("真是"), "mafansile", "麻烦死了"),
+                (None, "shengqisile", "生气死了"),
+                (None, "weiqusile", "委屈死了"),
+                (None, "gaoxiaosile", "搞笑死了"),
+                (None, "xiarensile", "吓人死了"),
+                (None, "hetongsile", "合同撕了"),
+                (Some("遇到一件"), "mafanshile", "麻烦事了"),
+            ] {
+                engine.set_context(ctx);
+                let initial = type_letters(&engine, py);
+                assert_eq!(top_text(&initial), want, "ctx={ctx:?} py={py} initial");
+                if engine.ai_result_pending() {
+                    let _ = rx.recv_timeout(Duration::from_secs(10));
+                }
+                let refreshed = json(&engine.refresh_after_ai());
+                assert_eq!(
+                    refreshed["visible_candidates"][0]["text"],
+                    want,
+                    "ctx={ctx:?} py={py} after AI"
+                );
+                engine.reset();
+            }
+            engine.unload_llm();
+        }
+    }
+}

@@ -493,6 +493,8 @@ pub(crate) struct InProcessJob {
     /// 与 `pool` 等长：各候选的先验（[`UserMemory::prior`]，即个人记忆强度，主动改选过的词乘
     /// [`EXPLICIT_CHOICE_PRIOR_FACTOR`]），没有记忆为 0
     pub(crate) priors: Vec<f32>,
+    /// 当前首选（`pool[0]`）是否为模糊音/错音纠错候选；若是，则无上文时也允许模型直接选用更通顺的精确候选（门槛降为 0）
+    pub(crate) top_is_fuzzy: bool,
     /// 投递时的缓存清理代次（`InProcessState::invalidation_epoch`）。打分结束时代次变了，
     /// 说明这期间用户上屏清过缓存，结果作废
     pub(crate) invalidation_epoch: u64,
@@ -513,6 +515,7 @@ pub(crate) struct InProcessRequest {
     pub(crate) surrounding_context: String,
     pub(crate) pool: Vec<String>,
     pub(crate) priors: Vec<f32>,
+    pub(crate) top_is_fuzzy: bool,
 }
 
 /// 正在等待宿主答复的请求
@@ -705,6 +708,7 @@ impl InProcessShared {
                         surrounding_context: r.surrounding_context,
                         pool: r.pool,
                         priors: r.priors,
+                        top_is_fuzzy: r.top_is_fuzzy,
                         invalidation_epoch: epoch,
                     }));
                 }
@@ -726,6 +730,7 @@ impl InProcessShared {
                         surrounding_context: r.surrounding_context,
                         pool: r.pool,
                         priors: r.priors,
+                        top_is_fuzzy: r.top_is_fuzzy,
                         invalidation_epoch: state.invalidation_epoch,
                     }
                 });
@@ -793,7 +798,9 @@ impl InProcessShared {
         match result {
             Ok(scores) if !voided && scores.len() == job.pool.len() && scores_are_usable(&scores) => {
                 let has_context = !job.surrounding_context.trim().is_empty();
-                let pick = choose_with_user_priors(&scores, &job.priors, has_context);
+                // 当前首选若是模糊音/错音纠错候选（`top_is_fuzzy`），候选池其余项均为精确匹配用户原样输入的候选，
+                // 即使没有上文，也不应要求精确候选高出纠错首选 2.3 nat（10 倍似然）才能翻盘。
+                let pick = choose_with_user_priors(&scores, &job.priors, has_context || job.top_is_fuzzy);
                 // 即使这次任务已经被更新的击键取代（取消来得太晚），结果对它自己的缓存键仍然正确：
                 // 照常入缓存，只是不触发刷新
                 notify = self.store(&mut state, &job.cache_key, job.pool[pick].clone(), scorer.short_tag());
@@ -1225,6 +1232,7 @@ mod tests {
             surrounding_context: "上文".to_string(),
             pool: vec!["实验".to_string(), "誓言".to_string()],
             priors: vec![0.0, 0.0],
+            top_is_fuzzy: false,
         };
         // 测试自己扮演后台线程：投递的任务先攒着，什么时候执行由测试决定；超时也由测试直接改时限来模拟
         let mut queued: Vec<InProcessDispatch> = Vec::new();
@@ -1292,6 +1300,7 @@ mod tests {
                 surrounding_context: "上文".to_string(),
                 pool: vec!["实验".to_string(), "誓言".to_string()],
                 priors: vec![0.0, 0.0],
+                top_is_fuzzy: false,
             });
             let queued = &mut self.queued;
             self.shared.lookup_or_request(request, &mut |d| queued.push(d));
@@ -1401,5 +1410,47 @@ mod tests {
         assert_eq!(match_choice_in_pool("AI选词", &pool), Some("AI 选词"));
         assert_eq!(match_choice_in_pool("爱炫词", &pool), None);
         assert_eq!(match_choice_in_pool("   ", &pool), None);
+    }
+
+    #[test]
+    fn fuzzy_top_candidate_does_not_require_no_context_margin_against_exact_candidate() {
+        struct FixedScorer(Vec<f64>);
+        impl CandidateScorer for FixedScorer {
+            fn model_id(&self) -> String {
+                "fixed".to_string()
+            }
+            fn score(&self, _context: &str, _candidates: &[String]) -> Result<Vec<f64>, ScoreError> {
+                Ok(self.0.clone())
+            }
+            fn cancel(&self) {}
+        }
+
+        // 无上文时，精确候选只比模糊纠错首选高 1.5 nat（< 2.3 nat）：
+        // 若 top_is_fuzzy=true，模型仍应直接采用更通顺的精确候选；
+        // 若 top_is_fuzzy=false，仍保持 2.3 nat 防抖门槛不动原首选。
+        for (top_is_fuzzy, expect) in [(true, "麻烦死了"), (false, "麻烦事了")] {
+            let shared = InProcessShared::new(LlmCache::default(), NotifySlot::default());
+            shared.set_scorer(Some(Arc::new(FixedScorer(vec![-24.5, -23.0]))));
+            let key = format!("scorer:fixed:0:\tmafansile_{top_is_fuzzy}");
+            let mut dispatched = Vec::new();
+            shared.lookup_or_request(
+                Some(InProcessRequest {
+                    cache_key: key.clone(),
+                    pinyin_input: "mafansile".to_string(),
+                    surrounding_context: String::new(),
+                    pool: vec!["麻烦事了".to_string(), "麻烦死了".to_string()],
+                    priors: vec![0.0, 0.0],
+                    top_is_fuzzy,
+                }),
+                &mut |d| dispatched.push(d),
+            );
+            assert_eq!(dispatched.len(), 1);
+            match dispatched.pop().unwrap() {
+                InProcessDispatch::Score(job) => shared.run_score_job(job),
+                InProcessDispatch::Choose(_) => panic!("expected score job"),
+            }
+            let picked = shared.cache_get(&key).map(|(w, _)| w);
+            assert_eq!(picked.as_deref(), Some(expect), "top_is_fuzzy={top_is_fuzzy}");
+        }
     }
 }
