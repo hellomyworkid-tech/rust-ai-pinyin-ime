@@ -843,4 +843,76 @@ final class AIWiringTests: XCTestCase {
         XCTAssertEqual(current, latest)
         XCTAssertEqual(previous.count, chunk.count * 2)
     }
+
+    func testKeystrokeLatencyStatsPercentilesBoundedAndReset() {
+        var stats = KeyboardTrace.KeystrokeLatencyStats()
+        XCTAssertNil(stats.summary(), "空会话不应输出耗时摘要")
+
+        stats.recordDecode(ms: .nan)
+        stats.recordDecode(ms: .infinity)
+        XCTAssertNil(stats.summary(), "非法浮点值应被忽略")
+
+        for i in 1...100 {
+            stats.recordDecode(ms: Double(i) / 10.0) // 0.1 ... 10.0 ms
+        }
+        stats.recordAIWait(ms: 20)
+        stats.recordAIWait(ms: 50)
+        stats.recordAIWait(ms: 120)
+        XCTAssertEqual(
+            stats.summary(),
+            "keys=100 decode=p50:5.0/p95:9.5/max:10.0ms aiWait=n:3,p50:50/p95:120/max:120ms"
+        )
+
+        // 超过 512 上限时使用环形覆盖，保持内存有界且总按键数准确
+        for _ in 0..<600 {
+            stats.recordDecode(ms: 1.5)
+        }
+        XCTAssertEqual(stats.totalKeystrokes, 700)
+        XCTAssertTrue(stats.summary()?.hasPrefix("keys=700 decode=p50:1.5/p95:1.5/max:1.5ms") == true)
+
+        stats.reset()
+        XCTAssertNil(stats.summary(), "reset 后应恢复为空")
+    }
+
+    func testInputControllerRecordsDecodeAndAIWaitLatencyAndFlushesOnce() {
+        let engine = RecordingEngine()
+        let controller = InputController(makeEngine: { engine })
+        var tick = 0
+        // 每次调用 now() 的预设时刻（秒）：
+        // typeLetter("n"): start=1.0000, end=1.0012 (1.2ms)
+        // typeLetter("i"): start=2.0000, end=2.0024 (2.4ms, aiPending=true -> aiRequestedAt=2.0024)
+        // fireAsyncUpdate(): now=2.0444 (42ms AI wait)
+        // backspace(): start=3.0000, end=3.0006 (0.6ms)
+        let stamps: [TimeInterval] = [1.0000, 1.0012, 2.0000, 2.0024, 2.0444, 3.0000, 3.0006]
+        controller.now = {
+            defer { tick += 1 }
+            return stamps[min(tick, stamps.count - 1)]
+        }
+
+        XCTAssertNil(controller.takeLatencySummary())
+
+        engine.aiPending = false
+        controller.typeLetter("n")
+        // requestAIRefresh 只是触发重排，不是异步结果到达，不应误记 aiWait
+        controller.requestAIRefresh()
+
+        engine.aiPending = true
+        controller.typeLetter("i")
+        engine.fireAsyncUpdate()
+
+        engine.aiPending = false
+        controller.backspace()
+
+        let summary = controller.takeLatencySummary()
+        XCTAssertEqual(
+            summary,
+            "keys=3 decode=p50:1.2/p95:2.4/max:2.4ms aiWait=n:1,p50:42/p95:42/max:42ms"
+        )
+        // 隐私断言：摘要中绝不能出现任何拼音字母或候选词
+        XCTAssertFalse(summary?.contains("ni") == true)
+        XCTAssertFalse(summary?.contains("c0") == true)
+
+        // 模拟 iOS 连续触发两次 viewWillDisappear：第二次应返回 nil，避免重复记录
+        XCTAssertNil(controller.takeLatencySummary())
+    }
 }

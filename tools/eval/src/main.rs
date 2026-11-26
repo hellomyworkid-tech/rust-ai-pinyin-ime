@@ -9,6 +9,10 @@
 //!     [--pools]                   只打印每个用例规则重排后的候选（文本、编码、标签）以及哪些进了候选池，
 //!                                 不加载模型（模型路径仍要给，但不会被读取）；编写用例文件时用它看解码器实际给出什么
 //!     [--audit <输入.tsv> [--audit-limit N]]   对一批输入统计大模型推翻规则首选的情况
+//!     [--batch-input <输入.tsv> --batch-dump <输出.tsv>]
+//!                                 全量跑一批「拼音 \t 上文」输入（不加载大模型），写出每条的解码首选与规则首选
+//!     [--batch-input <输入.tsv> --batch-diff <基线.tsv>]
+//!                                 对比当前引擎与基线 TSV 的首选变化，用来在修改解码器/规则后检查回归影响面
 //! ```
 //!
 //! 默认流程（每个用例）：解码 → 规则重排（大模型关闭的调度器）→ 开启大模型并安装了进程内打分器的调度器
@@ -59,11 +63,14 @@ struct Args {
     pools: bool,
     audit: Option<PathBuf>,
     audit_limit: usize,
+    batch_input: Option<PathBuf>,
+    batch_dump: Option<PathBuf>,
+    batch_diff: Option<PathBuf>,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "用法: eval <仓库根目录> <模型.gguf> [--cases 用例.tsv] [--threads N] [--quiet] [--typing] [--explore] [--pools] [--audit 输入.tsv [--audit-limit N]]"
+        "用法: eval <仓库根目录> <模型.gguf> [--cases 用例.tsv] [--threads N] [--quiet] [--typing] [--explore] [--pools] [--audit 输入.tsv [--audit-limit N]] [--batch-input 输入.tsv --batch-dump 输出.tsv | --batch-diff 基线.tsv]"
     );
     std::process::exit(2);
 }
@@ -82,6 +89,9 @@ fn parse_args() -> Args {
         pools: false,
         audit: None,
         audit_limit: 300,
+        batch_input: None,
+        batch_dump: None,
+        batch_diff: None,
     };
     let mut it = argv.into_iter();
     while let Some(arg) = it.next() {
@@ -94,6 +104,9 @@ fn parse_args() -> Args {
             "--threads" => args.threads = value("--threads").parse().unwrap_or_else(|_| usage()),
             "--audit" => args.audit = Some(PathBuf::from(value("--audit"))),
             "--audit-limit" => args.audit_limit = value("--audit-limit").parse().unwrap_or_else(|_| usage()),
+            "--batch-input" => args.batch_input = Some(PathBuf::from(value("--batch-input"))),
+            "--batch-dump" => args.batch_dump = Some(PathBuf::from(value("--batch-dump"))),
+            "--batch-diff" => args.batch_diff = Some(PathBuf::from(value("--batch-diff"))),
             "--quiet" => args.quiet = true,
             "--typing" => args.typing = true,
             "--explore" => args.explore = true,
@@ -190,8 +203,6 @@ struct Outcome {
 
 fn main() {
     let args = parse_args();
-    let cases_path = args.cases.clone().unwrap_or_else(|| args.root.join("data/eval/context_cases.tsv"));
-    let cases = load_cases(&cases_path);
 
     let t = Instant::now();
     let lexicon_path = args.root.join("data/compiled/merged_lexicon.bin");
@@ -201,6 +212,18 @@ fn main() {
     });
     let engine = ImeCoreEngine::new(lexicon);
     println!("[load] 词库 {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+
+    if args.batch_dump.is_some() || args.batch_diff.is_some() {
+        let input_path = args
+            .batch_input
+            .clone()
+            .unwrap_or_else(|| args.root.join("data/eval/golden_inputs.tsv"));
+        run_batch(&engine, &input_path, args.batch_dump.as_deref(), args.batch_diff.as_deref());
+        return;
+    }
+
+    let cases_path = args.cases.clone().unwrap_or_else(|| args.root.join("data/eval/context_cases.tsv"));
+    let cases = load_cases(&cases_path);
 
     if args.pools {
         dump_pools(&engine, &cases);
@@ -829,5 +852,99 @@ fn audit(engine: &ImeCoreEngine, scorer: &LlmScorer, path: &Path, limit: usize) 
     for threshold in [0.0, 0.5, 1.0, 1.2, 2.0, 2.3, 3.0, 4.0] {
         let count = flips.iter().filter(|(g, _)| *g >= threshold).count();
         println!("  阈值 {threshold:>3.1} nat 时会推翻首选: {count}/{scored}");
+    }
+}
+
+/// 批量全量运行「拼音 \t 上文」输入文件（如 `data/eval/golden_inputs.tsv`），支持：
+/// - `--batch-dump <输出.tsv>`：写出 `拼音 \t 上文 \t 解码首选 \t 规则首选` 供后续对比；
+/// - `--batch-diff <基线.tsv>`：与既有基线逐条对比首选变化，快速发现改动影响面与回归。
+fn run_batch(engine: &ImeCoreEngine, input_path: &Path, dump_path: Option<&Path>, diff_path: Option<&Path>) {
+    use std::io::Write;
+    let raw = std::fs::read_to_string(input_path).unwrap_or_else(|e| {
+        eprintln!("读取 {} 失败: {e}", input_path.display());
+        std::process::exit(1);
+    });
+    let mut rules = DualModeAiOrchestrator::new(OpenAiCompatibleConfig::default());
+    let mut dump_file = dump_path.map(|p| {
+        std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("创建 {} 失败: {e}", p.display());
+            std::process::exit(1);
+        })
+    });
+
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
+    let mut decode_ms: Vec<f64> = Vec::new();
+    let mut rule_ms: Vec<f64> = Vec::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut cols = line.split('\t');
+        let py = cols.next().unwrap_or("").trim();
+        let ctx = cols.next().unwrap_or("").trim();
+        if py.is_empty() {
+            continue;
+        }
+        let t = Instant::now();
+        let l1 = engine.decode(py, AppScene::General, ctx);
+        decode_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        let dtop = top_text(&l1.candidates);
+
+        let t = Instant::now();
+        let l2 = rules.rerank(py, ctx, AppScene::General, l1.candidates);
+        rule_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        let rtop = top_text(&l2.candidates);
+
+        if let Some(f) = dump_file.as_mut() {
+            writeln!(f, "{py}\t{ctx}\t{dtop}\t{rtop}").unwrap();
+        }
+        rows.push((py.to_string(), ctx.to_string(), dtop, rtop));
+    }
+
+    time_summary("批量解码", &decode_ms);
+    time_summary("批量规则重排", &rule_ms);
+    if let Some(p) = dump_path {
+        println!("[batch] 已写出 {} 条到 {}", rows.len(), p.display());
+    }
+
+    if let Some(base_path) = diff_path {
+        let base_raw = std::fs::read_to_string(base_path).unwrap_or_else(|e| {
+            eprintln!("读取基线 {} 失败: {e}", base_path.display());
+            std::process::exit(1);
+        });
+        let base_rows: Vec<(&str, &str, &str, &str)> = base_raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let mut c = l.split('\t');
+                (
+                    c.next().unwrap_or(""),
+                    c.next().unwrap_or(""),
+                    c.next().unwrap_or(""),
+                    c.next().unwrap_or(""),
+                )
+            })
+            .collect();
+        if base_rows.len() != rows.len() {
+            eprintln!("基线行数 ({}) 与当前行数 ({}) 不一致", base_rows.len(), rows.len());
+            std::process::exit(1);
+        }
+        let mut d_changed = 0usize;
+        let mut r_changed = 0usize;
+        for ((py, ctx, d_new, r_new), (_, _, d_old, r_old)) in rows.iter().zip(base_rows.iter()) {
+            if d_new != d_old {
+                d_changed += 1;
+            }
+            if r_new != r_old {
+                r_changed += 1;
+                println!("  {py}\t{ctx}\t{r_old}  →  {r_new}");
+            }
+        }
+        println!(
+            "[batch-diff] 共 {} 条 | 解码首选变化 {} 条 | 规则首选变化 {} 条",
+            rows.len(),
+            d_changed,
+            r_changed
+        );
     }
 }

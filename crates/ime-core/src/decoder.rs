@@ -662,6 +662,41 @@ impl BilingualDecoder {
                 .iter()
                 .find(|c| !c.tag.starts_with("[纠错") && !c.text.is_ascii())
                 .map(|c| (c.l1_cost, c.segments.len(), c.syllable_spans.len()));
+            // 领头多字词保底（P1）：收集句首前 3 个高置信精确多字词（如 `weikuan` 的「位宽 / 尾款」、`shunfeng` 的「顺风 / 顺丰」、
+            // `jiaoqing` 的「交情 / 矫情」），确保排在次位的合理首词至少保留 1 条最优精确整句进 `[整句备选]` 交给端侧大模型裁决，
+            // 防止被首词的若干尾部同音变体占满全部 7 个备选槽或因轻微代价差被提前剪枝。
+            let mut leading_anchors: Vec<(usize, String)> = Vec::new();
+            if pinned_segments.is_empty() && n >= 6 && !best_is_ascii {
+                let mut lead_edges: Vec<&LatticeEdge> = lattice.edges_from[0]
+                    .iter()
+                    .filter(|e| {
+                        !e.is_fuzzy
+                            && e.kind == EdgeKind::ChineseWord
+                            && e.syllable_count >= 2
+                            && e.end < n
+                            && e.code_key.bytes().filter(|&b| b != b'\'').count() <= e.end
+                    })
+                    .collect();
+                lead_edges.sort_by(|a, b| a.base_cost.total_cmp(&b.base_cost));
+                if let Some(best_lead_cost) = lead_edges.first().map(|e| e.base_cost) {
+                    let top_first_text = best_seg_spans.first().map(|s| s.text.as_str()).unwrap_or("");
+                    for e in lead_edges {
+                        if e.base_cost > best_lead_cost + 3.0 {
+                            break;
+                        }
+                        if e.text == top_first_text
+                            || leading_anchors.iter().any(|(_, t)| t == &e.text)
+                        {
+                            continue;
+                        }
+                        leading_anchors.push((e.end, e.text.clone()));
+                        if leading_anchors.len() >= 2 {
+                            break;
+                        }
+                    }
+                }
+            }
+            let mut anchor_backups: Vec<Option<Candidate>> = vec![None; leading_anchors.len()];
             let mut has_diff_syl_backup = false;
             let mut standard_pool: Vec<Candidate> = Vec::new();
             let mut idx = 0usize;
@@ -686,6 +721,24 @@ impl BilingualDecoder {
                     && c.syllable_spans
                         .iter()
                         .all(|sy| crate::pinyin::is_valid_or_alias_syllable(&sy.code_key));
+                // 检查该精确整句是否命中某个次优高频首词的保底锚点
+                if is_pure_full_pinyin_cn
+                    && c.segments.len() <= best_seg_cnt + 1
+                    && c.l1_cost <= best_cost + 6.5
+                {
+                    if let Some(first_sp) = c.segment_spans.first() {
+                        if let Some(ai) = leading_anchors.iter().position(|(end, txt)| {
+                            first_sp.start == 0 && first_sp.end == *end && first_sp.text == *txt
+                        }) {
+                            if anchor_backups[ai].is_none() {
+                                let mut backup = c.clone();
+                                backup.tag = "[整句备选]".to_string();
+                                anchor_backups[ai] = Some(backup);
+                                return false;
+                            }
+                        }
+                    }
+                }
                 let is_diff_syl_split = is_pure_full_pinyin_cn
                     && (c.syllable_spans.len() > best_syl_cnt
                         || c.syllable_spans.len() > ref_syl_cnt);
@@ -736,6 +789,15 @@ impl BilingualDecoder {
                 }
                 false
             });
+            // 先落位领头词保底备选（至多 2 条），再按两轮段级去垄断挑选补满 7 条
+            for anchor in anchor_backups.into_iter().flatten() {
+                if alt_sentences.iter().filter(|c| c.tag == "[整句备选]").count() >= MAX_BACKUP_SENTENCES {
+                    break;
+                }
+                if !alt_sentences.iter().any(|c| c.text == anchor.text) {
+                    alt_sentences.push(anchor);
+                }
+            }
             // 两轮段级去垄断挑选：第一轮对「仅改变同一单段」的同音变体限流（每段最多占 2 席），
             // 让其他段的次选同音词与多段联合替换（`[A2, B2]`）稳进前 7 备选；不足 7 条时第二轮按代价补满。
             let mut single_seg_counts = [0u8; 16];
@@ -2347,10 +2409,9 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
 fn is_payable_noun(w: &str) -> bool {
     if matches!(
         w,
-        "尾款" | "定金" | "订金" | "首付" | "货款" | "贷款" | "借款" | "欠款" | "余款"
-            | "全款" | "退款" | "房款" | "车款" | "工程款" | "预付款" | "赔款" | "罚款"
-            | "房租" | "租金" | "账单" | "押金" | "保证金" | "违约金" | "佣金" | "礼金"
-            | "费用" | "钱" | "零钱" | "红包" | "转账" | "花呗" | "白条" | "信用卡"
+        "定金" | "订金" | "首付" | "房租" | "租金" | "账单" | "押金" | "保证金"
+            | "违约金" | "佣金" | "礼金" | "费用" | "钱" | "零钱" | "红包" | "转账"
+            | "花呗" | "白条" | "信用卡"
     ) {
         return true;
     }
@@ -2599,17 +2660,24 @@ fn grammar_transition_bonus(
             bonus -= 0.55;
         }
     }
-    // 1b. 动体句末构式「[双字 V了] + 语气助词（吧/吗/呢/啊/呀/啦）」（如「付了+吧」「还了+吧」「结了+吧」「退了+吧」「买了+吧」）：
+    // 1b. 动体句末构式「[双字全拼 V了] + 完整语气助词（吧/吗/呢/啊/呀/啦）」（如「付了+吧」「还了+吧」「结了+吧」「退了+吧」「买了+吧」）：
     //     词库仅预组极少数三字词（如仅收「服了吧」未收「付了吧」），致使「付了+吧」相对「服了吧」多计一次词频分母与步长（~5.7 分落差），
-    //     同时也易被非动体双字词「欢乐+吧」或句末同音实字「买了+八/把」抢占；此处按精确 `...le -> ...了` 构式补齐标尺。
+    //     同时也易被非动体双字词「欢乐+吧」或句末同音实字「买了+八/把」抢占；
+    //     要求前后段均为完整全拼（排除 `plea` 中 `pl` 简拼展开成「跑了+啊」及句尾单声母残片）。
     if !has_common_exact_whole_word
         && is_end
         && !edge.is_fuzzy
+        && edge.kind == EdgeKind::ChineseChar
         && matches!(w, "吧" | "吗" | "呢" | "啊" | "呀" | "啦")
+        && edge.code_key.len() == edge.end.saturating_sub(edge.start)
+        && crate::pinyin::is_valid_syllable(&edge.code_key)
     {
         if let Some(prev_e) = state.edges.iter().rev().find(|e| !e.text.is_empty()) {
+            let prev_code_letters = prev_e.code_key.bytes().filter(|&b| b != b'\'').count();
+            let prev_raw_len = prev_e.end.saturating_sub(prev_e.start);
             if prev_e.kind == EdgeKind::ChineseWord
                 && !prev_e.is_fuzzy
+                && prev_code_letters <= prev_raw_len
                 && prev_e.text.chars().count() == 2
                 && prev_e.text.ends_with('了')
                 && prev_e.code_key.ends_with("'le")
@@ -2805,22 +2873,29 @@ fn grammar_transition_bonus(
     //     相比「单字 + 三字预组词」或「模糊三字词 + 了（享 +1.90 助词加成）」天然少享助词加成且词库中「死了」代价偏高（12.55）；
     //     在整串无高频精确整词且前后段均非模糊音时补齐其标尺（对「合同/纸张/发票…」等可撕实物名词则对应补偿「撕了」）。
     if !has_common_exact_whole_word && !edge.is_fuzzy && matches!(w, "死了" | "撕了") {
-        if let Some(prev_e) = state.edges.iter().rev().find(|e| !e.text.is_empty()) {
-            if prev_e.kind == EdgeKind::ChineseWord
-                && !prev_e.is_fuzzy
-                && prev_e.text.chars().count() >= 2
-                && !prev_e.text.is_ascii()
-                && !is_chinese_numeral_word(&prev_e.text)
-                && !is_strict_unit_word(&prev_e.text)
-            {
-                let is_tearable_object = matches!(
-                    prev_e.text.as_str(),
-                    "合同" | "纸张" | "信纸" | "发票" | "报纸" | "作业" | "照片" | "标签"
-                        | "贴膜" | "包装" | "封条" | "胶带" | "试卷" | "票据" | "门票" | "车票"
-                        | "袋子"
-                );
-                if (w == "死了" && !is_tearable_object) || (w == "撕了" && is_tearable_object) {
-                    bonus += if is_end { 3.05 } else { 2.25 };
+        let curr_code_letters = edge.code_key.bytes().filter(|&b| b != b'\'').count();
+        let curr_raw_len = edge.end.saturating_sub(edge.start);
+        if curr_code_letters <= curr_raw_len {
+            if let Some(prev_e) = state.edges.iter().rev().find(|e| !e.text.is_empty()) {
+                let prev_code_letters = prev_e.code_key.bytes().filter(|&b| b != b'\'').count();
+                let prev_raw_len = prev_e.end.saturating_sub(prev_e.start);
+                if prev_e.kind == EdgeKind::ChineseWord
+                    && !prev_e.is_fuzzy
+                    && prev_code_letters <= prev_raw_len
+                    && prev_e.text.chars().count() >= 2
+                    && !prev_e.text.is_ascii()
+                    && !is_chinese_numeral_word(&prev_e.text)
+                    && !is_strict_unit_word(&prev_e.text)
+                {
+                    let is_tearable_object = matches!(
+                        prev_e.text.as_str(),
+                        "合同" | "纸张" | "信纸" | "发票" | "报纸" | "作业" | "照片" | "标签"
+                            | "贴膜" | "包装" | "封条" | "胶带" | "试卷" | "票据" | "门票" | "车票"
+                            | "袋子"
+                    );
+                    if (w == "死了" && !is_tearable_object) || (w == "撕了" && is_tearable_object) {
+                        bonus += if is_end { 3.05 } else { 2.25 };
+                    }
                 }
             }
         }

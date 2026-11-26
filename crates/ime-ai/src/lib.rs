@@ -744,6 +744,42 @@ mod tests {
     }
 
     #[test]
+    fn test_grammar_modal_bonus_never_promotes_abbrev_or_partial_prefix() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let lexicon = CompiledLexicon::load_or_build_default(root).unwrap();
+        let core = ImeCoreEngine::new(lexicon);
+        let mut ai = DualModeAiOrchestrator::default();
+
+        // R1 & R2 回归守护：
+        // 1) 简拼 `tzlb` 必须保持「帖子列表」，绝不能因句末「了吧」把「太重了吧」提权置顶
+        let l1_tzlb = core.decode("tzlb", AppScene::General, "");
+        let l2_tzlb = ai.rerank("tzlb", "", AppScene::General, l1_tzlb.candidates);
+        assert_eq!(l2_tzlb.candidates[0].text, "帖子列表");
+
+        // 2) 完整英文 `plea` 必须保持 `plea`，绝不能因 `pl` 简拼展开为「跑了」+ `a` 而翻盘
+        let l1_plea = core.decode("plea", AppScene::General, "");
+        let l2_plea = ai.rerank("plea", "", AppScene::General, l1_plea.candidates);
+        assert_eq!(l2_plea.candidates[0].text, "plea");
+
+        // 3) 长句前缀含「了吧」时，绝不能反超覆盖整段输入的全长候选
+        for py in ["yazhouilebao", "luosigailetaileilebarenheshijie"] {
+            let l1 = core.decode(py, AppScene::General, "");
+            let l2 = ai.rerank(py, "", AppScene::General, l1.candidates);
+            assert_eq!(
+                l2.candidates[0].consumed_len,
+                py.len(),
+                "{py} 首选必须覆盖完整输入而非被半截前缀反超: {:?}",
+                l2.candidates[0].text
+            );
+        }
+    }
+
+    #[test]
     fn test_multi_provider_config_switching() {
         let mut cfg = OpenAiCompatibleConfig::default();
         assert_eq!(cfg.provider, AiProvider::LocalQwen);

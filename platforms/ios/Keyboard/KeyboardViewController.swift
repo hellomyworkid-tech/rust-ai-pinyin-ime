@@ -362,7 +362,12 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        KeyboardTrace.event("disappear.will", "shownFor=\(KeyboardTrace.ms(since: appearStartedAt))ms")
+        let shown = "shownFor=\(KeyboardTrace.ms(since: appearStartedAt))ms"
+        if let latency = input.takeLatencySummary() {
+            KeyboardTrace.event("disappear.will", "\(shown) \(latency)")
+        } else {
+            KeyboardTrace.event("disappear.will", shown)
+        }
         isVisible = false
         appearSetupPending = false
         resignedWhileVisible = false

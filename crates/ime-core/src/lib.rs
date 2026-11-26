@@ -1790,6 +1790,26 @@ mod tests {
             "weikuanfuleba 不应出现跨音节错拆「味苦安抚了吧」: {:?}",
             wk.candidates.iter().take(6).map(|c| &c.text).collect::<Vec<_>>()
         );
+
+        // P1 领头词保底验证：即使同音次优首词（如「矫情」对比「交情」、「定金」对比「订金」）落于第 2 位，
+        // 其对应完整整句也必须进入 `[整句备选]` 候选池交给端侧大模型裁决
+        for (py, backup_want) in [
+            ("jiaoqingsile", "矫情死了"),
+            ("dingjinfuleba", "定金付了吧"),
+        ] {
+            let dec = engine.decode(py, AppScene::General, "");
+            assert!(
+                dec.candidates
+                    .iter()
+                    .any(|c| c.consumed_len == py.len() && c.text == backup_want),
+                "{py} 应保留次优高频首词整句「{backup_want}」进池: {:?}",
+                dec.candidates
+                    .iter()
+                    .filter(|c| c.consumed_len == py.len())
+                    .map(|c| &c.text)
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     /// 打印常用输入的前 6 个候选（回归抽查用）：`cargo test -p ime-core dump_top_candidates -- --ignored --nocapture`

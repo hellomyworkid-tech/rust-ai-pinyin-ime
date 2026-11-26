@@ -90,6 +90,68 @@ enum KeyboardTrace {
         Int(((now - start) * 1000).rounded())
     }
 
+    /// 单次键盘呼出会话内的匿名按键解码耗时与异步 AI 等待耗时统计（环形定长样本，绝不记录任何输入文本、拼音或候选词）
+    struct KeystrokeLatencyStats {
+        static let maxSamples = 512
+
+        private(set) var totalKeystrokes = 0
+        private(set) var totalAIWaits = 0
+        private var decodeSamplesMs: [Double] = []
+        private var aiWaitSamplesMs: [Double] = []
+
+        mutating func recordDecode(ms: Double) {
+            guard ms.isFinite else { return }
+            let clamped = max(0, ms)
+            totalKeystrokes += 1
+            if decodeSamplesMs.count < Self.maxSamples {
+                decodeSamplesMs.append(clamped)
+            } else {
+                decodeSamplesMs[(totalKeystrokes - 1) % Self.maxSamples] = clamped
+            }
+        }
+
+        mutating func recordAIWait(ms: Double) {
+            guard ms.isFinite else { return }
+            let clamped = max(0, ms)
+            totalAIWaits += 1
+            if aiWaitSamplesMs.count < Self.maxSamples {
+                aiWaitSamplesMs.append(clamped)
+            } else {
+                aiWaitSamplesMs[(totalAIWaits - 1) % Self.maxSamples] = clamped
+            }
+        }
+
+        /// 生成聚合耗时摘要（如 `keys=12 decode=p50:0.9/p95:2.1/max:3.4ms aiWait=n:5,p50:38/p95:82/max:105ms`）；
+        /// 本次会话无中文解码按键且无 AI 等待时返回 nil
+        func summary() -> String? {
+            guard totalKeystrokes > 0 || totalAIWaits > 0 else { return nil }
+            var parts: [String] = []
+            if let d = Self.percentiles(decodeSamplesMs) {
+                parts.append(String(format: "keys=%d decode=p50:%.1f/p95:%.1f/max:%.1fms", totalKeystrokes, d.p50, d.p95, d.max))
+            }
+            if let a = Self.percentiles(aiWaitSamplesMs) {
+                parts.append(String(format: "aiWait=n:%d,p50:%.0f/p95:%.0f/max:%.0fms", totalAIWaits, a.p50, a.p95, a.max))
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: " ")
+        }
+
+        mutating func reset() {
+            totalKeystrokes = 0
+            totalAIWaits = 0
+            decodeSamplesMs.removeAll(keepingCapacity: true)
+            aiWaitSamplesMs.removeAll(keepingCapacity: true)
+        }
+
+        private static func percentiles(_ samples: [Double]) -> (p50: Double, p95: Double, max: Double)? {
+            guard !samples.isEmpty else { return nil }
+            let sorted = samples.sorted()
+            let last = sorted.count - 1
+            let p50Idx = max(0, min(last, Int(ceil(Double(sorted.count) * 0.50)) - 1))
+            let p95Idx = max(0, min(last, Int(ceil(Double(sorted.count) * 0.95)) - 1))
+            return (sorted[p50Idx], sorted[p95Idx], sorted[last])
+        }
+    }
+
     static var memorySummary: String {
         let megabyte = 1024.0 * 1024.0
         let footprint = Double(RustEngine.memoryFootprint) / megabyte

@@ -192,9 +192,12 @@ protocol IMEEngine: AnyObject {
     func loadLocalModel(at url: URL) throws
     func unloadLocalModel()
     var isLocalModelLoaded: Bool { get }
+    /// 引擎当前是否正在等待异步 AI 重排结果（仅用于匿名聚合耗时统计）
+    var aiPending: Bool { get }
 }
 
 extension IMEEngine {
+    var aiPending: Bool { false }
     func compositionSnapshot() -> String? { nil }
     func restoreComposition(_ snapshot: String) -> IMEResult { .passThrough }
     /// 将引擎移交后台线程异步销毁前，在主线程提前摘除回调与引用

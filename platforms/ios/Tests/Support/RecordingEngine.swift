@@ -48,6 +48,7 @@ final class RecordingEngine: IMEEngine {
     var onAsyncUpdate: (() -> Void)?
     var onChoiceRequest: ((IMEChoiceRequest) -> Void)?
     var onChoiceCancel: ((UInt64) -> Void)?
+    var aiPending = false
 
     var isComposing: Bool { !buffer.isEmpty }
 

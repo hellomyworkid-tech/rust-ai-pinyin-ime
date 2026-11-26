@@ -492,7 +492,10 @@ impl OnDeviceAiEngine {
             }
 
             // 9. 现代汉语虚词与句法相干性评分（「再/在」「吧/把」「的/地/得」句内及跨上文语法校验）
-            ai_bonus += score_chinese_grammar_coherence(context, cand);
+            //    仅作用于覆盖完整输入串的全长候选，绝不给半截前缀候选加分（防止长句前缀反超整句）
+            if cand.consumed_len == max_len {
+                ai_bonus += score_chinese_grammar_coherence(context, cand);
+            }
 
             if ai_bonus.abs() > 0.5 {
                 if (cand.tag == "[整句备选]"
@@ -606,18 +609,25 @@ fn score_chinese_grammar_coherence(context: &str, cand: &Candidate) -> f32 {
     }
 
     // 2. 句尾语气助词「吧/吗/呢/啊/呀/啦」与「…了吧/了吗/了呢/了啊/了呀/了啦」 vs 句尾未完介词「把/别把/先把/再把」
-    //    注意对「倒了 + 吧」与「到 + 了吧」「服了吧」一视同仁，防止仅因切分块边界不同把「退款到了吧」错改成「退款倒了吧」。
+    //    注意对「倒了 + 吧」与「到 + 了吧」「服了吧」一视同仁，防止仅因切分块边界不同把「退款到了吧」错改成「退款倒了吧」；
+    //    同时排除 `[简拼]` 展开词与半拼展开（如 `tzlb -> 太重了吧` 不应靠句末「了吧」反超「帖子列表」）。
     if let Some(last_seg) = segs.last() {
         let last_s = last_seg.as_str();
-        let ends_with_modal = (segs.len() >= 2
-            && matches!(last_s, "吧" | "吗" | "呢" | "啊" | "呀" | "啦" | "呗" | "嘛"))
-            || (text.chars().count() >= 3
-                && (last_s.ends_with("了吧")
-                    || last_s.ends_with("了吗")
-                    || last_s.ends_with("了呢")
-                    || last_s.ends_with("了啊")
-                    || last_s.ends_with("了呀")
-                    || last_s.ends_with("了啦")));
+        let is_abbrev = cand.tag.starts_with("[简拼")
+            || cand.segment_spans.iter().any(|sp| {
+                let code_letters = sp.code_key.bytes().filter(|&b| b != b'\'').count();
+                code_letters > sp.end.saturating_sub(sp.start)
+            });
+        let ends_with_modal = !is_abbrev
+            && ((segs.len() >= 2
+                && matches!(last_s, "吧" | "吗" | "呢" | "啊" | "呀" | "啦" | "呗" | "嘛"))
+                || (text.chars().count() >= 3
+                    && (last_s.ends_with("了吧")
+                        || last_s.ends_with("了吗")
+                        || last_s.ends_with("了呢")
+                        || last_s.ends_with("了啊")
+                        || last_s.ends_with("了呀")
+                        || last_s.ends_with("了啦"))));
         if ends_with_modal {
             bonus += 2.2;
         } else if segs.len() >= 2

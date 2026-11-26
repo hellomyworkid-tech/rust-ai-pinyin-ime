@@ -40,6 +40,11 @@ final class InputController {
     /// 网址、邮箱、数字等输入框强制从英文开始
     private var forcedEnglish = false
     private var pendingAIRefresh = false
+    /// 单调时钟（秒），默认取 `KeyboardTrace.now`；单测可替换以验证耗时统计
+    var now: () -> TimeInterval = { KeyboardTrace.now }
+    private var latencyStats = KeyboardTrace.KeystrokeLatencyStats()
+    /// 最近一次触发异步 AI 重排的按键完成时刻；AI 结果返回或输入结束时清空
+    private var aiRequestedAt: TimeInterval?
 
     /// 手指正按在某个候选上。这时到达的 AI 结果先压着，松手后再刷新，免得候选在手指下面换掉
     var isTouchingCandidate = false {
@@ -173,8 +178,17 @@ final class InputController {
     /// 放弃当前输入（键盘收起、换输入框）
     func resetComposition() {
         pendingAIRefresh = false
+        aiRequestedAt = nil
         if let engine, engine.isComposing { engine.reset() }
         setView(.idle)
+    }
+
+    /// 取出并清空本次键盘显示周期的匿名聚合按键与 AI 耗时摘要（供 `viewWillDisappear` 写入 `KeyboardTrace`）
+    func takeLatencySummary() -> String? {
+        aiRequestedAt = nil
+        let summary = latencyStats.summary()
+        latencyStats.reset()
+        return summary
     }
 
     // MARK: - 按键
@@ -187,7 +201,16 @@ final class InputController {
         }
         let engine = ensureEngine()
         if !engine.isComposing { prepareContext(for: engine) }
-        apply(engine.handle(.character(letter))) { insert(String(letter)) }
+        let start = now()
+        let result = engine.handle(.character(letter))
+        let end = now()
+        if case .passThrough = result {
+            // 未进入中文解码，不计入解码耗时
+        } else {
+            latencyStats.recordDecode(ms: (end - start) * 1000.0)
+            aiRequestedAt = engine.aiPending ? end : nil
+        }
+        apply(result) { insert(String(letter)) }
     }
 
     /// 数字或标点（ASCII）。中文模式输出中文标点
@@ -240,7 +263,9 @@ final class InputController {
 
     func tapSyllable(at index: Int) {
         guard let engine, engine.isComposing else { return }
-        apply(engine.tapSyllable(at: index))
+        let result = engine.tapSyllable(at: index)
+        aiRequestedAt = engine.aiPending ? now() : nil
+        apply(result)
     }
 
     /// 往后再取一批候选（一页的量），接在列表后面。不翻引擎的页。取到能显示的新候选返回 true
@@ -274,7 +299,7 @@ final class InputController {
     /// 宿主那边（如本地模型刚加载好）要求按 AI 重排：用户正在看候选列表时先压着，松手或收起后再刷新，
     /// 不在手指底下换掉候选
     func requestAIRefresh() {
-        asyncUpdateArrived()
+        scheduleAIRefresh()
     }
 
     /// 用户正在看候选列表：手指按着候选、往后加载过候选，或者展开了网格
@@ -283,6 +308,16 @@ final class InputController {
     }
 
     private func asyncUpdateArrived() {
+        if let requestedAt = aiRequestedAt {
+            aiRequestedAt = nil
+            if engine?.isComposing == true {
+                latencyStats.recordAIWait(ms: (now() - requestedAt) * 1000.0)
+            }
+        }
+        scheduleAIRefresh()
+    }
+
+    private func scheduleAIRefresh() {
         guard engine?.isComposing == true else { return }
         if holdsAIRefresh {
             pendingAIRefresh = true
@@ -304,7 +339,21 @@ final class InputController {
             onChange?()
             return
         }
-        apply(engine.handle(key), passThrough: passThrough)
+        let measureDecode = (key == .backspace && engine.isComposing)
+        let start = measureDecode ? now() : 0
+        let result = engine.handle(key)
+        if measureDecode {
+            let end = now()
+            if case .passThrough = result {
+                // 未走引擎解码，不计入解码耗时
+            } else {
+                latencyStats.recordDecode(ms: (end - start) * 1000.0)
+                aiRequestedAt = engine.aiPending ? end : nil
+            }
+        } else if !engine.isComposing {
+            aiRequestedAt = nil
+        }
+        apply(result, passThrough: passThrough)
     }
 
     private func prepareContext(for engine: IMEEngine) {
@@ -331,6 +380,9 @@ final class InputController {
     private func setView(_ newView: IMEView) {
         view = newView
         pager.apply(newView)
+        if engine?.isComposing != true {
+            aiRequestedAt = nil
+        }
         if pendingAIRefresh {
             if engine?.isComposing != true {
                 // 输入已经结束，压着的结果没用了
