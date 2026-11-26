@@ -1740,6 +1740,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_payable_noun_collocations_and_aspect_modal_phrases() {
+        let engine = build_test_engine();
+
+        for (py, expected) in [
+            ("weikuanfuleba", "尾款付了吧"),
+            ("weikuanfule", "尾款付了"),
+            ("weikuanjiaoleba", "尾款交了吧"),
+            ("weikuanjieleba", "尾款结了吧"),
+            ("weikuantuileba", "尾款退了吧"),
+            ("weikuan", "尾款"),
+            ("weikuanshenmeshihoufu", "尾款什么时候付"),
+            ("shoufufuleba", "首付付了吧"),
+            ("huokuanfuleba", "货款付了吧"),
+            ("fangzufuleba", "房租付了吧"),
+            ("zhangdanfuleba", "账单付了吧"),
+            ("xuefeijiaoleba", "学费交了吧"),
+            ("yajintuileba", "押金退了吧"),
+            ("tuikuandaoleba", "退款到了吧"),
+            ("daikuanhuanleba", "贷款还了吧"),
+            ("jiekuanhuanleba", "借款还了吧"),
+            ("yukuanjieleba", "余款结了吧"),
+            ("qiankuanhuanleba", "欠款还了吧"),
+            ("qiankuan", "欠款"),
+            ("quankuanmaileba", "全款买了吧"),
+            ("shuidianfeijiaoleba", "水电费交了吧"),
+            ("wuyefeijiaoleba", "物业费交了吧"),
+            ("kuaidifeifuleba", "快递费付了吧"),
+            // 反向对照：独立输入 fuleba 仍保持词库整词「服了吧」；合法跨音节词不受影响
+            ("fuleba", "服了吧"),
+            ("fangan", "方案"),
+            ("dangan", "档案"),
+            ("pingan", "平安"),
+            ("weiku", "味苦"),
+        ] {
+            let out = engine.decode(py, AppScene::Chat, "");
+            assert_eq!(out.candidates[0].text, expected, "{py}");
+        }
+
+        // 上文已有「尾款」时，紧接着单独输入 `fuleba` 亦应直接联想「付了吧」
+        let ctx_fuleba = engine.decode("fuleba", AppScene::Chat, "尾款");
+        assert_eq!(ctx_fuleba.candidates[0].text, "付了吧");
+
+        // weikuanfuleba 绝不应把 kuan 拆成 ku+an 拼出「味苦安抚了吧」
+        let wk = engine.decode("weikuanfuleba", AppScene::Chat, "");
+        assert!(
+            !wk.candidates.iter().take(5).any(|c| c.text.contains("味苦")),
+            "weikuanfuleba 不应出现跨音节错拆「味苦安抚了吧」: {:?}",
+            wk.candidates.iter().take(6).map(|c| &c.text).collect::<Vec<_>>()
+        );
+    }
+
     /// 打印常用输入的前 6 个候选（回归抽查用）：`cargo test -p ime-core dump_top_candidates -- --ignored --nocapture`
     #[test]
     #[ignore]

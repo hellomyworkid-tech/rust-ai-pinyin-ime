@@ -605,20 +605,28 @@ fn score_chinese_grammar_coherence(context: &str, cand: &Candidate) -> f32 {
         bonus += 2.4;
     }
 
-    // 2. 句尾语气助词「吧/吗/呢/啊/呀/啦」 vs 句尾未完介词「把/别把/先把/再把」
+    // 2. 句尾语气助词「吧/吗/呢/啊/呀/啦」与「…了吧/了吗/了呢/了啊/了呀/了啦」 vs 句尾未完介词「把/别把/先把/再把」
+    //    注意对「倒了 + 吧」与「到 + 了吧」「服了吧」一视同仁，防止仅因切分块边界不同把「退款到了吧」错改成「退款倒了吧」。
     if let Some(last_seg) = segs.last() {
-        if segs.len() >= 2 {
-            if matches!(
-                last_seg.as_str(),
-                "吧" | "吗" | "呢" | "啊" | "呀" | "啦" | "呗" | "嘛"
-            ) {
-                bonus += 2.2;
-            } else if matches!(
-                last_seg.as_str(),
+        let last_s = last_seg.as_str();
+        let ends_with_modal = (segs.len() >= 2
+            && matches!(last_s, "吧" | "吗" | "呢" | "啊" | "呀" | "啦" | "呗" | "嘛"))
+            || (text.chars().count() >= 3
+                && (last_s.ends_with("了吧")
+                    || last_s.ends_with("了吗")
+                    || last_s.ends_with("了呢")
+                    || last_s.ends_with("了啊")
+                    || last_s.ends_with("了呀")
+                    || last_s.ends_with("了啦")));
+        if ends_with_modal {
+            bonus += 2.2;
+        } else if segs.len() >= 2
+            && matches!(
+                last_s,
                 "把" | "别把" | "先把" | "再把" | "就把" | "要把" | "快把" | "请把" | "没把" | "都把"
-            ) {
-                bonus -= 3.5;
-            }
+            )
+        {
+            bonus -= 3.5;
         }
     }
 

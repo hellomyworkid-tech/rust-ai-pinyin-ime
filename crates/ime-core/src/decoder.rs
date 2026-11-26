@@ -444,7 +444,13 @@ impl BilingualDecoder {
                 for state in &current_states {
                     let prev_word = state
                         .last_word()
-                        .or_else(|| context_tail.last().map(|s| s.as_str()))
+                        .or_else(|| {
+                            context_tail
+                                .iter()
+                                .find(|ctx_w| word_pair_collocation_bonus(ctx_w, edge) != 0.0)
+                                .or_else(|| context_tail.last())
+                                .map(|s| s.as_str())
+                        })
                         .unwrap_or("");
 
                     // 跨词/跨语种二元语法加成（含光标前上文末尾词对当前句首词的转移加成）
@@ -2320,7 +2326,48 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
         }
     }
 
+    // 8. 钱款/费用类名词 + 支付/结算/退还动词语义选择限制（如「尾款/定金/首付/货款/房租/账单 + 付了/付/结了/交了/还了/退了」，
+    //    避免被更高字频同音词「服了/服了吧/接了/欢乐」覆盖）
+    if !edge.is_fuzzy && is_payable_noun(prev_word) {
+        if matches!(
+            w,
+            "付" | "付了" | "支付" | "交" | "交了" | "还" | "还了" | "结" | "结了"
+                | "退" | "退了" | "转" | "转了" | "缴" | "缴了" | "补" | "补了"
+        ) {
+            bonus += 2.65;
+        } else if matches!(w, "服了" | "服了吧" | "接了" | "欢乐") {
+            bonus -= 1.25;
+        }
+    }
+
     bonus
+}
+
+#[inline]
+fn is_payable_noun(w: &str) -> bool {
+    if matches!(
+        w,
+        "尾款" | "定金" | "订金" | "首付" | "货款" | "贷款" | "借款" | "欠款" | "余款"
+            | "全款" | "退款" | "房款" | "车款" | "工程款" | "预付款" | "赔款" | "罚款"
+            | "房租" | "租金" | "账单" | "押金" | "保证金" | "违约金" | "佣金" | "礼金"
+            | "费用" | "钱" | "零钱" | "红包" | "转账" | "花呗" | "白条" | "信用卡"
+    ) {
+        return true;
+    }
+    let char_cnt = w.chars().count();
+    (2..=4).contains(&char_cnt)
+        && ((w.ends_with('款')
+            && !matches!(
+                w,
+                "这款" | "那款" | "哪款" | "新款" | "老款" | "旧款" | "同款" | "爆款"
+                    | "经典款" | "基础款" | "高配款" | "低配款" | "条款" | "前款" | "落款"
+            ))
+            || (w.ends_with('费')
+                && !matches!(
+                    w,
+                    "浪费" | "消费" | "免费" | "自费" | "公费" | "经费" | "耗费" | "破费"
+                        | "白费" | "枉费" | "徒费" | "煞费"
+                )))
 }
 
 #[inline]
@@ -2551,6 +2598,40 @@ fn grammar_transition_bonus(
         } else if edge.end < n {
             bonus -= 0.55;
         }
+    }
+    // 1b. 动体句末构式「[双字 V了] + 语气助词（吧/吗/呢/啊/呀/啦）」（如「付了+吧」「还了+吧」「结了+吧」「退了+吧」「买了+吧」）：
+    //     词库仅预组极少数三字词（如仅收「服了吧」未收「付了吧」），致使「付了+吧」相对「服了吧」多计一次词频分母与步长（~5.7 分落差），
+    //     同时也易被非动体双字词「欢乐+吧」或句末同音实字「买了+八/把」抢占；此处按精确 `...le -> ...了` 构式补齐标尺。
+    if !has_common_exact_whole_word
+        && is_end
+        && !edge.is_fuzzy
+        && matches!(w, "吧" | "吗" | "呢" | "啊" | "呀" | "啦")
+    {
+        if let Some(prev_e) = state.edges.iter().rev().find(|e| !e.text.is_empty()) {
+            if prev_e.kind == EdgeKind::ChineseWord
+                && !prev_e.is_fuzzy
+                && prev_e.text.chars().count() == 2
+                && prev_e.text.ends_with('了')
+                && prev_e.code_key.ends_with("'le")
+            {
+                bonus += 4.25;
+            }
+        }
+    }
+    // 1c. 长句中远距离「钱款/费用名词 … 付/还/结/交/退/转」动宾呼应（如「尾款什么时候付」「贷款明天还」）
+    if !edge.is_fuzzy
+        && is_end
+        && edge.syllable_count == 1
+        && matches!(w, "付" | "还" | "结" | "交" | "退" | "转")
+        && !is_payable_noun(prev_word)
+        && state
+            .edges
+            .iter()
+            .rev()
+            .take(5)
+            .any(|e| is_payable_noun(&e.text))
+    {
+        bonus += 2.15;
     }
     if is_end {
         if w == "把"

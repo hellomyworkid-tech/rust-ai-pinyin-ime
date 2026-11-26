@@ -2274,13 +2274,24 @@ fn colloquial_sile_phrases_rank_first_with_and_without_local_llm() {
         ("jingongsile", "进公司了"),
         ("youyisile", "有意思了"),
         ("mafanshile", "麻烦事了"),
+        ("weikuanfuleba", "尾款付了吧"),
+        ("weikuanfule", "尾款付了"),
+        ("weikuanjieleba", "尾款结了吧"),
+        ("weikuanshenmeshihoufu", "尾款什么时候付"),
+        ("huokuanfuleba", "货款付了吧"),
+        ("fangzufuleba", "房租付了吧"),
+        ("zhangdanfuleba", "账单付了吧"),
+        ("daikuanhuanleba", "贷款还了吧"),
+        ("tuikuandaoleba", "退款到了吧"),
+        ("quankuanmaileba", "全款买了吧"),
+        ("fuleba", "服了吧"),
     ] {
         let out = type_letters(&engine, py);
         assert_eq!(top_text(&out), want, "{py}");
         engine.reset();
     }
 
-    // 启用真实端侧大模型（Qwen2.5-0.5B）后，无上文与常见聊天上文下均稳定输出「麻烦死了」「生气死了」等
+    // 启用真实端侧大模型（Qwen2.5-0.5B）后，无上文与常见聊天上文下均稳定输出「麻烦死了」「尾款付了吧」等
     if let Some(model) = std::env::var_os("IME_LLM_TEST_MODEL") {
         if ImeEngine::llm_supported() {
             let _turn = real_model_test_turn();
@@ -2300,6 +2311,16 @@ fn colloquial_sile_phrases_rank_first_with_and_without_local_llm() {
                 (None, "xiarensile", "吓人死了"),
                 (None, "hetongsile", "合同撕了"),
                 (Some("遇到一件"), "mafanshile", "麻烦事了"),
+                (None, "weikuanfuleba", "尾款付了吧"),
+                (Some("双十一"), "weikuanfuleba", "尾款付了吧"),
+                (Some("尾款"), "fuleba", "付了吧"),
+                (None, "huokuanfuleba", "货款付了吧"),
+                (None, "fangzufuleba", "房租付了吧"),
+                (None, "zhangdanfuleba", "账单付了吧"),
+                (None, "weikuanshenmeshihoufu", "尾款什么时候付"),
+                (None, "daikuanhuanleba", "贷款还了吧"),
+                (None, "tuikuandaoleba", "退款到了吧"),
+                (None, "quankuanmaileba", "全款买了吧"),
             ] {
                 engine.set_context(ctx);
                 let initial = type_letters(&engine, py);
@@ -2312,6 +2333,24 @@ fn colloquial_sile_phrases_rank_first_with_and_without_local_llm() {
                     refreshed["visible_candidates"][0]["text"],
                     want,
                     "ctx={ctx:?} py={py} after AI"
+                );
+                engine.reset();
+            }
+            // 专业语境下同音词仍可由端侧大模型翻盘（如「显存位宽」「依照前款」）
+            for (ctx, py, want_after_ai) in [
+                ("显存", "weikuan", "位宽"),
+                ("依照", "qiankuan", "前款"),
+            ] {
+                engine.set_context(Some(ctx));
+                let _ = type_letters(&engine, py);
+                if engine.ai_result_pending() {
+                    let _ = rx.recv_timeout(Duration::from_secs(10));
+                }
+                let refreshed = json(&engine.refresh_after_ai());
+                assert_eq!(
+                    refreshed["visible_candidates"][0]["text"],
+                    want_after_ai,
+                    "ctx={ctx} py={py} after AI"
                 );
                 engine.reset();
             }
