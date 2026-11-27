@@ -264,6 +264,14 @@ impl BilingualDecoder {
 
             // 合并该位置 i 的静态晶格边与用户记忆自造词边
             let mut edges_at_i = lattice.edges_from[i].clone();
+            if i == 0 && !context_tail.is_empty() {
+                crate::lattice::rescue_start_edges_with_context(
+                    &lattice.input,
+                    lexicon,
+                    &context_tail,
+                    &mut edges_at_i,
+                );
+            }
 
             if !user_dict.records.is_empty() {
                 for end_pos in (i + 1)..=n.min(i + 24) {
@@ -459,12 +467,37 @@ impl BilingualDecoder {
                     } else {
                         user_dict.bigram_boost(prev_word, &edge.text)
                     };
-                    let mut bg_bonus = lexicon.bigram_bonus(prev_word, &edge.text) + user_bg;
+                    let mut bg_bonus = effective_bigram_bonus(lexicon, prev_word, &edge.text) + user_bg;
                     if state.edges.is_empty() {
                         for ctx_w in &context_tail {
-                            bg_bonus = bg_bonus.max(lexicon.bigram_bonus(ctx_w, &edge.text));
+                            bg_bonus = bg_bonus.max(effective_bigram_bonus(lexicon, ctx_w, &edge.text));
                         }
                     }
+                    // RC2 步长惩罚豁免：
+                    // 1) 无隔音符强拆合法单音节的双字词（如 `jie -> 饥饿`、`yue -> 余额`、`xian -> 西安`）受真实统计 Bigram 支撑时
+                    //    （`bg_bonus >= 0.8`），恢复常规多字词步长（豁免 2.70 拆音节碎片罚分，而无搭配的 `那余额` 仍受抑制）；
+                    // 2) 受强统计 Bigram 支撑（`bg_bonus >= 1.5`）的单字实词，无论当前步（`这把+伞`）还是前一步句首动词（`戴+耳钉`），
+                    //    将其 3.25 孤立单字惩罚回落至 1.75。
+                    if !edge.is_fuzzy {
+                        if edge_splits_single_syl && bg_bonus >= 0.8 {
+                            bg_bonus += 2.70;
+                        } else if bg_bonus >= 1.2 {
+                            if edge.kind == EdgeKind::ChineseChar && step_transition_penalty >= 3.0 {
+                                bg_bonus += 1.50;
+                            } else if edge.kind == EdgeKind::ChineseWord
+                                && state.edges.last().is_some_and(|pe| {
+                                    pe.kind == EdgeKind::ChineseChar
+                                        && !pe.is_fuzzy
+                                        && !is_common_sentence_particle(&pe.text)
+                                })
+                            {
+                                bg_bonus += 1.50;
+                            }
+                        }
+                    }
+                    let context_has_ba = context_tail
+                        .last()
+                        .is_some_and(|w| w == "把" || w.ends_with('把'));
                     bg_bonus += grammar_transition_bonus(
                         lexicon,
                         state,
@@ -472,6 +505,7 @@ impl BilingualDecoder {
                         edge,
                         n,
                         has_common_exact_whole_word,
+                        context_has_ba,
                     );
 
                     let mut next_edges = state.edges.clone();
@@ -871,7 +905,13 @@ impl BilingualDecoder {
         let rank_cost = |e: &LatticeEdge| -> f32 {
             let raw = &lattice.input[e.start..e.end];
             let ctx_bonus = if let Some((pw, pw_raw)) = prev_pinned_entry {
-                lexicon.bigram_bonus(pw, &e.text)
+                let lex_bg = if unpinned_start == 0 && e.kind == EdgeKind::ChineseChar {
+                    // 句首无锁定词时 `pw` 来自上一句上文：对单字前缀只做温和精确正向参考，避免上一句打乱首音节常用字序
+                    lexicon.bigram_bonus(pw, &e.text) * 0.35
+                } else {
+                    effective_bigram_bonus(lexicon, pw, &e.text)
+                };
+                lex_bg
                     + user_dict.bigram_boost(pw, &e.text)
                     + word_pair_collocation_bonus(pw, e)
                     + separable_vo_bonus_from_code(lexicon, pw, pw_raw, e)
@@ -1829,30 +1869,30 @@ fn is_post_head_particle(ch: &str) -> bool {
     matches!(ch, "的" | "了" | "着" | "过" | "地" | "得")
 }
 
-/// 判断前词是否为现代汉语「指代/数词/动词 + 量词」短语（如「这个」「那个」「一个」「每个」「哪个」「几个」「这些」「这种」「换个」「加个」）
+/// 判断前词是否为现代汉语「指代/数词/动词 + 量词」短语（如「这个」「这只」「这把」「那头」「一根」「换个」「三斤」），
+/// 以生成式封闭类规则替代枚举表，自动覆盖全部指示词/数词 × 封闭量词组合。
 #[inline]
 pub fn is_classifier_phrase(w: &str) -> bool {
-    if matches!(
-        w,
-        "这个" | "那个" | "一个" | "每个" | "哪个" | "几个" | "两个" | "三个" | "四个" | "五个"
-            | "半个" | "整个" | "下个" | "上个" | "前个" | "后个" | "同个" | "单个" | "首个"
-            | "另一个" | "多半个" | "这些" | "那些" | "哪些" | "一些" | "某些" | "好些"
-            | "这种" | "那种" | "哪种" | "一种" | "某种" | "各种" | "这类" | "那类" | "哪类"
-            | "一类" | "这件" | "那件" | "一件" | "这条" | "那条" | "一条" | "这段" | "那段"
-            | "一段" | "这句" | "那句" | "一句" | "这篇" | "那篇" | "一篇" | "这页" | "那页"
-            | "一页" | "这行" | "那行" | "一行" | "这项" | "那项" | "一项" | "这次" | "那次"
-            | "一次" | "这场" | "那场" | "一场" | "这套" | "那套" | "一套" | "这批" | "那批"
-            | "一批" | "这群" | "那群" | "一群" | "这位" | "那位" | "一位" | "这家" | "那家"
-            | "一家" | "这版" | "那版" | "一版" | "这张" | "那张" | "一张" | "这本" | "那本"
-            | "一本" | "这块" | "那块" | "一块" | "这台" | "那台" | "一台" | "这部" | "那部"
-            | "一部" | "这首" | "那首" | "一首" | "这座" | "那座" | "一座" | "这层" | "那层"
-            | "一层" | "这间" | "那间" | "一间"
-    ) {
+    let mut chars = w.chars();
+    let (Some(first), Some(last), None) = (chars.next(), chars.next(), chars.next()) else {
+        return matches!(w, "另一个" | "多半个") || is_numeral_measure_phrase(w);
+    };
+    if last == '个' && !matches!(w, "各个" | "挨个" | "逐个" | "真个" | "高个" | "大个" | "小个" | "矮个") {
         return true;
     }
-    if w.chars().count() == 2
-        && w.ends_with('个')
-        && !matches!(w, "各个" | "挨个" | "逐个" | "真个" | "高个" | "大个" | "小个" | "矮个")
+    let is_det_prefix = matches!(
+        first,
+        '这' | '那' | '哪' | '每' | '某' | '各' | '上' | '下' | '前' | '后' | '同' | '单' | '首' | '好' | '另'
+    ) || crate::lattice::is_pure_numeral_char(first);
+    if is_det_prefix
+        && matches!(
+            last,
+            '个' | '些' | '种' | '类' | '件' | '条' | '段' | '句' | '篇' | '页' | '行' | '项'
+                | '次' | '场' | '套' | '批' | '群' | '位' | '家' | '版' | '张' | '本' | '块'
+                | '台' | '部' | '首' | '座' | '层' | '间' | '只' | '头' | '匹' | '把' | '根'
+                | '棵' | '朵' | '颗' | '辆' | '栋' | '瓶' | '杯' | '碗' | '盒' | '箱' | '袋'
+                | '包' | '双' | '对' | '份' | '扇' | '艘' | '架' | '粒' | '滴'
+        )
     {
         return true;
     }
@@ -2075,7 +2115,7 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
         bonus += if is_telic_action_verb(w) { 3.15 } else { 1.85 };
     }
 
-    // 1c. 动结式结果补语「动词 + 完」（如「收拾+完」「编译+完」「先整理+完」）与错切「*手/边/感受 + 十万/一万」抑制
+    // 1c. 动结式结果补语「动词 + 完」（如「收拾+完」「编译+完」「先整理+完」）
     let ends_with_telic_verb = is_telic_action_verb(prev_word)
         || (prev_word.chars().count() >= 3
             && ["刚刚", "已经", "终于", "总算", "还没", "刚", "先", "快", "已"]
@@ -2084,13 +2124,6 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
                 .is_some_and(is_telic_action_verb));
     if !edge.is_fuzzy && w == "完" && ends_with_telic_verb {
         bonus += 3.35;
-    } else if matches!(w, "十万" | "一万" | "百万" | "千万")
-        && (matches!(prev_word, "手" | "边" | "感受" | "干洗")
-            || (prev_word.chars().count() >= 2
-                && prev_word.ends_with('手')
-                && !matches!(prev_word, "到手" | "入手" | "出手" | "转手" | "脱手")))
-    {
-        bonus -= 2.45;
     }
 
     // 1b. 现代汉语高产名词性类后缀（[多字实词] + 区/饭/费/群/店/馆/站/卡/券/感/圈/风/版/号/户/娃）构词补偿，
@@ -2148,7 +2181,7 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
     }
 
     if is_classifier_phrase(prev_word) {
-        if is_ungrammatical_after_classifier(w) {
+        if is_ungrammatical_after_classifier(w) || is_chinese_numeral_word(w) {
             bonus -= 2.65;
         } else if is_countable_single_noun(w) {
             bonus += 3.45;
@@ -2213,222 +2246,12 @@ pub(crate) fn word_pair_collocation_bonus(prev_word: &str, edge: &LatticeEdge) -
         }
     }
 
-    // 4. 常见跨词搭配下保留元音切分双字词的自然召回（如「查询/可用/账户+余额」「忍受/感到/非常/很+饥饿」）
-    if w == "余额"
-        && matches!(
-            prev_word,
-            "查询" | "可用" | "账户" | "卡内" | "卡里" | "钱包" | "剩余" | "当前" | "查看" | "显示" | "不足" | "充值"
-        )
-    {
-        bonus += 2.25;
-    } else if w == "饥饿"
-        && (prev_word.ends_with('很')
-            || matches!(
-                prev_word,
-                "忍受" | "感到" | "陷入" | "消除" | "战胜" | "抗击" | "处于" | "非常" | "十分" | "极度" | "太"
-            ))
-    {
-        bonus += 3.15;
-    } else if matches!(w, "饿" | "饿了") && prev_word == "肚子" {
-        bonus += 2.25;
-    }
-
-    // 5. 现代高频搭配与新媒体常用词同音消歧（受众人群 / 女频短剧 / 人设 / 用户痛点 / 明星塌房 / 吃馄饨）
-    if prev_word == "受众"
-        && matches!(
-            w,
-            "人群" | "群体" | "范围" | "画像" | "定位" | "广" | "面" | "层" | "分析" | "规模" | "基础"
-        )
-    {
-        bonus += 4.8;
-    } else if w == "受众"
-        && matches!(
-            prev_word,
-            "目标" | "核心" | "年轻" | "广泛" | "主要" | "精准" | "潜在" | "特定" | "主流" | "女性" | "男性"
-        )
-    {
-        bonus += 4.4;
-    } else if prev_word == "手中" && matches!(w, "人群" | "群体" | "范围" | "画像") {
-        bonus -= 1.8;
-    }
-
-    if matches!(prev_word, "女频" | "男频")
-        && matches!(
-            w,
-            "短剧" | "爽文" | "小说" | "网文" | "甜宠" | "虐文" | "赛道" | "作品" | "剧本"
-        )
-    {
-        bonus += 4.2;
-    } else if w == "短剧"
-        && matches!(
-            prev_word,
-            "微" | "竖屏" | "爆款" | "热门" | "精品" | "出海" | "古装" | "现代" | "都市" | "甜宠"
-                | "逆袭" | "战神" | "霸总" | "重生" | "穿越" | "拍" | "看" | "追" | "刷" | "演"
-                | "部" | "这部"
-        )
-    {
-        bonus += 3.8;
-    } else if prev_word == "短剧"
-        && matches!(
-            w,
-            "市场" | "平台" | "赛道" | "出海" | "演员" | "剧本" | "制作" | "投流" | "行业" | "热播"
-                | "爆火" | "女主" | "男主"
-        )
-    {
-        bonus += 3.8;
-    } else if w == "短句" && matches!(prev_word, "女频" | "男频" | "甜宠" | "霸总" | "竖屏" | "爆款")
-    {
-        bonus -= 1.5;
-    }
-
-    if w == "人设"
-        && matches!(
-            prev_word,
-            "立" | "立好" | "凹" | "打造" | "维持" | "保持" | "符合" | "贴合" | "反差" | "高冷"
-                | "完美" | "霸总" | "女主" | "男主" | "角色"
-        )
-    {
-        bonus += 3.8;
-    } else if prev_word == "人设"
-        && matches!(w, "崩塌" | "翻车" | "崩了" | "不倒" | "讨喜" | "鲜明" | "立住")
-    {
-        bonus += 3.8;
-    }
-
-    if w == "痛点"
-        && matches!(
-            prev_word,
-            "用户" | "行业" | "核心" | "解决" | "直击" | "抓住" | "市场" | "消费" | "业务" | "产品"
-        )
-    {
-        bonus += 3.8;
-    } else if prev_word == "甜宠"
-        && matches!(w, "剧" | "短剧" | "文" | "小说" | "风格" | "路线" | "日常")
-    {
-        bonus += 3.8;
-    } else if w == "塌房" && matches!(prev_word, "明星" | "偶像" | "爱豆" | "网红" | "顶流" | "艺人")
-    {
-        bonus += 4.0;
-    } else if w == "出圈"
-        && matches!(
-            prev_word,
-            "成功" | "火爆" | "火速" | "文化" | "强势" | "破圈" | "再次" | "彻底"
-        )
-    {
-        bonus += 3.8;
-    } else if w == "馄饨"
-        && (prev_word.ends_with('吃')
-            || prev_word.ends_with('碗')
-            || matches!(
-                prev_word,
-                "煮" | "包" | "一碗" | "小" | "鲜肉" | "虾仁" | "荠菜" | "菜肉" | "买" | "点"
-            ))
-    {
-        bonus += 4.2;
-    } else if (prev_word == "是真" && w == "是假") || (prev_word == "半真" && w == "半假") {
+    // 4. 固定对举习语「是真是假 / 半真半假」（其余余额/饥饿/受众/人设/痛点/馄饨/戴配件/快递品牌/钱款搭配均已交由百万级统计 Bigram 模型自然覆盖）
+    if (prev_word == "是真" && w == "是假") || (prev_word == "半真" && w == "半假") {
         bonus += 3.5;
     }
 
-    // 6. 穿戴类动词「戴/戴着/戴上/戴好」+ 可穿戴配件名词同音消歧（避免被更高字频的「带/带着」覆盖）
-    if matches!(
-        w,
-        "耳机" | "眼镜" | "墨镜" | "口罩" | "帽子" | "手表" | "手环" | "头盔" | "手套"
-            | "项链" | "耳环" | "戒指" | "AirPods" | "AppleWatch" | "iWatch"
-    ) {
-        if matches!(prev_word, "戴" | "戴着" | "戴上" | "戴好" | "佩戴") {
-            bonus += 3.2;
-        } else if matches!(prev_word, "带" | "带着") {
-            bonus -= 0.8;
-        }
-    }
-
-    // 7. 高产时效构词「[时限名词] + 达」（次日达 / 隔日达 / 当日达 / 半日达 / 小时达 / 限时达 / 准时达），
-    //    以及「[快递/物流/平台专名] + [履约服务核心词]」语义选择限制（消除「顺风标快 / 惊动快递 / 肿痛快递 / 云大快递」等同音错配）
-    if !edge.is_fuzzy
-        && w == "达"
-        && matches!(
-            prev_word,
-            "次日" | "隔日" | "当日" | "半日" | "同日" | "明日" | "小时" | "分钟" | "限时"
-                | "准时" | "即时" | "整点"
-        )
-    {
-        bonus += 4.65;
-    }
-    if !edge.is_fuzzy {
-        let is_express_service_head = matches!(
-            w,
-            "快递" | "快运" | "速运" | "速递" | "标快" | "特快" | "普快" | "冷运" | "次晨"
-                | "即日" | "同城" | "物流" | "集运" | "驿站" | "小哥" | "单号" | "包裹" | "运单"
-                | "到付" | "寄付" | "现付" | "保价" | "取件" | "寄件" | "派件" | "揽收"
-        );
-        let is_ecommerce_head = matches!(w, "自营" | "商城" | "白条" | "超市" | "到家" | "买菜");
-        if is_express_service_head {
-            if matches!(
-                prev_word,
-                "顺丰" | "京东" | "中通" | "圆通" | "申通" | "韵达" | "极兔" | "德邦" | "菜鸟"
-                    | "丰巢" | "跨越"
-            ) {
-                bonus += 2.65;
-            } else if matches!(prev_word, "顺风" | "惊动" | "肿痛" | "云大" | "激凸" | "激突") {
-                bonus -= 1.65;
-            }
-        } else if is_ecommerce_head {
-            if matches!(prev_word, "京东" | "天猫" | "淘宝" | "美团" | "盒马") {
-                bonus += 2.65;
-            } else if prev_word == "惊动" {
-                bonus -= 1.65;
-            }
-        } else if matches!(w, "顺丰" | "德邦" | "中通" | "圆通" | "申通" | "韵达" | "极兔")
-            && matches!(
-                prev_word,
-                "发" | "发个" | "发了" | "寄" | "寄个" | "走" | "用" | "选" | "查" | "收"
-            )
-        {
-            bonus += 2.25;
-        }
-    }
-
-    // 8. 钱款/费用类名词 + 支付/结算/退还动词语义选择限制（如「尾款/定金/首付/货款/房租/账单 + 付了/付/结了/交了/还了/退了」，
-    //    避免被更高字频同音词「服了/服了吧/接了/欢乐」覆盖）
-    if !edge.is_fuzzy && is_payable_noun(prev_word) {
-        if matches!(
-            w,
-            "付" | "付了" | "支付" | "交" | "交了" | "还" | "还了" | "结" | "结了"
-                | "退" | "退了" | "转" | "转了" | "缴" | "缴了" | "补" | "补了"
-        ) {
-            bonus += 2.65;
-        } else if matches!(w, "服了" | "服了吧" | "接了" | "欢乐") {
-            bonus -= 1.25;
-        }
-    }
-
     bonus
-}
-
-#[inline]
-fn is_payable_noun(w: &str) -> bool {
-    if matches!(
-        w,
-        "定金" | "订金" | "首付" | "房租" | "租金" | "账单" | "押金" | "保证金"
-            | "违约金" | "佣金" | "礼金" | "费用" | "钱" | "零钱" | "红包" | "转账"
-            | "花呗" | "白条" | "信用卡"
-    ) {
-        return true;
-    }
-    let char_cnt = w.chars().count();
-    (2..=4).contains(&char_cnt)
-        && ((w.ends_with('款')
-            && !matches!(
-                w,
-                "这款" | "那款" | "哪款" | "新款" | "老款" | "旧款" | "同款" | "爆款"
-                    | "经典款" | "基础款" | "高配款" | "低配款" | "条款" | "前款" | "落款"
-            ))
-            || (w.ends_with('费')
-                && !matches!(
-                    w,
-                    "浪费" | "消费" | "免费" | "自费" | "公费" | "经费" | "耗费" | "破费"
-                        | "白费" | "枉费" | "徒费" | "煞费"
-                )))
 }
 
 #[inline]
@@ -2462,7 +2285,7 @@ fn is_separable_vo_object_char(c: char) -> bool {
 /// 现代汉语动宾离合词拆插还原（如「交了+税」←「交税」、「请了+假」←「请假」、「开了+会」←「开会」、「辞了+职」←「辞职」）：
 /// 直接在零拷贝词库 `lexicon` 中验证还原后的双字词 `VO` 是否为真实高频词条（`cost < 12.6`），
 /// 无需手工穷举离合词表，同时自动排除非离合假搭配（如 `*交睡`、`*请加`、`*开回`、`*辞值` 均不在词库中）。
-fn separable_vo_bonus_from_code(
+pub(crate) fn separable_vo_bonus_from_code(
     lexicon: &CompiledLexicon,
     prev_word: &str,
     prev_code: &str,
@@ -2513,11 +2336,7 @@ fn separable_vo_bonus_from_code(
     for id in lexicon.syllable_trie().exact_lookup(&vo_key) {
         let entry = lexicon.entry(id);
         if entry.text() == vo_text {
-            let vo_cost = crate::lattice::calibrated_word_cost(
-                entry.text(),
-                entry.syllable_key(),
-                entry.cost(),
-            );
+            let vo_cost = entry.cost();
             if vo_cost < 12.6 {
                 let cond_cost = (vo_cost - 8.80).max(1.80);
                 return (edge.base_cost + 2.70 - cond_cost).clamp(3.20, 11.80);
@@ -2528,6 +2347,132 @@ fn separable_vo_bonus_from_code(
     0.0
 }
 
+/// 计算相邻两词块（`prev_word` -> `next_word`）的统计二元语法加成，含四类纯结构化汉语词法/句法回退（不硬编码领域词表）：
+/// 1. 精确命中词库 Bigram（`lexicon.bigram_bonus(prev, next)`）；
+/// 2. 动体后缀剥离：`next` 为双字 `V+了/过/完/着` 时回退查 `(prev, V)`（对齐 ARPA 语料将「交了/订了/还了/洗了/死了」切为 `V + 了` 的分词粒度）；
+/// 3. 指示/数词+量词尾字回退：`prev` 为「这/那/哪/一…+量词」双字词（如「这只」「这把」「那头」「一根」）时回退查 `(量词, next)`；
+/// 4. 单字动词 + 3~4 字复合宾语头词回退：`prev` 为单字且 `next` 为 3~4 字词（如「戴 + 隐形眼镜」）时回退查 `(prev, next前2字)`；
+/// 5. 汉语话题前置 O-V 逆序回退：`prev` 为多字话题名词且 `next` 为动词性 `V了/V过/V完/V着` 或非虚词单字动词时，
+///    回退查询规范动宾语序 `(V, prev)`（如「尾款+付了」←「付+尾款」、「房贷+还了」←「还+房贷」、「作业+交了」←「交+作业」）。
+pub(crate) fn effective_bigram_bonus(
+    lexicon: &CompiledLexicon,
+    prev_word: &str,
+    next_word: &str,
+) -> f32 {
+    if prev_word.is_empty() || next_word.is_empty() || lexicon.bigram_count() == 0 {
+        return 0.0;
+    }
+    let exact = lexicon.bigram_bonus(prev_word, next_word);
+    if exact > 0.0 {
+        return exact;
+    }
+
+    let mut best = 0.0f32;
+    let prev_chars = prev_word.chars().count();
+    let next_chars = next_word.chars().count();
+
+    // (a0) 前词为双字动体词 `V + 了/过/完/着` 时剥离体标记查 `(V, next)`（支持中文与跨语种，如「发了+货」->「发+货」、「戴着+AirPods」->「戴+AirPods」）
+    if !prev_word.is_ascii() && prev_chars == 2 {
+        let mut it = prev_word.chars();
+        if let (Some(v), Some(suf)) = (it.next(), it.next()) {
+            if matches!(suf, '了' | '过' | '完' | '着') {
+                let stem = &prev_word[..v.len_utf8()];
+                let b = lexicon.bigram_bonus(stem, next_word) * 0.78;
+                if b > best {
+                    best = b;
+                }
+            }
+        }
+    }
+
+    if prev_word.is_ascii() || next_word.is_ascii() {
+        return best;
+    }
+
+    // (a) 后词为双字动体词 `V + 了/过/完/着` 的词干回退（如「作业+交了」->「作业+交」）
+    let next_aspect_stem: Option<&str> = if next_chars == 2 {
+        let mut it = next_word.chars();
+        match (it.next(), it.next()) {
+            (Some(v), Some(suf)) if matches!(suf, '了' | '过' | '完' | '着') => {
+                Some(&next_word[..v.len_utf8()])
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(stem) = next_aspect_stem {
+        let b = lexicon.bigram_bonus(prev_word, stem) * 0.80;
+        if b > best {
+            best = b;
+        }
+    }
+
+    // (b) 指示/数词+量词短语或「代词+程度副词」双字前词尾字回退（如「这只+猫」->「只+猫」、「这把+伞」->「把+伞」、「我很+饥饿」->「很+饥饿」）
+    if prev_chars == 2 {
+        let mut it = prev_word.chars();
+        if let (Some(head), Some(tail)) = (it.next(), it.next()) {
+            let is_det_or_num = matches!(
+                head,
+                '这' | '那' | '哪' | '每' | '某' | '各' | '另' | '同' | '单' | '首'
+            ) || crate::lattice::is_pure_numeral_char(head);
+            let is_degree_tail = matches!(tail, '很' | '太' | '真' | '最' | '更' | '挺' | '蛮' | '超');
+            if is_det_or_num || is_degree_tail {
+                let tail_str = &prev_word[head.len_utf8()..];
+                let b = lexicon.bigram_bonus(tail_str, next_word) * 0.78;
+                if b > best {
+                    best = b;
+                }
+            }
+        }
+    }
+
+    // (c) 单字动词/介词 + 3~4 字复合名词头/尾双字回退（汉语偏正复合词多为中心语后置，如「戴+隐形[眼镜]」「戴+蓝牙[耳机]」）
+    if prev_chars == 1 && (3..=4).contains(&next_chars) {
+        let head2_end: usize = next_word.chars().take(2).map(char::len_utf8).sum();
+        let tail2_start: usize = next_word
+            .chars()
+            .take(next_chars - 2)
+            .map(char::len_utf8)
+            .sum();
+        let b_head = lexicon.bigram_bonus(prev_word, &next_word[..head2_end]) * 0.80;
+        let b_tail = lexicon.bigram_bonus(prev_word, &next_word[tail2_start..]) * 0.85;
+        let b = b_head.max(b_tail);
+        if b > best {
+            best = b;
+        }
+    }
+
+    // (d) 汉语话题前置 O-V 逆序回退（如「尾款+付了」->「付+尾款」、「房贷+还了」->「还+房贷」）
+    let is_non_verb_function = |s: &str| -> bool {
+        matches!(
+            s,
+            "的" | "了" | "在" | "是" | "和" | "与" | "或" | "但" | "而" | "把" | "被"
+                | "向" | "从" | "对" | "于" | "上" | "下" | "中" | "里" | "内" | "外"
+                | "前" | "后" | "不" | "没" | "很" | "更" | "最" | "也" | "都" | "就"
+                | "才" | "又" | "再" | "吗" | "呢" | "吧" | "啊" | "呀" | "着" | "过"
+                | "得" | "地" | "我" | "你" | "他" | "她" | "它" | "这" | "那" | "哪"
+                | "谁" | "个" | "一" | "二" | "两" | "三" | "四" | "五" | "六" | "七"
+                | "八" | "九" | "十"
+        )
+    };
+    if let Some(stem) = next_aspect_stem {
+        if !is_non_verb_function(stem) {
+            let b = lexicon.bigram_bonus(stem, prev_word) * 0.65;
+            if b > best {
+                best = b;
+            }
+        }
+    } else if next_chars == 1 && prev_chars >= 2 && !is_non_verb_function(next_word) {
+        let b = lexicon.bigram_bonus(next_word, prev_word) * 0.50;
+        if b > best {
+            best = b;
+        }
+    }
+
+    best
+}
+
 /// 现代汉语语法结构与虚词同音搭配奖励（在 Beam Search 转移时实时消歧「再/在」「吧/把」「的/地/得」「了/乐」）
 fn grammar_transition_bonus(
     lexicon: &CompiledLexicon,
@@ -2536,14 +2481,25 @@ fn grammar_transition_bonus(
     edge: &LatticeEdge,
     n: usize,
     has_common_exact_whole_word: bool,
+    context_has_ba: bool,
 ) -> f32 {
     let mut bonus = word_pair_collocation_bonus(prev_word, edge);
     let w = edge.text.as_str();
     let is_end = edge.end == n && edge.start > 0;
 
-    // 0a. 动宾离合词拆插（`V了/V过/V完 + O` 或分字锁定 `V + 了/过/完 + O`，如「交了+税」「请了+假」「开了+会」「辞了+职」）
+    // 0a. 动宾离合词拆插（`V了/V过/V完 + [可选数量/时量补语] + O` 或分字锁定 `V + 了/过/完 + O`，
+    //     如「交了+税」「请了+三天+假」「开了+一下午+会」「洗了+个+澡」「睡了+一+觉」）
     //     与句末双「了」构式（`V了O了`，如「交了税了」）
     if !has_common_exact_whole_word {
+        let is_vo_intervening_mod = |s: &str| -> bool {
+            let mut chars = s.chars();
+            let Some(first) = chars.next() else {
+                return false;
+            };
+            matches!(s, "个" | "一下" | "一会儿" | "半天" | "整天" | "很多" | "不少" | "几个" | "几天" | "好几")
+                || crate::lattice::is_pure_numeral_char(first)
+                || is_classifier_phrase(s)
+        };
         let state_vo_bonus = |st_edges: &[LatticeEdge], target: &LatticeEdge| -> f32 {
             let mut rev = st_edges.iter().rev().filter(|e| !e.text.is_empty());
             let Some(last_e) = rev.next() else {
@@ -2564,6 +2520,31 @@ fn grammar_transition_bonus(
                             &combined_code,
                             target,
                         );
+                    }
+                }
+            } else if is_vo_intervening_mod(&last_e.text) {
+                // 允许动宾离合词中间插入 1 个数量/时量修饰语（如「请了+三天+假」「开了+一下午+会」「洗了+个+澡」）
+                if let Some(prev_e) = rev.next() {
+                    let b = separable_vo_bonus_from_code(lexicon, &prev_e.text, &prev_e.code_key, target);
+                    if b > 0.0 {
+                        return b * 0.85;
+                    }
+                    if matches!(prev_e.text.as_str(), "了" | "过" | "完" | "着") {
+                        if let Some(v_e) = rev.next() {
+                            if v_e.text.chars().count() == 1 {
+                                let combined_word = format!("{}{}", v_e.text, prev_e.text);
+                                let combined_code = format!("{}'{}", v_e.code_key, prev_e.code_key);
+                                let b2 = separable_vo_bonus_from_code(
+                                    lexicon,
+                                    &combined_word,
+                                    &combined_code,
+                                    target,
+                                );
+                                if b2 > 0.0 {
+                                    return b2 * 0.85;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2606,6 +2587,88 @@ fn grammar_transition_bonus(
                 || (is_single_consonant_char(edge) && !is_end);
             if (prev_eng && curr_jp) || (prev_jp && curr_eng) {
                 bonus -= 5.5;
+            }
+        }
+    }
+
+    // 0b. 严格物理度量单位（毫升/厘米/毫米/公斤/千克/平方米/立方米…）不能在无前驱数词的句首凭空起头（如 `*毫升出了钱…`）
+    if edge.start == 0 && edge.end < n && prev_word.is_empty() && is_strict_unit_word(w) {
+        bonus -= 2.55;
+    }
+
+    // 0c. 词库驱动的汉语中心语素话题前置 O-V 校验（如「贷款+还了」←词库「还款/还贷」、「尾款+交了」←「交款」、
+    //     「余款+结了」←「结款」、「快递费+付了」←「付费」、「账单+付了」←「付账」、「车票+退了」←「退票」）：
+    //     不硬编码名词或动词表，直接查 `lexicon` 中 `V + 前词中心语素` 是否为真实高频双字动宾词（`cost < 13.0`）。
+    if !has_common_exact_whole_word && !edge.is_fuzzy && !w.is_ascii() {
+        let v_stem: Option<(char, &str)> = if edge.kind == EdgeKind::ChineseWord
+            && edge.syllable_count == 2
+            && w.chars().count() == 2
+        {
+            let mut it = w.chars();
+            match (it.next(), it.next()) {
+                (Some(v), Some(suf))
+                    if matches!(suf, '了' | '过' | '完' | '着')
+                        && is_separable_vo_verb_char(v) =>
+                {
+                    edge.code_key
+                        .trim_matches('\'')
+                        .split_once('\'')
+                        .map(|(vs, _)| (v, vs))
+                }
+                _ => None,
+            }
+        } else if is_end && edge.kind == EdgeKind::ChineseChar && edge.syllable_count == 1 {
+            w.chars()
+                .next()
+                .filter(|&v| is_separable_vo_verb_char(v))
+                .map(|v| (v, edge.code_key.trim_matches('\'')))
+        } else {
+            None
+        };
+        if let (Some((v_char, v_syl)), Some(prev_e)) = (
+            v_stem,
+            state.edges.iter().rev().find(|e| !e.text.is_empty()),
+        ) {
+            let p_chars: Vec<char> = prev_e.text.chars().collect();
+            let p_syls: Vec<&str> = prev_e.code_key.trim_matches('\'').split('\'').collect();
+            if !prev_e.is_fuzzy
+                && !prev_e.text.is_ascii()
+                && (2..=4).contains(&p_chars.len())
+                && p_chars.len() == p_syls.len()
+            {
+                let mut best_vo_cost = f32::INFINITY;
+                // 优先核验中心尾字（偏正复合词如 贷[款]、快递[费]、车[票]、房[租]），次查首字（如 [账]单 -> 付账）
+                let probes: [(char, &str, bool); 2] = [
+                    (p_chars[p_chars.len() - 1], p_syls[p_syls.len() - 1], true),
+                    (p_chars[0], p_syls[0], false),
+                ];
+                for (o_char, o_syl, is_tail) in probes {
+                    if o_char == v_char
+                        || matches!(
+                            o_char,
+                            '的' | '了' | '着' | '过' | '得' | '地' | '吗' | '呢' | '吧' | '啊' | '呀' | '啦' | '人' | '子' | '儿' | '头' | '们'
+                        )
+                    {
+                        continue;
+                    }
+                    let limit = if is_tail { 13.6 } else { 12.6 };
+                    let vo_key = format!("{v_syl}'{o_syl}");
+                    let vo_text = format!("{v_char}{o_char}");
+                    for id in lexicon.syllable_trie().exact_lookup(&vo_key) {
+                        let entry = lexicon.entry(id);
+                        if entry.text() == vo_text {
+                            let c = entry.cost();
+                            if c < limit && c < best_vo_cost {
+                                best_vo_cost = c;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if best_vo_cost.is_finite() {
+                    // 统一给予温和的话题前置动宾补偿（不按 VO 静态词频拉大「借款(名词高词频)」与「结款(动词)」的差距）
+                    bonus += 2.35;
+                }
             }
         }
     }
@@ -2686,20 +2749,25 @@ fn grammar_transition_bonus(
             }
         }
     }
-    // 1c. 长句中远距离「钱款/费用名词 … 付/还/结/交/退/转」动宾呼应（如「尾款什么时候付」「贷款明天还」）
+    // 1c. 长句远距离话题前置 O…V 统计呼应（如「尾款什么时候付」「房贷明天还」「作业今晚交」「机票什么时候订」）：
+    //     不硬编码任何名词或动词表，直接用统计 Bigram 核验规范动宾语序 `(w, earlier_topic)` 的强度。
     if !edge.is_fuzzy
         && is_end
         && edge.syllable_count == 1
-        && matches!(w, "付" | "还" | "结" | "交" | "退" | "转")
-        && !is_payable_noun(prev_word)
-        && state
-            .edges
-            .iter()
-            .rev()
-            .take(5)
-            .any(|e| is_payable_noun(&e.text))
+        && !w.is_ascii()
+        && !is_common_sentence_particle(w)
+        && lexicon.bigram_count() > 0
     {
-        bonus += 2.15;
+        let mut best_echo = 0.0f32;
+        for earlier in state.edges.iter().rev().filter(|e| !e.text.is_empty()).skip(1).take(4) {
+            if earlier.text.chars().count() >= 2 && !earlier.text.is_ascii() {
+                let b = lexicon.bigram_bonus(w, &earlier.text);
+                if b >= 2.2 {
+                    best_echo = best_echo.max(b * 0.45);
+                }
+            }
+        }
+        bonus += best_echo;
     }
     if is_end {
         if w == "把"
@@ -2887,14 +2955,26 @@ fn grammar_transition_bonus(
                     && !is_chinese_numeral_word(&prev_e.text)
                     && !is_strict_unit_word(&prev_e.text)
                 {
-                    let is_tearable_object = matches!(
-                        prev_e.text.as_str(),
-                        "合同" | "纸张" | "信纸" | "发票" | "报纸" | "作业" | "照片" | "标签"
-                            | "贴膜" | "包装" | "封条" | "胶带" | "试卷" | "票据" | "门票" | "车票"
-                            | "袋子"
-                    );
-                    if (w == "死了" && !is_tearable_object) || (w == "撕了" && is_tearable_object) {
+                    // 现代汉语「把字句」处置式（`把 + NP + V了`，如「把海报撕了」「把封面撕了」「把信撕了」「把合同撕了」）
+                    // 在句法上只能接及物处置动词「撕了」，绝不接不及物程度补语「死了」；
+                    // 非把字句中「死了」为主（+3.05），「撕了」保留温和补偿（+1.65）以稳进候选池交由端侧大模型按世界知识裁决（如「合同撕了」）。
+                    let in_ba_disposal = (context_has_ba && state.edges.len() <= 2)
+                        || prev_e.text.starts_with('把')
+                        || state
+                            .edges
+                            .iter()
+                            .rev()
+                            .filter(|e| !e.text.is_empty())
+                            .take(3)
+                            .any(|e| e.text == "把" || e.text.starts_with('把'));
+                    if in_ba_disposal {
+                        if w == "撕了" {
+                            bonus += if is_end { 3.05 } else { 2.25 };
+                        }
+                    } else if w == "死了" {
                         bonus += if is_end { 3.05 } else { 2.25 };
+                    } else if w == "撕了" {
+                        bonus += if is_end { 1.65 } else { 1.15 };
                     }
                 }
             }
@@ -2923,14 +3003,7 @@ fn grammar_transition_bonus(
         }
     }
 
-    // 3c. 常见动体结构「出了/花了/交了/捐了 + 钱/事/力」及能愿助动词「才会/才能/才敢 + 单字动词」句法补偿
-    if matches!(prev_word, "毫升" | "厘米" | "毫米" | "分米" | "公斤" | "千克")
-        && matches!(w, "出了" | "出钱" | "花了" | "交了" | "捐了")
-    {
-        bonus -= 2.55;
-    } else if prev_word == "豪绅" && matches!(w, "出了" | "出钱" | "的钱" | "的" | "捐钱" | "先出") {
-        bonus += 2.65;
-    }
+    // 3c. 常见动体结构「V了 + 钱/事/力」及能愿助动词「才会/才能/才敢 + 单字动词」句法补偿
     if matches!(
         prev_word,
         "出了" | "花了" | "交了" | "付了" | "捐了" | "退了" | "借了" | "欠了" | "赚了" | "挣了" | "亏了" | "拿了" | "收了" | "给了" | "赔了"
@@ -2939,16 +3012,6 @@ fn grammar_transition_bonus(
         "钱" | "事" | "力" | "门" | "国" | "错" | "血" | "汗" | "名" | "声" | "问题" | "故障" | "事故"
     ) {
         bonus += 3.95;
-    } else if prev_word == "除了" && matches!(w, "千百" | "百千") {
-        bonus -= 1.85;
-    }
-    if matches!(prev_word, "钱" | "的钱" | "出钱" | "花钱" | "交钱" | "捐钱")
-        && matches!(
-            w,
-            "百姓" | "大家" | "人们" | "别人" | "客户" | "用户" | "群众" | "三七" | "五五" | "四六" | "二八" | "如数"
-        )
-    {
-        bonus += 2.65;
     }
     if matches!(
         prev_word,

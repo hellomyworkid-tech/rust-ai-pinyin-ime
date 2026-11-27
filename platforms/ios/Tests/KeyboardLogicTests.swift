@@ -211,7 +211,7 @@ final class KeyboardLogicTests: XCTestCase {
         XCTAssertEqual(model.sentence, [
             IMESentencePart(text: "我想", pinned: false),
             IMESentencePart(text: "去", pinned: true),
-            IMESentencePart(text: "公园完", pinned: false),
+            IMESentencePart(text: "公园玩", pinned: false),
         ])
     }
 

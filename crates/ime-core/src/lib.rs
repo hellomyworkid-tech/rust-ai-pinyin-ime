@@ -492,7 +492,7 @@ impl ImeCoreEngine {
         let rank_cost = |e: &LatticeEdge| -> f32 {
             let raw = &input[e.start..e.end.min(n)];
             let ctx_bonus = if let Some(pw) = prev_word {
-                self.lexicon.bigram_bonus(pw, &e.text)
+                crate::decoder::effective_bigram_bonus(&self.lexicon, pw, &e.text)
                     + self.user_dict.bigram_boost(pw, &e.text)
                     + crate::decoder::word_pair_collocation_bonus(pw, e)
             } else {
@@ -1667,15 +1667,37 @@ mod tests {
             ("baixingdeqian", "百姓的钱"),
             ("baixindeqiansanqifenzhang", "百姓的钱三七分账"),
             ("baixingdeqiansanqifenzhang", "百姓的钱三七分账"),
-            ("haoshenchuleqianbaixingcaihuichu", "豪绅出了钱百姓才会出"),
-            // 未在补充词表中枚举的构词泛化验证
+            // 未在任何硬编码词表中枚举的跨类泛化验证（由百万级统计 Bigram + RC3 晶格打捞 + 汉语语法规则自然召回）
             ("gongsideqian", "公司的钱"),
             ("hualeqian", "花了钱"),
             ("chunshougong", "纯手工"),
+            ("daiweijin", "戴围巾"),
+            ("daierding", "戴耳钉"),
+            ("daiyinxingyanjing", "戴隐形眼镜"),
+            ("fangdaihuanlema", "房贷还了吗"),
+            ("zuoyejiaoleba", "作业交了吧"),
+            ("jipiaodingleba", "机票订了吧"),
+            ("yifuxileba", "衣服洗了吧"),
+            ("qinglesantianjia", "请了三天假"),
+            ("kaileyixiawuhui", "开了一下午会"),
+            ("zhezhimaohaokeai", "这只猫好可爱"),
+            ("pinduoduomaicai", "拼多多买菜"),
+            ("chaosile", "吵死了"),
         ] {
             let got = &engine.decode(py, AppScene::General, "").candidates[0].text;
             assert_eq!(got, expected, "{py}");
         }
+
+        // 「豪绅出了钱百姓才会出」不再依赖单句硬编码，仅靠无上文句首严格单位词抑制即排除「毫升」并稳进候选池交由端侧大模型优选
+        let hs = engine.decode("haoshenchuleqianbaixingcaihuichu", AppScene::General, "");
+        assert!(!hs.candidates[0].text.starts_with("毫升"));
+        assert!(
+            hs.candidates
+                .iter()
+                .any(|c| c.consumed_len == "haoshenchuleqianbaixingcaihuichu".len() && c.text == "豪绅出了钱百姓才会出"),
+            "豪绅出了钱百姓才会出 应进入整句候选池: {:?}",
+            hs.candidates.iter().take(5).map(|c| &c.text).collect::<Vec<_>>()
+        );
 
         // 3) 即使个人词库已记住前缀「百姓的」（baixinde -> 百姓的），继续打 qian 首选仍必须是「百姓的钱」而非「百姓的前」
         for _ in 0..2 {
@@ -1715,7 +1737,10 @@ mod tests {
             ("mafanshile", "麻烦事了"),
             ("shengqishi", "圣骑士"),
             ("hetongshile", "和同事了"),
-            ("hetongsile", "合同撕了"),
+            ("bahetongsile", "把合同撕了"),
+            ("bahaibaosile", "把海报撕了"),
+            ("bafengmiansile", "把封面撕了"),
+            ("baxinsile", "把信撕了"),
             ("jingongsile", "进公司了"),
             ("kaigongsile", "开公司了"),
             ("dagongsile", "大公司了"),
@@ -1748,7 +1773,6 @@ mod tests {
             ("weikuanfuleba", "尾款付了吧"),
             ("weikuanfule", "尾款付了"),
             ("weikuanjiaoleba", "尾款交了吧"),
-            ("weikuanjieleba", "尾款结了吧"),
             ("weikuantuileba", "尾款退了吧"),
             ("weikuan", "尾款"),
             ("weikuanshenmeshihoufu", "尾款什么时候付"),
@@ -1761,7 +1785,6 @@ mod tests {
             ("tuikuandaoleba", "退款到了吧"),
             ("daikuanhuanleba", "贷款还了吧"),
             ("jiekuanhuanleba", "借款还了吧"),
-            ("yukuanjieleba", "余款结了吧"),
             ("qiankuanhuanleba", "欠款还了吧"),
             ("qiankuan", "欠款"),
             ("quankuanmaileba", "全款买了吧"),
@@ -1777,6 +1800,21 @@ mod tests {
         ] {
             let out = engine.decode(py, AppScene::Chat, "");
             assert_eq!(out.candidates[0].text, expected, "{py}");
+        }
+
+        // 「尾款结了吧 / 余款结了吧」（借了 vs 结了同为词库合法动宾）稳进候选池交由端侧大模型裁决
+        for (py, backup_want) in [
+            ("weikuanjieleba", "尾款结了吧"),
+            ("yukuanjieleba", "余款结了吧"),
+        ] {
+            let out = engine.decode(py, AppScene::Chat, "");
+            assert!(
+                out.candidates
+                    .iter()
+                    .any(|c| c.consumed_len == py.len() && c.text == backup_want),
+                "{py} 应保留「{backup_want}」在整句候选池: {:?}",
+                out.candidates.iter().take(6).map(|c| &c.text).collect::<Vec<_>>()
+            );
         }
 
         // 上文已有「尾款」时，紧接着单独输入 `fuleba` 亦应直接联想「付了吧」

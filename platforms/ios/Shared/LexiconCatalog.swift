@@ -33,16 +33,16 @@ struct LexiconRelease: Identifiable, Equatable {
 enum LexiconCatalog {
     static let filePrefix = "merged_lexicon-"
 
-    /// 这一版 App 要用的词库。2026.11.12.2 取代 2026.11.12：编译规则改成可复现（同分词条按固定顺序排），
-    /// 用发布页上的源码包能编出逐字节相同的文件
+    /// 这一版 App 要用的词库。2026.11.27 在雾凇词表基础上融合 Fcitx5 libime 100 万统计二元语法对（LGPL-2.1+，
+    /// 依 LGPL-2.1 §3 以 GPL-3.0 兼容发布），并用发布页上的源码包可离线重编出逐字节相同的文件
     static let current = LexiconRelease(
-        version: "2026.11.12.2",
-        downloadURL: URL(string: "https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime/releases/download/lexicon-2026.11.12.2/merged_lexicon-2026.11.12.2.bin.xz")!,
-        bytes: 11_511_512,
-        sha256: "ff916e0e5ea0e8aedfd4186e14f5f1173f860edf0ccfd4bf905f2026141e2cb3",
-        installedBytes: 57_956_668,
-        installedSHA256: "70da48fd0d01f04c4b109187aa5d21006ee69305cbdd3e3d7b5090c7e01d582f",
-        sources: "雾凇拼音 rime-ice（基础词库、8105 字表、英文词库，2026-10-01 版），GPL-3.0"
+        version: "2026.11.27",
+        downloadURL: URL(string: "https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime/releases/download/lexicon-2026.11.27/merged_lexicon-2026.11.27.bin.xz")!,
+        bytes: 25_025_488,
+        sha256: "3eb3c2ae2bb0f0c9d4abc572111ec791167f32596ed212908d529b7bd6169dc3",
+        installedBytes: 98_744_980,
+        installedSHA256: "0398dde8fa1e0f6b3fadedf9e94aefcdd96273aaeb26e4ae7323b53a0925db67",
+        sources: "雾凇拼音 rime-ice（2026-10-01，GPL-3.0）+ Fcitx5 libime 中文二元语法模型（2026-06-29，LGPL-2.1+）"
     )
 
     /// 键盘该用的完整词库：当前版本装好了就用它；没有就用目录里装好的别的版本

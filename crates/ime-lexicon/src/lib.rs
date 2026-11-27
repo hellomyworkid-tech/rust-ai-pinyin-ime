@@ -401,6 +401,7 @@ impl CompiledLexicon {
         let base_path = seed_dir.join("rime_ice.base.dict.yaml");
         let eng_path = seed_dir.join("melt_eng.dict.yaml");
         let bigram_path = seed_dir.join("wanxiang.bigram.tsv");
+        let caps_path = seed_dir.join("word_cost_caps.tsv");
 
         if base_path.exists() {
             builder.load_rime_dict_file(&base_path, 1.0, DomainTag::General)?;
@@ -410,6 +411,9 @@ impl CompiledLexicon {
         }
         if bigram_path.exists() {
             builder.load_bigram_file(&bigram_path)?;
+        }
+        if caps_path.exists() {
+            builder.load_cost_caps_file(&caps_path)?;
         }
         let compiled = builder.build();
         if rejected_images > 0 {
@@ -455,6 +459,8 @@ pub struct MultiSourceBuilder {
     /// 聚合键 `(text, syllable_key)` -> 词条
     merged_entries: HashMap<(String, String), LexiconEntry>,
     bigrams: HashMap<String, f32>,
+    /// 构建期词频代价上界校准 `(text, syllable_key)` -> max_cost（仅压低过高的原始 cost）
+    cost_caps: HashMap<(String, String), f32>,
 }
 
 impl Default for MultiSourceBuilder {
@@ -468,6 +474,7 @@ impl MultiSourceBuilder {
         Self {
             merged_entries: HashMap::new(),
             bigrams: HashMap::new(),
+            cost_caps: HashMap::new(),
         }
     }
 
@@ -699,6 +706,33 @@ impl MultiSourceBuilder {
         Ok(())
     }
 
+    /// 导入构建期词频代价上界校准表（格式：`词条文本 \t 音节键 \t 最大cost`）
+    pub fn load_cost_caps_str(&mut self, content: &str) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = trimmed.split('\t').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let text = parts[0].trim();
+            let syl_key = parts[1].trim();
+            if let Ok(cap) = parts[2].trim().parse::<f32>() {
+                if cap.is_finite() && cap > 0.0 {
+                    self.cost_caps.insert((text.to_string(), syl_key.to_string()), cap);
+                }
+            }
+        }
+    }
+
+    pub fn load_cost_caps_file(&mut self, path: impl AsRef<Path>) -> Result<(), LexiconError> {
+        let content = std::fs::read_to_string(path)?;
+        self.load_cost_caps_str(&content);
+        Ok(())
+    }
+
     /// 完成词频对数平滑归一化并构建全部前缀树索引，直接得到 `AIMELX03` 视图（自有内存，不落盘）
     pub fn build(self) -> CompiledLexicon {
         let parts = self.build_parts();
@@ -731,6 +765,12 @@ impl MultiSourceBuilder {
             if !entry.is_english && entry.pinyin_syllables.len() >= 2 {
                 let len_bonus = (entry.pinyin_syllables.len() as f32 - 1.0) * 1.15;
                 base_cost = (base_cost - len_bonus).max(0.5);
+            }
+            if let Some(&cap) = self
+                .cost_caps
+                .get(&(entry.text.clone(), entry.syllable_key.clone()))
+            {
+                base_cost = base_cost.min(cap);
             }
             entry.cost = base_cost;
         }

@@ -13,7 +13,7 @@ settings:
     SWIFT_VERSION: "5.0"
     TARGETED_DEVICE_FAMILY: "1"
     MARKETING_VERSION: "1.0.1"
-    CURRENT_PROJECT_VERSION: &build_version "2"
+    CURRENT_PROJECT_VERSION: &build_version "3"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
     # ImeFFI.xcframework 只有 arm64（真机、Apple 芯片模拟器）。不排除 x86_64 的话，
     # 不指定具体模拟器的 Release 构建（generic/platform=iOS Simulator）会因为缺 x86_64 的库而链接失败

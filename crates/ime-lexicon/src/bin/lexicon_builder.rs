@@ -112,26 +112,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("2. 正在加载 melt_eng + 程序员规范大小写核心词库: {}", melt_eng.display());
     builder.load_english_dict_file(&melt_eng, 10.0)?;
 
-    println!("3. 正在加载万象双语二元语法模型 (Bigram): {}", wanxiang_bigram.display());
-    builder.load_bigram_file(&wanxiang_bigram)?;
-
-    // 扫描 data/raw/ 下的全量开源词库（如雾凇 8105、base、ext、melt_eng_full）。
+    // 扫描 data/raw/ 下的全量开源词库（*.dict.yaml）与统计二元语法表（*.bigram.tsv）。
     // read_dir 的顺序由文件系统决定（APFS、ext4、NTFS 各不相同），而同一词条出现在多个文件里时，
     // 先加载的文件决定它的声调、领域等字段：按文件名排序后再加载，换一台机器也编译出相同的词库。
     // 读目录出错就直接报错，不悄悄少加载一个文件
     let raw_dir = root.join("data/raw");
     if raw_dir.exists() {
-        let mut raw_files: Vec<(String, PathBuf)> = Vec::new();
+        let mut raw_dicts: Vec<(String, PathBuf)> = Vec::new();
+        let mut raw_bigrams: Vec<(String, PathBuf)> = Vec::new();
         for entry in std::fs::read_dir(&raw_dir)? {
             let path = entry?.path();
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             // 跳过隐藏文件（比如 macOS 打包带出来的 ._xxx.dict.yaml）
-            if name.ends_with(".dict.yaml") && !name.starts_with('.') {
-                raw_files.push((name.to_string(), path));
+            if name.starts_with('.') {
+                continue;
+            }
+            if name.ends_with(".dict.yaml") {
+                raw_dicts.push((name.to_string(), path));
+            } else if name.ends_with(".bigram.tsv") {
+                raw_bigrams.push((name.to_string(), path));
             }
         }
-        raw_files.sort();
-        for (name, path) in &raw_files {
+        raw_dicts.sort();
+        raw_bigrams.sort();
+        for (name, path) in &raw_dicts {
             println!("   [+] 正在融合全量开源词表: {}", path.display());
             if name.contains("eng") {
                 builder.load_english_dict_file(path, 1.0)?;
@@ -139,6 +143,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 builder.load_rime_dict_file(path, 1.0, DomainTag::General)?;
             }
         }
+        for (_, path) in &raw_bigrams {
+            println!("   [+] 正在加载统计二元语法表 (Bigram): {}", path.display());
+            builder.load_bigram_file(path)?;
+        }
+    }
+
+    println!("3. 正在加载项目精校跨语种二元语法种子表 (Bigram): {}", wanxiang_bigram.display());
+    builder.load_bigram_file(&wanxiang_bigram)?;
+
+    let cost_caps = seed_dir.join("word_cost_caps.tsv");
+    if cost_caps.exists() {
+        println!("4. 正在加载词频代价上界校准表: {}", cost_caps.display());
+        builder.load_cost_caps_file(&cost_caps)?;
     }
 
     let lexicon = builder.build();

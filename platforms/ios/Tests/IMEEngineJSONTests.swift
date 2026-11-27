@@ -43,12 +43,12 @@ final class IMEEngineJSONTests: XCTestCase {
         let view = try Fixtures.view("update_long_sentence")
         XCTAssertEqual(view.preeditText, "wo'xiang'qu'gong'yuan'wan")
         XCTAssertEqual(view.syllableSpans.map(\.codeKey), ["wo", "xiang", "qu", "gong", "yuan", "wan"])
-        XCTAssertEqual(view.syllableSpans.map(\.text).joined(), "我想去公园完")
+        XCTAssertEqual(view.syllableSpans.map(\.text).joined(), "我想去公园玩")
         XCTAssertEqual(view.totalCandidates, 35)
         XCTAssertEqual(view.visibleCandidates.count, 30)
         XCTAssertEqual(view.visibleCandidates.first?.tag, "[整句]")
         XCTAssertEqual(view.visibleCandidates.first?.consumedLen, 20)
-        XCTAssertEqual(view.composedFullSentence, "我想去公园完")
+        XCTAssertEqual(view.composedFullSentence, "我想去公园玩")
         XCTAssertNil(view.activeSyllableIndex)
     }
 

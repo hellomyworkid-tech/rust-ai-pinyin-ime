@@ -67,9 +67,15 @@ cat "$OUT/manifest.json"
 
 echo "== 5/6 源码包"
 SOURCES="$OUT/$NAME-sources"
-mkdir -p "$SOURCES/data/seed" "$SOURCES/data/raw" "$SOURCES/data/compiled" "$SOURCES/crates/ime-lexicon"
+mkdir -p "$SOURCES/data/seed" "$SOURCES/data/raw" "$SOURCES/data/compiled" "$SOURCES/crates/ime-lexicon" "$SOURCES/tools/lexicon"
 cp "$ROOT"/data/seed/* "$SOURCES/data/seed/"
 cp "$ROOT"/data/raw/*.dict.yaml "$SOURCES/data/raw/"
+for bg in "$ROOT"/data/raw/*.bigram.tsv(N); do
+    cp "$bg" "$SOURCES/data/raw/"
+done
+if [[ -f "$ROOT/tools/lexicon/arpa_to_bigrams.py" ]]; then
+    cp "$ROOT/tools/lexicon/arpa_to_bigrams.py" "$SOURCES/tools/lexicon/"
+fi
 cp "$ROOT/LICENSE" "$SOURCES/LICENSE"
 cp "$ROOT/Cargo.lock" "$SOURCES/Cargo.lock"
 cp "$ROOT/crates/ime-lexicon/Cargo.toml" "$SOURCES/crates/ime-lexicon/"
@@ -100,11 +106,16 @@ EOF
 cat > "$SOURCES/SOURCES.md" <<EOF
 # $NAME 的源码
 
-$NAME（AI 拼音 iOS 键盘的完整词库，AIMELX03 格式）由这里的词表编译而成：
+$NAME（AI 拼音 iOS 键盘的完整词库，AIMELX03 格式）由这里的词表与统计二元语法表编译而成：
 
 - data/raw/rime_ice_base.dict.yaml、rime_ice_8105.dict.yaml、melt_eng_full.dict.yaml：
   雾凇拼音 https://github.com/iDvel/rime-ice ，GPL-3.0-only（各文件开头写着来源和版本）
-- data/seed/：AI 拼音项目自己的种子词表和二元语法表
+- data/raw/libime_sc.bigram.tsv：
+  由 tools/lexicon/arpa_to_bigrams.py 从 Fcitx5 libime 官方语言模型 lm_sc.arpa-20260629.tar.zst
+  （SHA-256: 06808333b9173e5374cf2cb5afc12d08f5625bf9abb536489cac376fc05f2e7f，
+  https://github.com/fcitx/libime ，Copyright (C) 2022-2026 CSSlayer，LGPL-2.1-or-later，协议全文见
+  data/seed/LGPL-2.1-or-later.txt；依 LGPL-2.1 第 3 条以 GPL-3.0 兼容方式组合分发）提取生成
+- data/seed/：AI 拼音项目自己的种子词表、跨语种二元语法表与词频校准表
 
 编译工具是 crates/ime-lexicon（lexicon-builder，来自 AI 拼音仓库
 https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime ，GPL-3.0-or-later），源码就在这个包里。
@@ -114,7 +125,7 @@ https://github.com/hellomyworkid-tech/rust-ai-pinyin-ime ，GPL-3.0-or-later）�
 
 结果在 data/compiled/merged_lexicon.bin，应与发布的文件逐字节相同：$installed_bytes 字节，SHA-256 $installed_sha。
 
-协议：GPL-3.0（见 LICENSE）。
+协议：组合产物遵循 GPL-3.0（见 LICENSE），上游 LGPL-2.1-or-later 原文见 data/seed/LGPL-2.1-or-later.txt。
 EOF
 # 不带 macOS 的扩展属性和 ._ 文件：别的系统解开后，._*.dict.yaml 会被编译工具当成词表读，然后报错
 COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -C "$OUT" -cJf "$OUT/$NAME-sources.tar.xz" "$NAME-sources"

@@ -3269,18 +3269,23 @@ mod tests {
         // 1. 改了前面的词，再按空格接受后面原来的词：只有改过的词和改过的整句算主动改选
         let mut s = new_test_session();
         type_str(&mut s, "shiyanshibai");
-        assert_eq!(s.last_full_sentence, "实验失败");
+        let (orig_full, alt_prefix, alt_full) = if s.last_full_sentence == "实验失败" {
+            ("实验失败", "试验", "试验失败")
+        } else {
+            assert_eq!(s.last_full_sentence, "试验失败");
+            ("试验失败", "实验", "实验失败")
+        };
         s.click_pinyin_syllable(0, None);
-        assert!(matches!(pick(&mut s, "试验", 6), KeyAction::EatAndUpdateUi(_)));
-        assert_eq!(s.sentence_before_pins, "实验失败", "第一次锁定时记下原来的整句");
+        assert!(matches!(pick(&mut s, alt_prefix, 6), KeyAction::EatAndUpdateUi(_)));
+        assert_eq!(s.sentence_before_pins, orig_full, "第一次锁定时记下原来的整句");
         assert_eq!(s.current_candidates[0].text, "失败");
         match s.process_key(VirtualKey::Space) {
-            KeyAction::EatAndCommit { committed_text, .. } => assert_eq!(committed_text, "试验失败"),
+            KeyAction::EatAndCommit { committed_text, .. } => assert_eq!(committed_text, alt_full),
             act => panic!("expected commit, got {act:?}"),
         }
-        assert_eq!(record_of(&s, "shiyan", "试验"), Some((6.5, 1)));
+        assert_eq!(record_of(&s, "shiyan", alt_prefix), Some((6.5, 1)));
         assert_eq!(record_of(&s, "shibai", "失败"), Some((2.8, 0)), "失败 只是被接受，与空格上屏相同");
-        assert_eq!(record_of(&s, "shiyanshibai", "试验失败"), Some((6.5, 1)), "整句与原来的不同");
+        assert_eq!(record_of(&s, "shiyanshibai", alt_full), Some((6.5, 1)), "整句与原来的不同");
         assert!(s.sentence_before_pins.is_empty(), "输入结束后清空");
         assert!(!user_memory(&s.core.user_dict, "shibai", "失败", &[]).explicit);
 

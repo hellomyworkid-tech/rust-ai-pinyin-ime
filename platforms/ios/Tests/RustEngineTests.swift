@@ -526,11 +526,24 @@ final class RustEngineTests: XCTestCase {
             ("jiewa", "接娃"),
             ("baixindeqian", "百姓的钱"),
             ("baixindeqiansanqifenzhang", "百姓的钱三七分账"),
-            ("haoshenchuleqianbaixingcaihuichu", "豪绅出了钱百姓才会出"),
+            // 百万级统计 Bigram + 通用汉语语法泛化回归（无硬编码领域词表）
+            ("fangdaihuanlema", "房贷还了吗"),
+            ("zuoyejiaoleba", "作业交了吧"),
+            ("daiweijin", "戴围巾"),
+            ("daierding", "戴耳钉"),
+            ("qinglesantianjia", "请了三天假"),
+            ("zhezhimaohaokeai", "这只猫好可爱"),
         ] {
             XCTAssertEqual(type(py).visibleCandidates.first?.text, expected, py)
             engine.reset()
         }
+
+        // 「豪绅出了钱百姓才会出」不再依赖单句硬编码：纯 L1 规则依靠句首严格单位词抑制排除「毫升」，
+        // 并将「豪绅」留在前排，整句语义消歧交由端侧大模型完成（见 crates/ime-ffi/tests/engine.rs）
+        let haoshen = type("haoshenchuleqianbaixingcaihuichu")
+        XCTAssertFalse(haoshen.composedFullSentence.hasPrefix("毫升"), haoshen.composedFullSentence)
+        XCTAssertTrue(haoshen.visibleCandidates.contains { $0.text == "豪绅" })
+        engine.reset()
     }
 
     /// 一次按键（解码 + JSON + Swift 解码）的耗时。打一句 19 个字母的话再取消，算每键平均

@@ -1,0 +1,30 @@
+# 词库编译期词频代价上界校准表（仅用于修正 rime-ice 语料分词残余导致的已知偏差）
+# 格式: 词条文本 \t 音节键 \t 最大 cost（仅当编译出的原始 cost 高于此值时压低至该上界）
+# 说明：此前硬编码在 crates/ime-core/src/lattice.rs::calibrated_word_cost 中，现迁出为数据文件在构建期融合。
+
+# 1. rime-ice 分词残余导致「四」单字频略低于「死」，「三是/四是」反超「三十/四十」，「十四」偏低
+四	si	8.05
+三十	san'shi	8.30
+四十	si'shi	8.65
+十四	shi'si	11.25
+
+# 2. 近年高频词在 2010s 语料中原始权重偏低的温和上界校准（不抬高绝对首位，仍交由 Bigram 与大模型裁决）
+尾款	wei'kuan	10.65
+欠款	qian'kuan	9.15
+首付	shou'fu	11.95
+人设	ren'she	10.55
+女频	nv'pin	10.75
+男频	nan'pin	10.85
+受众	shou'zhong	10.85
+短剧	duan'ju	12.15
+内卷	nei'juan	10.95
+复盘	fu'pan	10.95
+霸总	ba'zong	11.35
+团宠	tuan'chong	11.55
+二创	er'chuang	11.55
+拉新	la'xin	11.75
+投流	tou'liu	11.75
+出圈	chu'quan	11.65
+痛点	tong'dian	11.35
+甜宠	tian'chong	11.45
+塌房	ta'fang	11.85

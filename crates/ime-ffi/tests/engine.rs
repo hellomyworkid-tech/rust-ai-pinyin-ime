@@ -1936,7 +1936,13 @@ fn personal_prefix_recall_and_colloquial_compounds_rank_first() {
         ("jiewa", "接娃"),
         ("baixindeqian", "百姓的钱"),
         ("baixindeqiansanqifenzhang", "百姓的钱三七分账"),
-        ("haoshenchuleqianbaixingcaihuichu", "豪绅出了钱百姓才会出"),
+        ("daiweijin", "戴围巾"),
+        ("daierding", "戴耳钉"),
+        ("daiyinxingyanjing", "戴隐形眼镜"),
+        ("fangdaihuanlema", "房贷还了吗"),
+        ("zuoyejiaoleba", "作业交了吧"),
+        ("jipiaodingleba", "机票订了吧"),
+        ("qinglesantianjia", "请了三天假"),
     ] {
         let out = type_letters(&engine, py);
         assert_eq!(top_text(&out), want, "{py}");
@@ -2270,13 +2276,14 @@ fn colloquial_sile_phrases_rank_first_with_and_without_local_llm() {
         ("mojisile", "磨叽死了"),
         ("xiarensile", "吓人死了"),
         ("gangasile", "尴尬死了"),
-        ("hetongsile", "合同撕了"),
+        ("bahetongsile", "把合同撕了"),
+        ("bahaibaosile", "把海报撕了"),
         ("jingongsile", "进公司了"),
         ("youyisile", "有意思了"),
         ("mafanshile", "麻烦事了"),
         ("weikuanfuleba", "尾款付了吧"),
         ("weikuanfule", "尾款付了"),
-        ("weikuanjieleba", "尾款结了吧"),
+        ("weikuanjiaoleba", "尾款交了吧"),
         ("weikuanshenmeshihoufu", "尾款什么时候付"),
         ("huokuanfuleba", "货款付了吧"),
         ("fangzufuleba", "房租付了吧"),
@@ -2309,7 +2316,8 @@ fn colloquial_sile_phrases_rank_first_with_and_without_local_llm() {
                 (None, "weiqusile", "委屈死了"),
                 (None, "gaoxiaosile", "搞笑死了"),
                 (None, "xiarensile", "吓人死了"),
-                (None, "hetongsile", "合同撕了"),
+                (None, "bahetongsile", "把合同撕了"),
+                (Some("把"), "hetongsile", "合同撕了"),
                 (Some("遇到一件"), "mafanshile", "麻烦事了"),
                 (None, "weikuanfuleba", "尾款付了吧"),
                 (Some("双十一"), "weikuanfuleba", "尾款付了吧"),
@@ -2336,12 +2344,14 @@ fn colloquial_sile_phrases_rank_first_with_and_without_local_llm() {
                 );
                 engine.reset();
             }
-            // 专业语境下同音词仍可由端侧大模型翻盘（如「显存位宽」「依照前款」）
+            // 专业语境及需世界知识消歧的同音整句由端侧大模型稳定优选（如「显存位宽」「依照前款」「尾款结了吧」「豪绅出了钱百姓才会出」）
             for (ctx, py, want_after_ai) in [
-                ("显存", "weikuan", "位宽"),
-                ("依照", "qiankuan", "前款"),
+                (Some("显存"), "weikuan", "位宽"),
+                (Some("依照"), "qiankuan", "前款"),
+                (None, "weikuanjieleba", "尾款结了吧"),
+                (None, "haoshenchuleqianbaixingcaihuichu", "豪绅出了钱百姓才会出"),
             ] {
-                engine.set_context(Some(ctx));
+                engine.set_context(ctx);
                 let _ = type_letters(&engine, py);
                 if engine.ai_result_pending() {
                     let _ = rx.recv_timeout(Duration::from_secs(10));
@@ -2350,7 +2360,7 @@ fn colloquial_sile_phrases_rank_first_with_and_without_local_llm() {
                 assert_eq!(
                     refreshed["visible_candidates"][0]["text"],
                     want_after_ai,
-                    "ctx={ctx} py={py} after AI"
+                    "ctx={ctx:?} py={py} after AI"
                 );
                 engine.reset();
             }

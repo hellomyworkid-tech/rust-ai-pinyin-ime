@@ -29,8 +29,10 @@ struct AboutView: View {
             }
 
             Section {
-                credit("雾凇拼音 rime-ice", role: "完整词库的来源（第一次打开时下载，不在安装包里）", license: "GPL-3.0",
+                credit("雾凇拼音 rime-ice", role: "完整词库的词表来源（第一次打开时下载，不在安装包里）", license: "GPL-3.0",
                        url: "https://github.com/iDvel/rime-ice")
+                credit("Fcitx5 libime 中文语言模型", role: "完整词库的统计二元语法来源（随完整词库下载，不在安装包里）", license: "LGPL-2.1+",
+                       url: "https://github.com/fcitx/libime")
                 credit("Android 拼音输入法词库", role: "基础词库（完整词库下完之前用）", license: "Apache-2.0",
                        url: "https://android.googlesource.com/platform/packages/inputmethods/PinyinIME")
                 credit("Unicode CLDR", role: "候选里的表情和它们的中文名", license: "Unicode-3.0",
